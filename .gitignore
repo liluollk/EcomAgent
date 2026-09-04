@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.eggs/
+build/
+dist/
+
+# Node 前端（构建产物与依赖）
+frontend/node_modules/
+frontend/dist/
+demo/frontend/node_modules/
+demo/frontend/dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 运行时数据（会话 JSONL / 长期记忆 / 渠道配置运行产物）
+data/sessions/
+data/memory/
+data/channels.json
+data/providers.json
+!data/.gitkeep
+
+# 本机会话/日志
+.zcode/
+*.log
+
+# 测试运行报告
+/data/test-reports/

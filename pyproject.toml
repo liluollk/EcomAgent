@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-agent-runtime"
+version = "0.1.0"
+description = "电商运营 Agent Runtime — 多后端可扩展 Agent 执行引擎"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.11,<3",
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "mcp>=1.28,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12.0",
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["agent_backend*", "agent_runtime*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
