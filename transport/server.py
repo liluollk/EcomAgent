@@ -14,6 +14,7 @@ from __future__ import annotations
 import json as _json
 import asyncio
 import os
+import time
 
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,7 @@ from transport.state import (
     sessions,
     workspaces,
     session_ws_clients,
+    APPROVAL_REGISTRY,
     apply_mode_change,
     broadcast_mode,
     _start_channel_api,
@@ -42,6 +44,8 @@ from transport.router.workspaces import router as workspaces_router
 from transport.router.skills import router as skills_router
 from transport.router.workspace_data import router as workspace_data_router
 from transport.router.mcp import router as mcp_router
+from transport.router.approvals import router as approvals_router
+from transport.router.dashboard import router as dashboard_router
 
 # ---------------------------------------------------------------------------
 # 应用生命周期
@@ -73,6 +77,8 @@ app.include_router(workspaces_router)
 app.include_router(skills_router)
 app.include_router(workspace_data_router)
 app.include_router(mcp_router)
+app.include_router(approvals_router)
+app.include_router(dashboard_router)
 
 # ---------------------------------------------------------------------------
 # 前端静态文件
@@ -166,13 +172,23 @@ async def _ws_loop(
     loop = asyncio.get_running_loop()
 
     async def resolve_permission(request) -> bool:
-        """权限解析器：挂起直到前端回传 permission_response。"""
+        """权限解析器：挂起直到前端回传 permission_response 或审批中心决定。"""
         future = loop.create_future()
         pending_decisions[request.request_id] = future
+        # 同时登记到跨会话审批注册表：审批中心页面经 REST 聚合与决定
+        APPROVAL_REGISTRY[request.request_id] = {
+            "future": future,
+            "session_id": session_id,
+            "tool_name": request.tool_name,
+            "tool_input": request.tool_input,
+            "reason": request.reason,
+            "timestamp": time.time(),
+        }
         try:
             return await future
         finally:
             pending_decisions.pop(request.request_id, None)
+            APPROVAL_REGISTRY.pop(request.request_id, None)
 
     agent.set_permission_resolver(resolve_permission)
 
