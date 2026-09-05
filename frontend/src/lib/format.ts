@@ -66,14 +66,21 @@ export function prettyJSON(v: unknown): string {
   }
 }
 
+/** 时间戳归一：接受毫秒 / 秒 / ISO 字符串，统一为毫秒（后端混用 time.time() 与 ISO） */
+export function normalizeTs(ts: number | string): number {
+  const ms = typeof ts === 'string' ? new Date(ts).getTime() : ts;
+  return ms < 1e12 ? ms * 1000 : ms;
+}
+
 /** 相对时间：刚刚 / x 分钟前 / HH:mm / MM-DD HH:mm */
-export function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
+export function relativeTime(ts: number | string): string {
+  const ms = normalizeTs(ts);
+  const diff = Date.now() - ms;
   if (diff < 60_000) return '刚刚';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  const d = new Date(ts);
+  const d = new Date(ms);
   const now = new Date();
-  const hm = clockTime(ts);
+  const hm = clockTime(ms);
   if (d.toDateString() === now.toDateString()) return hm;
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
 }

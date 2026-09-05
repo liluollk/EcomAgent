@@ -72,6 +72,9 @@ def test_cs_role_gate_blocks_write():
     import asyncio
     session, events = asyncio.run(run_turn(CUSTOMER_SERVICE))
     from events.agent_event import ToolResultEvent
+    # 拦截对调用方可见：tool_start（尝试了什么）+ 错误结果（为什么被拦）
+    starts = [e for e in events if isinstance(e, ToolStartEvent)]
+    assert len(starts) == 1 and starts[0].tool_name == "update_price"
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert results and results[0].is_error is True
     assert "无权" in results[0].result

@@ -474,6 +474,8 @@ class BaseAgent:
         perm_result = self._check_permission(event)
 
         if perm_result.action == PreToolUseAction.BLOCK:
+            # 先发 tool_start 让调用方可见"尝试了什么"，紧跟错误结果展示拦截原因
+            yield event
             denied = ToolResultEvent(
                 tool_use_id=event.tool_use_id,
                 tool_name=event.tool_name,

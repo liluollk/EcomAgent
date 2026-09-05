@@ -51,6 +51,8 @@ export default function App() {
   const [activeProvider, setActiveProvider] = useState(() => localStorage.getItem('ob.provider') || 'openai');
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [role, setRole] = useState<string>(() => localStorage.getItem('ob.role') || 'operator');
+  /** 审批中心等外部入口的决定（requestId → 结果）：同步对话内仍挂"等待确认"的权限卡 */
+  const [externalDecisions, setExternalDecisions] = useState<Record<string, 'approved' | 'denied'>>({});
 
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
@@ -210,7 +212,7 @@ export default function App() {
           break;
         }
 
-        case 'tool_result':
+        case 'tool_result': {
           setMessagesBySession((prev) => {
             const list = prev[sid] ?? [];
             const next = [...list];
@@ -235,7 +237,16 @@ export default function App() {
             }
             return prev;
           });
+          // 工具已出结果但权限卡仍在等待 → 决定来自审批中心等外部入口，同步卡片状态
+          const permId = `perm_${event.tool_use_id}`;
+          setExternalDecisions((prev) => {
+            if (prev[permId]) return prev;
+            if (!event.is_error) return { ...prev, [permId]: 'approved' };
+            if (event.result.startsWith('[已拒绝]')) return { ...prev, [permId]: 'denied' };
+            return prev;
+          });
           break;
+        }
 
         case 'permission_request':
           pushMessage(sid, {
@@ -473,11 +484,33 @@ export default function App() {
     [pushMessage],
   );
 
+  /** 切换思考强度：PATCH 当前供应商 thinking_level，成功后刷新供应商列表 */
+  const handleThinkingLevelChange = useCallback(
+    async (level: string) => {
+      const name = activeProvider;
+      if (!name) return;
+      try {
+        const resp = await fetch(`/providers/${name}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ thinking_level: level || null }),
+        });
+        if (resp.ok) {
+          await fetchProviders();
+        }
+      } catch {
+        /* 失败静默 */
+      }
+    },
+    [activeProvider, fetchProviders],
+  );
+
   const activeMessages = activeId ? messagesBySession[activeId] ?? [] : [];
   const activeTitle = sessions.find((s) => s.session_id === activeId)?.title ?? '';
   const activeRole = sessions.find((s) => s.session_id === activeId)?.user?.role ?? '';
   const activeRoleLabel = ROLE_LABELS[activeRole] ?? '';
   const activeUserId = sessions.find((s) => s.session_id === activeId)?.user?.user_id ?? '';
+  const thinkingLevel = providers.find((p) => p.name === activeProvider)?.thinking_level ?? 'high';
 
   const handleRoleChange = (next: string) => {
     setRole(next);
@@ -544,6 +577,9 @@ export default function App() {
             onSend={handleSend}
             onAbort={handleAbort}
             onRespondPermission={respondPermission}
+            externalDecisions={externalDecisions}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={handleThinkingLevelChange}
           />
         ) : page === 'dashboard' ? (
           <DashboardPage />

@@ -7,7 +7,7 @@ interface PendingApproval {
   tool_name: string;
   tool_input: Record<string, unknown>;
   reason: string;
-  timestamp: number;
+  timestamp: number | string;
 }
 
 interface ApprovalRecord {
@@ -16,7 +16,7 @@ interface ApprovalRecord {
   tool_name: string;
   tool_input?: Record<string, unknown>;
   approved: boolean;
-  timestamp: number;
+  timestamp: number | string;
 }
 
 /** 审批中心 — 跨会话权限请求的聚合审批与历史（REST 双入口之一，对话内权限卡照常可用）。 */

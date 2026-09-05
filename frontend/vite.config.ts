@@ -12,6 +12,7 @@ export default defineConfig({
       '/providers': 'http://localhost:8000',
       '/sources': 'http://localhost:8000',
       '/skills': 'http://localhost:8000',
+      '/workspace': 'http://localhost:8000',
       '/workspaces': 'http://localhost:8000',
       '/mcp': 'http://localhost:8000',
       '/ws': {

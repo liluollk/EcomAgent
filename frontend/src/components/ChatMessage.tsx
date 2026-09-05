@@ -8,13 +8,21 @@ import { PermissionCard } from './PermissionCard';
 export function ChatMessageView({
   msg,
   onRespondPermission,
+  externalDecision,
 }: {
   msg: Msg;
   onRespondPermission: (requestId: string, approved: boolean) => void;
+  externalDecision?: 'approved' | 'denied';
 }) {
   if (msg.role === 'system') {
     if (msg.permission) {
-      return <PermissionCard permission={msg.permission} onRespond={onRespondPermission} />;
+      return (
+        <PermissionCard
+          permission={msg.permission}
+          onRespond={onRespondPermission}
+          externalDecision={externalDecision}
+        />
+      );
     }
     return (
       <div className="flex justify-center">

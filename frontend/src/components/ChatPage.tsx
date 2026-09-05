@@ -17,6 +17,10 @@ interface ChatPageProps {
   onSend: (text: string) => void;
   onAbort: () => void;
   onRespondPermission: (requestId: string, approved: boolean) => void;
+  /** 审批中心等外部入口的决定（requestId → 结果），用于同步对话内权限卡 */
+  externalDecisions: Record<string, 'approved' | 'denied'>;
+  thinkingLevel: string;
+  onThinkingLevelChange: (level: string) => void;
 }
 
 /** 对话页：消息流 + 底部输入（含模型/权限切换）；空状态展示快捷指令 */
@@ -33,6 +37,9 @@ export function ChatPage({
   onSend,
   onAbort,
   onRespondPermission,
+  externalDecisions,
+  thinkingLevel,
+  onThinkingLevelChange,
 }: ChatPageProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -58,7 +65,12 @@ export function ChatPage({
         <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1060px] space-y-4 px-5 py-5">
             {messages.map((m) => (
-              <ChatMessageView key={m.id} msg={m} onRespondPermission={onRespondPermission} />
+              <ChatMessageView
+                key={m.id}
+                msg={m}
+                onRespondPermission={onRespondPermission}
+                externalDecision={m.permission ? externalDecisions[m.permission.requestId] : undefined}
+              />
             ))}
             {isStreaming && (
               <div className="flex animate-fade-up items-center gap-2 text-[12px] text-ink-3">
@@ -79,6 +91,8 @@ export function ChatPage({
         activeProvider={activeProvider}
         onActivateProvider={onActivateProvider}
         onModeChange={onModeChange}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={onThinkingLevelChange}
       />
     </div>
   );
