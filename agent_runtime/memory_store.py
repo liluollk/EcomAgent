@@ -12,11 +12,13 @@
     reference 外部参考
 
 工作流（简单实现，检索的"模型智能筛选"先用关键词匹配，接口可替换）：
-- 写入：
+- 写入（全部经矛盾整合层，Mem0 式 ADD/UPDATE/DELETE/NOOP 四判定）：
     1. 自动提取：每个产生工具调用的 turn 结束，沉淀为 project（用户纠正
        语气时 feedback）类记忆文件，并重建索引。
     2. 显式："记住…" / "请记住…" → 创建或更新记忆文件（含 user 偏好归类）；
        "记到参考…" / "作为参考…" / "记住reference…" → 写入 reference 类型。
+    3. 整合判定器可注入：默认规则版（同名 slug → 更新覆盖、完全重复 →
+       跳过、其余新增，宁新增不误伤）；接真实 LLM 后可注入语义级判定器。
 - 遗忘："忘记…" → 删除匹配的记忆文件并重建索引。
 - 检索：新 turn 构建系统提示词时注入 MEMORY.md 索引（前 N 行）+ 与当前
   请求关键词命中的最多 5 个记忆文件全文。
@@ -57,8 +59,16 @@ def _slug(name: str) -> str:
 class MemoryStore:
     """索引文件 + 独立记忆文件的内存/磁盘实现。"""
 
-    def __init__(self, root: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        integrator: Optional[Any] = None,
+    ) -> None:
         self._root = root or _memory_root()
+        # 矛盾整合判定器：integrator(new_name, new_text, candidates) -> 决策串。
+        # 决策串 ∈ "add" / "update:<slug>" / "obsolete:<slug>" / "noop"；
+        # 缺省用保守规则版（宁新增不误伤），接真实 LLM 后可注入语义判定。
+        self._integrator = integrator or self._rule_integrator
 
     # ------------------------------------------------------------------
     # 路径
@@ -98,8 +108,11 @@ class MemoryStore:
             return explicit
         return self._auto_extract(workspace_id, user_message, messages or [])
 
-    def remember(self, workspace_id: str, text: str, mem_type: str = DEFAULT_TYPE) -> str:
-        """显式记忆：创建或更新一个记忆文件并重建索引。返回记忆名。"""
+    def remember(self, workspace_id: str, text: str, mem_type: str = DEFAULT_TYPE) -> tuple[str, str]:
+        """显式记忆：经矛盾整合后写入并重建索引。返回 (action, 记忆名)。
+
+        action ∈ store（新增）/ updated（覆盖或替换既有记忆）/ skip（冗余跳过）。
+        """
         name = text.strip().splitlines()[0][:30] if text.strip() else "记忆"
         body = (
             f"---\nname: {name}\ndescription: {text[:80]}\ntype: {mem_type}\n---\n\n"
@@ -109,9 +122,69 @@ class MemoryStore:
             "- 来源：用户显式要求记住。\n"
             "- 应用：后续同类请求直接采用本条记忆。\n"
         )
+        action = self._consolidated_write(workspace_id, name, body, mem_type)
+        return (action, name)
+
+    # ------------------------------------------------------------------
+    # 矛盾整合（Mem0 式 ADD/UPDATE/DELETE/NOOP）
+    # ------------------------------------------------------------------
+
+    def _candidates(self, workspace_id: str) -> list[dict[str, str]]:
+        """收集既有记忆元数据，供整合判定器比对。"""
+        out: list[dict[str, str]] = []
+        for fname in self._list_memory_files(workspace_id):
+            meta = self._read_frontmatter(workspace_id, fname)
+            out.append(
+                {
+                    "slug": fname[: -len(".md")],
+                    "name": meta.get("name", ""),
+                    "description": meta.get("description", ""),
+                    "type": meta.get("type", DEFAULT_TYPE),
+                }
+            )
+        return out
+
+    def _rule_integrator(self, new_name: str, new_text: str, candidates: list[dict[str, str]]) -> str:
+        """保守规则判定：同名 slug → 更新覆盖；完全重复 → 跳过；其余新增。
+
+        宁新增不误伤：语义级"改口"（同一主题换了数值/表述）不做规则判定，
+        留给注入的 LLM 判定器（Mem0 路线的分工方式）。
+        """
+        new_slug = _slug(new_name)
+        for c in candidates:
+            if c["slug"] == new_slug:
+                return f"update:{c['slug']}"
+            if new_text.strip() and new_text.strip() == c["description"].strip():
+                return "noop"
+        return "add"
+
+    def _consolidated_write(self, workspace_id: str, name: str, body: str, mem_type: str) -> str:
+        """按整合判定结果写入，返回 action ∈ store/updated/skip。"""
+        decision = self._integrator(name, body, self._candidates(workspace_id))
+        if decision == "noop":
+            return "skip"
+        if decision.startswith("obsolete:"):
+            old_slug = decision.split(":", 1)[1].strip()
+            try:
+                os.remove(self._file_path(workspace_id, old_slug))
+            except OSError:
+                pass
+            self._write_memory_file(workspace_id, name, body)
+            self.refresh_index(workspace_id)
+            return "updated"
+        if decision.startswith("update:"):
+            old_slug = decision.split(":", 1)[1].strip()
+            if old_slug in [c["slug"] for c in self._candidates(workspace_id)]:
+                # 覆盖原文件（保留原文件名作稳定标识，内容取最新）
+                os.makedirs(self._ws_dir(workspace_id), exist_ok=True)
+                with open(self._file_path(workspace_id, old_slug), "w", encoding="utf-8") as f:
+                    f.write(body)
+                self.refresh_index(workspace_id)
+                return "updated"
+            # 判定器给出了不存在的 slug：回退为新增
         self._write_memory_file(workspace_id, name, body)
         self.refresh_index(workspace_id)
-        return name
+        return "store"
 
     def forget(self, workspace_id: str, keyword: str) -> list[str]:
         """遗忘：删除名称或正文含关键词的记忆文件并重建索引，返回删除的文件名。"""
@@ -168,9 +241,8 @@ class MemoryStore:
             "- 来源：自动提取（对话结束时分析沉淀）。\n"
             "- 应用：后续同类请求参考该轮决策与进度，避免重复排查。\n"
         )
-        self._write_memory_file(workspace_id, name, body)
-        self.refresh_index(workspace_id)
-        return ("store", name)
+        action = self._consolidated_write(workspace_id, name, body, mem_type)
+        return (action, name)
 
     # ------------------------------------------------------------------
     # 显式指令解析
@@ -187,17 +259,14 @@ class MemoryStore:
             text = m.group(1).strip().rstrip("。.")
             if not text:
                 return None
-            return (
-                "updated" if self._name_exists(workspace_id, text[:60]) else "store",
-                self.remember(workspace_id, text, "reference"),
-            )
+            return self.remember(workspace_id, text, "reference")
         m = re.search(r"(?:记住|请记住|记下|记得)\s*[:：，,]?\s*(.+)", user_message)
         if m:
             text = m.group(1).strip().rstrip("。.")
             if not text:
                 return None
             mem_type = "user" if re.search(r"(?:我|我的|偏好|喜欢|习惯)", text) else DEFAULT_TYPE
-            return ("updated" if self._name_exists(workspace_id, text[:60]) else "store", self.remember(workspace_id, text, mem_type))
+            return self.remember(workspace_id, text, mem_type)
         m = re.search(r"(?:忘记|忘了|删除记忆)\s*[:：，,]?\s*(.+)", user_message)
         if m:
             removed = self.forget(workspace_id, m.group(1).strip())

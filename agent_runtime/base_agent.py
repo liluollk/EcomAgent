@@ -244,7 +244,21 @@ class BaseAgent:
 
         messages, compressed = self._compressor.collapse(messages)
         if compressed:
-            yield StatusEvent(message="上下文超限，已压缩早期会话为摘要")
+            sunk = ""
+            try:
+                for m in messages:
+                    if m.get("role") == "system" and str(m.get("content", "")).startswith("[会话摘要"):
+                        ws_id = session.workspace.workspace_id
+                        # 压缩-记忆联动：摘要易失（再次压缩会被卷走），决策持久
+                        # （沉淀进记忆）；固定命名使反复压缩经整合层覆盖为最新一份
+                        DEFAULT_MEMORY_STORE.remember(
+                            ws_id, f"会话摘要_{ws_id}\n{m['content']}", "project"
+                        )
+                        sunk = "，决策已沉淀至长期记忆"
+                        break
+            except Exception:
+                sunk = ""  # 联动失败不阻塞主链路
+            yield StatusEvent(message=f"上下文超限，已压缩早期会话为摘要{sunk}")
 
         yield StatusEvent(message="委托后端执行...")
 

@@ -274,3 +274,80 @@ def test_manual_compact_via_agent(monkeypatch, tmp_path):
     assert changed is True
     assert session.messages[0]["role"] == "system"
     assert "[会话摘要·结构化]" in session.messages[0]["content"]
+
+# ---------------------------------------------------------------------------
+# 矛盾整合（Mem0 式 ADD/UPDATE/DELETE/NOOP）
+# ---------------------------------------------------------------------------
+
+
+def test_integration_updates_same_slug(memory):
+    """同句两次显式记住：第二次覆盖原文件而非新增（action=updated）。"""
+    a1, n1 = memory.handle_turn("default", "请记住：双11 大促备货 3 万件")
+    assert a1 == "store"
+    a2, n2 = memory.handle_turn("default", "请记住：双11 大促备货 3 万件")
+    assert a2 == "updated" and n2 == n1
+    ws_dir = memory._ws_dir("default")
+    md = [f for f in os.listdir(ws_dir) if f.endswith(".md") and f != "MEMORY.md"]
+    assert len(md) == 1
+    assert "双11 大促备货 3 万件" in open(os.path.join(ws_dir, md[0]), encoding="utf-8").read()
+
+
+def test_integration_injected_noop(memory):
+    """注入判定器返回 noop：跳过写入（文件数不变）。"""
+    store = MemoryStore(root=memory._root, integrator=lambda n, t, c: "noop")
+    action, name = store.handle_turn("default", "请记住：只会被跳过的记忆")
+    assert action == "skip"
+    assert store._list_memory_files("default") == []
+
+
+def test_integration_injected_obsolete(memory):
+    """注入判定器返回 obsolete:slug：删除旧记忆后写入新记忆。"""
+    memory.handle_turn("default", "请记住：旧版退货流程")
+
+    def obsolete_integrator(new_name, new_text, candidates):
+        return "obsolete:" + candidates[0]["slug"]
+
+    store = MemoryStore(root=memory._root, integrator=obsolete_integrator)
+    action, name = store.handle_turn("default", "请记住：新版退货流程 48 小时")
+    assert action == "updated"
+    ws_dir = memory._ws_dir("default")
+    contents = " ".join(
+        open(os.path.join(ws_dir, f), encoding="utf-8").read()
+        for f in os.listdir(ws_dir)
+        if f.endswith(".md") and f != "MEMORY.md"
+    )
+    assert "旧版退货流程" not in contents and "新版退货流程" in contents
+
+
+# ---------------------------------------------------------------------------
+# 压缩-记忆联动（摘要沉淀：OpenClaw 同款机制的引擎侧实现）
+# ---------------------------------------------------------------------------
+
+
+def test_compression_sinks_summary_to_memory(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
+    from agent_runtime import memory_store as ms_mod
+
+    monkeypatch.setattr(
+        "agent_runtime.base_agent.DEFAULT_MEMORY_STORE",
+        ms_mod.MemoryStore(root=str(tmp_path / "memory")),
+    )
+
+    agent, ws = _make_agent()
+    session = _make_session(ws)
+    for _ in range(9):
+        session.add_message("user", "库存历史 " * 1000)
+    events = _run_chat(agent, session, "查一下库存")
+    assert any("沉淀至长期记忆" in getattr(e, "message", "") for e in events)
+
+    ws_dir = tmp_path / "memory" / "default"
+    summaries = [f for f in os.listdir(ws_dir) if f.startswith("会话摘要_")]
+    assert len(summaries) == 1
+    body = open(os.path.join(ws_dir, summaries[0]), encoding="utf-8").read()
+    assert "[会话摘要·结构化]" in body
+
+    # 再次触发压缩：固定命名 → 整合层覆盖为最新一份，不产生第二份
+    for _ in range(9):
+        session.add_message("user", "库存历史 " * 1000)
+    _run_chat(agent, session, "再查一次库存")
+    assert len([f for f in os.listdir(ws_dir) if f.startswith("会话摘要_")]) == 1
