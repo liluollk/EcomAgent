@@ -36,3 +36,11 @@ data/providers.json
 
 # 测试运行报告
 /data/test-reports/
+
+# 离线评测 Harness 运行产物
+/.harness-runs/
+
+# 技能与 MCP server 运行时配置
+data/skills/
+data/mcp_servers.json
+data/skills.json
