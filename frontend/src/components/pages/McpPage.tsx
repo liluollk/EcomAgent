@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 interface McpTool {
   name: string;
@@ -26,7 +26,101 @@ interface McpServerConfig {
   enabled: boolean;
 }
 
-/** MCP 页：外部工具服务通道 — server 配置 CRUD（用户自行接入想用的 MCP）+ 连接状态与工具发现聚合 */
+interface ParsedServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+interface ParseResult {
+  servers: ParsedServer[];
+  skipped: string[];
+  errors: string[];
+}
+
+/** 解析粘贴的 MCP 配置，兼容四种常见来源写法：
+ *  1. Claude Desktop / Cursor 完整配置 {"mcpServers": {"name": {...}}}；
+ *  2. name → config 映射 {"fetch": {"command": ...}}；
+ *  3. 单对象（含 name 字段）；4. 配置对象数组。
+ *  url / http / sse 型远程条目跳过并提示——当前通道仅支持 stdio 子进程。 */
+export function parseMcpJson(text: string): ParseResult {
+  const skipped: string[] = [];
+  const errors: string[] = [];
+  const servers: ParsedServer[] = [];
+
+  const take = (name: string, cfg: unknown) => {
+    if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
+      errors.push(`「${name || '(未命名)'}」的配置必须是对象，已跳过`);
+      return;
+    }
+    const c = cfg as Record<string, unknown>;
+    const type = String(c.type ?? '').toLowerCase();
+    if (c.url !== undefined || type === 'http' || type === 'sse' || type === 'streamable-http') {
+      skipped.push(`「${name}」为远程 url 型 server（当前通道仅支持 stdio 子进程），已跳过`);
+      return;
+    }
+    const command = String(c.command ?? '').trim();
+    if (!name.trim() || !command) {
+      errors.push(`「${name.trim() || '(未命名)'}」缺少 ${name.trim() ? 'command' : 'name'}，已跳过`);
+      return;
+    }
+    const env: Record<string, string> = {};
+    if (c.env && typeof c.env === 'object' && !Array.isArray(c.env)) {
+      for (const [k, v] of Object.entries(c.env as Record<string, unknown>)) env[k] = String(v);
+    }
+    servers.push({
+      name: name.trim(),
+      command,
+      args: Array.isArray(c.args) ? c.args.map(String) : [],
+      env,
+    });
+  };
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { servers: [], skipped, errors: [`JSON 语法错误：${(e as Error).message}`] };
+  }
+
+  if (Array.isArray(raw)) {
+    raw.forEach((item) => {
+      const name = item && typeof item === 'object' ? String((item as Record<string, unknown>).name ?? '') : '';
+      take(name, item);
+    });
+  } else if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (obj.mcpServers && typeof obj.mcpServers === 'object' && !Array.isArray(obj.mcpServers)) {
+      for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) take(name, cfg);
+    } else if (obj.command !== undefined || obj.url !== undefined || obj.type !== undefined) {
+      take(String(obj.name ?? ''), obj);
+    } else {
+      for (const [name, cfg] of Object.entries(obj)) take(name, cfg);
+    }
+  } else {
+    errors.push('内容必须是 JSON 对象或数组');
+  }
+
+  if (!servers.length && !errors.length && !skipped.length) errors.push('未找到任何 server 配置');
+  return { servers, skipped, errors };
+}
+
+const JSON_PLACEHOLDER = `{
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "amap": {
+      "command": "npx",
+      "args": ["-y", "@amap/amap-maps-mcp-server"],
+      "env": { "AMAP_API_KEY": "your-key" }
+    }
+  }
+}`;
+
+/** MCP 页：外部工具服务通道 — server 配置 CRUD（粘贴 JSON / 手动表单两种接入方式）+ 连接状态与工具发现聚合 */
 export function McpPage() {
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [servers, setServers] = useState<McpServerConfig[]>([]);
@@ -35,9 +129,19 @@ export function McpPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
 
+  const [addMode, setAddMode] = useState<'json' | 'form'>('json');
+  const [jsonText, setJsonText] = useState('');
+  const [adding, setAdding] = useState(false);
+
   const [addName, setAddName] = useState('');
   const [addCommand, setAddCommand] = useState('');
   const [addArgs, setAddArgs] = useState('');
+  const [addEnv, setAddEnv] = useState('');
+
+  const parsed = useMemo<ParseResult | null>(
+    () => (addMode === 'json' && jsonText.trim() ? parseMcpJson(jsonText) : null),
+    [addMode, jsonText],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -57,20 +161,50 @@ export function McpPage() {
     void refresh();
   }, [refresh]);
 
-  async function addServer() {
-    if (!addName.trim() || !addCommand.trim()) { setNotice('name 与 command 必填'); return; }
+  async function postServer(payload: unknown): Promise<[boolean, string]> {
     const resp = await fetch('/mcp/servers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: addName.trim(),
-        command: addCommand.trim(),
-        args: addArgs.trim() ? addArgs.trim().split(/\s+/) : [],
-      }),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json();
-    setNotice(resp.ok ? `已新增 MCP server ${data.name}（重启服务或重连后生效）` : data.error || '新增失败');
-    if (resp.ok) { setAddName(''); setAddCommand(''); setAddArgs(''); }
+    return [resp.ok, resp.ok ? String(data.name) : String(data.error || '新增失败')];
+  }
+
+  async function addParsedServers() {
+    if (!parsed || !parsed.servers.length || adding) return;
+    setAdding(true);
+    try {
+      const results: string[] = [];
+      for (const s of parsed.servers) {
+        const [ok, msg] = await postServer(s);
+        results.push(`${ok ? '✓' : '✗'} ${s.name}${ok ? '' : `：${msg}`}`);
+      }
+      setNotice(`JSON 接入结果 — ${results.join('；')}（重启服务或重连后生效）`);
+      if (parsed.servers.every((s) => results.includes(`✓ ${s.name}`))) setJsonText('');
+      void refresh();
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function addServer() {
+    if (!addName.trim() || !addCommand.trim()) { setNotice('name 与 command 必填'); return; }
+    const env: Record<string, string> = {};
+    if (addEnv.trim()) {
+      for (const pair of addEnv.trim().split(/\s+/)) {
+        const i = pair.indexOf('=');
+        if (i > 0) env[pair.slice(0, i)] = pair.slice(i + 1);
+      }
+    }
+    const [ok, msg] = await postServer({
+      name: addName.trim(),
+      command: addCommand.trim(),
+      args: addArgs.trim() ? addArgs.trim().split(/\s+/) : [],
+      env,
+    });
+    setNotice(ok ? `已新增 MCP server ${msg}（重启服务或重连后生效）` : msg);
+    if (ok) { setAddName(''); setAddCommand(''); setAddArgs(''); setAddEnv(''); }
     void refresh();
   }
 
@@ -151,8 +285,21 @@ export function McpPage() {
 
               {/* server 配置管理 */}
               <div className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
-                <div className="border-b border-line px-4 py-2.5 text-[12.5px] font-medium text-ink">
-                  MCP Server 配置（用户可自行接入外部 MCP 服务）
+                <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+                  <span className="text-[12.5px] font-medium text-ink">MCP Server 配置（粘贴 JSON 即可接入外部 MCP 服务）</span>
+                  <div className="flex gap-0.5 rounded-lg bg-black/[0.04] p-0.5">
+                    {(['json', 'form'] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setAddMode(m)}
+                        className={`rounded-md px-2.5 py-1 text-[11.5px] transition-colors ${
+                          addMode === m ? 'bg-white font-medium text-ink shadow-sm' : 'text-ink-3 hover:text-ink-2'
+                        }`}
+                      >
+                        {m === 'json' ? '粘贴 JSON' : '手动填写'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 {servers.map((s) => {
                   const live = status.servers.find((x) => x.name === s.name);
@@ -180,18 +327,63 @@ export function McpPage() {
                     </div>
                   );
                 })}
-                <div className="grid grid-cols-2 gap-2 border-t border-line bg-black/[0.02] p-4">
-                  <input value={addName} onChange={(e) => setAddName(e.target.value)} placeholder="标识（name）"
-                    className="h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
-                  <input value={addCommand} onChange={(e) => setAddCommand(e.target.value)} placeholder="启动命令（command，如 python）"
-                    className="h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
-                  <input value={addArgs} onChange={(e) => setAddArgs(e.target.value)} placeholder="参数（空格分隔，如 -m some_mcp_server）"
-                    className="col-span-2 h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
-                  <button onClick={() => void addServer()}
-                    className="col-span-2 h-8 rounded-lg bg-accent px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90">
-                    添加 MCP Server
-                  </button>
-                </div>
+
+                {addMode === 'json' ? (
+                  <div className="space-y-2 border-t border-line bg-black/[0.02] p-4">
+                    <textarea
+                      value={jsonText}
+                      onChange={(e) => setJsonText(e.target.value)}
+                      placeholder={JSON_PLACEHOLDER}
+                      spellCheck={false}
+                      className="h-44 w-full resize-y rounded-lg border border-line bg-white p-2.5 font-mono text-[11.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3/70 focus:border-accent"
+                    />
+                    <p className="text-[11px] text-ink-3">
+                      兼容 Claude Desktop / Cursor 配置（mcpServers 包装）、name 映射、单对象与数组写法；
+                      环境变量写入 env 字段。url 型远程 server 暂不支持（当前通道为 stdio 子进程）。
+                    </p>
+                    {parsed && (parsed.servers.length > 0 || parsed.skipped.length > 0 || parsed.errors.length > 0) && (
+                      <div className="space-y-1 rounded-lg border border-line bg-white p-2.5">
+                        {parsed.servers.map((s) => (
+                          <div key={s.name} className="flex items-center gap-2 text-[11.5px]">
+                            <span className="rounded bg-accent-soft px-1.5 py-0.5 font-mono text-[11px] text-accent">{s.name}</span>
+                            <span className="truncate font-mono text-[11px] text-ink-2">{s.command} {s.args.join(' ')}</span>
+                            {Object.keys(s.env).length > 0 && (
+                              <span className="flex-shrink-0 text-[11px] text-ink-3">env: {Object.keys(s.env).join(', ')}</span>
+                            )}
+                          </div>
+                        ))}
+                        {parsed.skipped.map((s) => (
+                          <p key={s} className="text-[11.5px] text-[#92610A]">{s}</p>
+                        ))}
+                        {parsed.errors.map((s) => (
+                          <p key={s} className="text-[11.5px] text-danger">{s}</p>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => void addParsedServers()}
+                      disabled={adding || !parsed || parsed.servers.length === 0}
+                      className="h-8 w-full rounded-lg bg-accent px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {adding ? '接入中…' : parsed && parsed.servers.length > 0 ? `接入 ${parsed.servers.length} 个 MCP Server` : '粘贴配置后接入'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2 border-t border-line bg-black/[0.02] p-4">
+                    <input value={addName} onChange={(e) => setAddName(e.target.value)} placeholder="标识（name）"
+                      className="h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+                    <input value={addCommand} onChange={(e) => setAddCommand(e.target.value)} placeholder="启动命令（command，如 python / npx）"
+                      className="h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+                    <input value={addArgs} onChange={(e) => setAddArgs(e.target.value)} placeholder="参数（空格分隔，如 -m some_mcp_server）"
+                      className="col-span-2 h-8 rounded-lg border border-line bg-white px-2.5 text-[12.5px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+                    <input value={addEnv} onChange={(e) => setAddEnv(e.target.value)} placeholder="环境变量（可选，KEY=VALUE 空格分隔）"
+                      className="col-span-2 h-8 rounded-lg border border-line bg-white px-2.5 font-mono text-[12px] text-ink outline-none placeholder:font-sans placeholder:text-ink-3 focus:border-accent" />
+                    <button onClick={() => void addServer()}
+                      className="col-span-2 h-8 rounded-lg bg-accent px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90">
+                      添加 MCP Server
+                    </button>
+                  </div>
+                )}
               </div>
 
               {notice && <p className="text-[12px] text-ink-2">{notice}</p>}
@@ -218,7 +410,7 @@ export function McpPage() {
 
               <p className="text-[11.5px] leading-relaxed text-ink-3">
                 MCP server 以 stdio 子进程连接，工具经 JSON-RPC 真实协议发现后注入执行链路；
-                新增/修改配置后重启服务生效。电商运营工具（查库存 / 改价 / 上下架等）为内置平台 API 通道，
+                新增/修改配置后可用「测连通」验证。电商运营工具（查库存 / 改价 / 上下架等）为内置平台 API 通道，
                 本页面管理的是外部第三方工具。
               </p>
             </>

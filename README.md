@@ -18,7 +18,7 @@
 - **多模型后端抽象**：OpenAI 兼容 / Anthropic / Mock 统一 `AgentBackend` 契约，流式 Tool Calling 增量解析与跨后端消息归一化在 adapter 内消化，运行时与 UI 不感知具体 SDK。
 - **Workspace / Session 状态隔离**：业务规则、凭据引用、模型状态、执行状态、会话审计由两层运行边界承载，JSONL 增量落盘，支持多会话并行与中断后恢复。
 - **工具权限治理**：执行前 PreToolUse 管线 = RBAC 身份门（店长/运营/客服/财务，工具级 ACL）→ 业务规则（成本保护）→ 模式门（READONLY / ASK / EXECUTE），allow / block / prompt 三语义，审计带操作人追责。
-- **工具三通道**：内置平台 API 工具（11 个电商语义操作 + save_skill，handler 经 REST 客户端 → 平台 Adapter 直达渠道服务；当前为本地模拟网关，真实平台适配层为 TODO）；MCP 外部工具（官方 MCP SDK 客户端池，stdio / JSON-RPC，用户可经 `data/mcp_servers.json` 或前端 MCP 页自行接入想用的 MCP server，内置外部工具模拟演示服务）；专用工具（save_skill 技能创建）。
+- **工具三通道**：内置平台 API 工具（11 个电商语义操作 + save_skill，handler 经 REST 客户端 → 平台 Adapter 直达渠道服务；当前为本地模拟网关，真实平台适配层为 TODO）；MCP 外部工具（官方 MCP SDK 客户端池，stdio / JSON-RPC，用户可经 `data/mcp_servers.json` 或前端 MCP 页（粘贴 JSON，兼容 Claude Desktop / Cursor 配置格式）自行接入想用的 MCP server，内置外部工具模拟演示服务）；专用工具（save_skill 技能创建）。
 - **技能体系（SKILL.md）**：技能 = 纯运营知识包（SOP 操作手册 / 平台规则），对齐业界 Agent Skills 格式（frontmatter + markdown 正文）；渐进式披露——菜单常驻系统提示词，`load_skill` 命中才注入正文；内置 10 技能（9 电商 + skill_creator 元技能），用户/agent 可经 save_skill 创建新技能（写操作，经 HITL 人工确认后落盘热加载）。
 - **渠道配置化接入**：渠道注册表持久化（`data/channels.json`），设置页可新增 / 修改 / 停用渠道（base_url / 鉴权方式 / API Key），保存后即时生效无需重启；每个渠道独立的 REST client（各自 base_url + 鉴权）。
 - **可靠性**：平台错误码语义化、写操作幂等（幂等键 + 重试复用同键，防重复创建）、限流/连接失败重试。
@@ -167,7 +167,7 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 
 - **执行闭环**：Workspace/Session → Skill/Source 装配 → AgentBackend（OpenAI/Anthropic/Mock 统一契约）→ 多轮工具并发执行 → PreToolUse 权限管线 → AgentEvent 流式状态机。
 - **权限治理**：RBAC 四角色 + READONLY/ASK/EXECUTE 模式 + 业务规则（成本保护），审计带操作人。
-- **工具三通道**：内置平台 API 工具（REST 真实 HTTP → Adapter）；MCP 外部工具（stdio/JSON-RPC，server 配置前端可增删改 + 测连通）；专用工具（save_skill 经 HITL 创建技能）。渠道注册表配置化，设置页可新增 / 启停 / 测连通，保存即时生效。
+- **工具三通道**：内置平台 API 工具（REST 真实 HTTP → Adapter）；MCP 外部工具（stdio/JSON-RPC，server 配置前端可增删改 + 测连通，支持粘贴 JSON 接入）；专用工具（save_skill 经 HITL 创建技能）。渠道注册表配置化，设置页可新增 / 启停 / 测连通，保存即时生效。
 - **可靠性**：幂等键 + 限流重试 + 平台错误码语义化 + 会话 JSONL 持久化与恢复。
 - **上下文压缩**：模型窗口 - 13k 阈值自动压缩 + 手动压缩，早期对话折叠为结构化摘要。
 - **长期记忆**：MEMORY.md 索引 + 独立记忆文件（user/feedback/project/reference 四类型），自动提取 + 显式记住/忘记。
