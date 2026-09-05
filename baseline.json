@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "saved_at": "2026-09-05T10:03:38+00:00",
+  "total": 5,
+  "passed": 5,
+  "cases": {
+    "six_step_business_chain": "9643c3d0ea3438a5",
+    "cost_interception": "92ee20d75a5c8018",
+    "dynamic_channel_add": "15c761cab8828142",
+    "cross_session_memory": "d797040e0eb07be6",
+    "skill_creation": "ee7ed8c490259529"
+  }
+}

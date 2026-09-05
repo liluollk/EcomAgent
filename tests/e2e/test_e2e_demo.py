@@ -1,9 +1,11 @@
 """E2E 全链路测试 — 对齐 README「已验证」的声明，全部离线可跑。
 
 评测体系分层：
-  L3 行为契约场景 — 评测集为独立数据表（scenarios.py），本文件只负责
+  L3 行为契约场景 — 评测集为独立数据表（harness/cases.py），本文件只负责
      按表执行与断言（统一驱动器 test_e2e_behavior_contract_scenarios）。
-     新增场景 = 在 scenarios.py 加一行数据，无需改动断言逻辑。
+     新增场景 = 在 harness/cases.py 加一行数据，无需改动断言逻辑。
+     断言器与钩子复用 harness/assertions.py、harness/hooks.py（与独立评测
+     入口 python -m harness 共用单一事实源）。
   非对话链路 — 幂等回放（REST 层）与 /sessions 冒烟保留为独立用例。
 
 驱动方式：真实 MCP stdio 子进程（mcp_pool.connect）+ platform=mock 离线 ASGI 兜底
@@ -16,14 +18,12 @@ import asyncio
 import pytest
 
 import sources.channel_registry as _cr
-from events.agent_event import (
-    ToolResultEvent,
-    ToolStartEvent,
-)
 from session.session import PermissionMode, Session
 from session.workspace import Workspace
 
-from scenarios import SCENARIOS
+from harness.assertions import assert_step
+from harness.cases import SCENARIOS
+from harness.hooks import get_after_hook, get_setup_hook
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,12 @@ def e2e_isolate(tmp_path, monkeypatch):
     # 关闭平台子进程自动拉起：离线 ASGI 兜底足够（不依赖 CHANNEL_API_URL）
     monkeypatch.setenv("CHANNEL_API_AUTO", "0")
     monkeypatch.setenv("AGENT_BACKEND", "mock")
+    # 用户技能隔离（save_skill 落盘处；注册表单例需显式重定向目录）
+    monkeypatch.setenv("SKILLS_DIR", str(tmp_path / "skills"))
+    import sources.skill_registry as _sr
+
+    _sr.DEFAULT_SKILL_REGISTRY._user_dir = tmp_path / "skills"
+    _sr.DEFAULT_SKILL_REGISTRY._cached_mtime = -1
 
     _cr._store._mtime = -1
     _cr._store._channels = None
@@ -65,31 +71,6 @@ def e2e_isolate(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 场景钩子（setup / after 与场景表解耦：钩子名在 scenarios.py，实现在此处）
-# ---------------------------------------------------------------------------
-
-
-def _setup_add_pdd_channel():
-    """动态渠道场景前置：注册新渠道 pdd 并确认已生效。"""
-    from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
-
-    DEFAULT_CHANNEL_REGISTRY.add({"name": "pdd", "label": "拼多多"})
-    assert "pdd" in DEFAULT_CHANNEL_REGISTRY.enabled_names()
-
-
-def _after_memory_landed():
-    """跨会话记忆场景收尾：断言显式记忆已落盘且可检索注入。"""
-    from agent_runtime import memory_store as _ms
-
-    store = _ms.DEFAULT_MEMORY_STORE
-    assert "3 万件" in store.recall_section("default", query="双11")
-
-
-_SETUP_HOOKS = {"add_pdd_channel": _setup_add_pdd_channel}
-_AFTER_HOOKS = {"assert_memory_landed": _after_memory_landed}
-
-
-# ---------------------------------------------------------------------------
 # 驱动 helper
 # ---------------------------------------------------------------------------
 
@@ -112,23 +93,6 @@ def _make_workspace() -> Workspace:
         metadata={"brand": "OceanBreeze"},
         rules=[{"type": "price_above_cost"}],
     )
-
-
-def _first_tool_start(events: list) -> ToolStartEvent:
-    """返回第一个业务工具调用（跳过渐进式加载的 load_skill 元调用）。"""
-    for ev in events:
-        if isinstance(ev, ToolStartEvent) and ev.tool_name != "load_skill":
-            return ev
-    raise AssertionError(f"未发现业务 tool_start 事件: {[e.type for e in events]}")
-
-
-def _tool_results(events: list) -> list[ToolResultEvent]:
-    return [e for e in events if isinstance(e, ToolResultEvent) and e.tool_name != "load_skill"]
-
-
-def _has_load_skill(events: list) -> bool:
-    """断言渐进式加载的第一步：load_skill 元调用出现过。"""
-    return any(isinstance(e, ToolStartEvent) and e.tool_name == "load_skill" for e in events)
 
 
 def _run_e2e(scenario):
@@ -160,46 +124,8 @@ def _run_e2e(scenario):
 
 
 # ---------------------------------------------------------------------------
-# L3 统一驱动器：按场景表执行与断言
+# L3 统一驱动器：按场景表执行与断言（断言规则在 harness/assertions.py）
 # ---------------------------------------------------------------------------
-
-_STEP_MISSING_MSG = "[{name}] step「{msg}」期望工具 {tool}，实际 {actual}"
-_STEP_INPUT_MSG = "[{name}] step「{msg}」参数 {k}={actual} 期望 {v}"
-_STEP_ERROR_MSG = "[{name}] step「{msg}」期望失败结果，实际成功"
-_STEP_OK_MSG = "[{name}] step「{msg}」工具执行失败: {result}"
-_STEP_COMPLETE_MSG = "[{name}] step「{msg}」未以 complete 收尾"
-
-
-def _assert_step(scenario_name: str, step: dict, events: list) -> None:
-    """对单步对话事件流做契约断言（期望轨迹匹配）。"""
-    assert _has_load_skill(events), f"[{scenario_name}] step「{step['message']}」未出现 load_skill（渐进式加载第一步）"
-
-    if step.get("expect_tool", True):
-        ts = _first_tool_start(events)
-        assert ts.tool_name == step["tool"], _STEP_MISSING_MSG.format(
-            name=scenario_name, msg=step["message"], tool=step["tool"], actual=ts.tool_name
-        )
-        for k, v in step.get("input", {}).items():
-            assert ts.input.get(k) == v, _STEP_INPUT_MSG.format(
-                name=scenario_name, msg=step["message"], k=k, actual=ts.input.get(k), v=v
-            )
-
-    results = _tool_results(events)
-    assert len(results) >= 1, f"[{scenario_name}] step「{step['message']}」未产生 tool_result"
-    if step.get("result_is_error"):
-        assert results[0].is_error, _STEP_ERROR_MSG.format(name=scenario_name, msg=step["message"])
-        for token in step.get("result_contains", []):
-            assert token in results[0].result, (
-                f"[{scenario_name}] step「{step['message']}」失败文本缺「{token}」: {results[0].result}"
-            )
-    else:
-        assert not results[0].is_error, _STEP_OK_MSG.format(
-            name=scenario_name, msg=step["message"], result=results[0].result
-        )
-
-    assert any(e.type == "complete" for e in events), _STEP_COMPLETE_MSG.format(
-        name=scenario_name, msg=step["message"]
-    )
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s["name"])
@@ -207,13 +133,13 @@ def test_e2e_behavior_contract_scenarios(scenario):
     """按评测集数据表驱动：协议一致的执行 + 断言，覆盖六步链路/成本拦截/动态渠道/跨会话记忆。"""
 
     async def run(chat):
-        hook = _SETUP_HOOKS.get(scenario.get("setup", ""))
+        hook = get_setup_hook(scenario.get("setup"))
         if hook:
             hook()
         for step in scenario["steps"]:
             events = await chat(step["message"])
-            _assert_step(scenario["name"], step, events)
-        after = _AFTER_HOOKS.get(scenario.get("after", ""))
+            assert_step(scenario["name"], step, events)
+        after = get_after_hook(scenario.get("after"))
         if after:
             after()
         return "ok"
