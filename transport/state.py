@@ -47,6 +47,15 @@ workspaces: dict[str, Workspace] = {}
 # 供模式切换等 REST/WS 操作向该会话广播 mode_change 事件。
 session_ws_clients: dict[str, set] = {}
 
+# ---------------------------------------------------------------------------
+# 跨会话审批注册表（审批中心）
+# ---------------------------------------------------------------------------
+
+# request_id → {future, session_id, tool_name, tool_input, reason, timestamp}。
+# WS 权限解析器挂起时登记，审批中心 REST 端点据此聚合待审批列表并经
+# future.set_result 唤醒对应挂起的 turn；连接断开/turn 结束时移除。
+APPROVAL_REGISTRY: dict[str, dict] = {}
+
 _STORAGE_DIR = os.environ.get("AGENT_STORAGE_DIR") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "data", "sessions")
 )
