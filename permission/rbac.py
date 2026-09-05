@@ -50,13 +50,13 @@ _READ_PREFIXES = ("query_", "get_", "list_", "search_")
 
 # 角色 → 允许调用的写工具集合（读工具对所有角色开放）。
 # 批次 4 扩展：商品上下架（product_shelf）与售后工单（service_ticket）入 ACL：
-#   manager 店长全权（改价 / 促销 / 上下架 / 工单）；
-#   operator 运营（改价 / 促销 / 上下架，不越权开售后工单）；
+#   manager 店长全权（改价 / 促销 / 上下架 / 工单 / 创建技能）；
+#   operator 运营（改价 / 促销 / 上下架 / 创建技能，不越权开售后工单）；
 #   customer_service 客服（售后工单，商品域只读，不越权改价 / 上下架）；
 #   finance 财务只读。
 ROLE_WRITE_ACL: dict[str, frozenset[str]] = {
-    MANAGER: frozenset({"update_price", "create_promotion", "product_shelf", "service_ticket"}),
-    OPERATOR: frozenset({"update_price", "create_promotion", "product_shelf"}),
+    MANAGER: frozenset({"update_price", "create_promotion", "product_shelf", "service_ticket", "save_skill"}),
+    OPERATOR: frozenset({"update_price", "create_promotion", "product_shelf", "save_skill"}),
     CUSTOMER_SERVICE: frozenset({"service_ticket"}),
     FINANCE: frozenset(),
 }

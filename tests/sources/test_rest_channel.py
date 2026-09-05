@@ -169,8 +169,14 @@ def _wait_ready(port: int, timeout: float = 6.0) -> None:
     raise RuntimeError(f"channel api mock not ready on {port}")
 
 
-def test_mcp_over_rest_full_chain():
-    """全链路：MCP Server（子进程）→ RestClient → mock 平台服务（子进程），真实协议 + 真实 HTTP。"""
+def test_builtin_tools_over_rest_full_chain():
+    """全链路：内置平台 API 工具 → RestClient → mock 平台服务（子进程），真实 HTTP。
+
+    电商工具已从 MCP 服务迁至内置通道（sources/builtin_tools.py），
+    本用例验证「进程内 handler → 真实 TCP → 平台服务」的完整链路。
+    """
+    from sources import builtin_tools
+
     port = _free_port()
     platform_proc = subprocess.Popen(
         [sys.executable, "-m", "mocks.channel_api_mock", "--port", str(port)],
@@ -181,26 +187,19 @@ def test_mcp_over_rest_full_chain():
     os.environ["CHANNEL_API_URL"] = f"http://127.0.0.1:{port}"
     try:
         _wait_ready(port)
-        pool = McpClientPool()
 
         async def scenario():
-            await pool.connect()
-            try:
-                defs = pool.get_all_tool_definitions()
-                names = {d["name"] for d in defs}
-                assert len(names) == 11
-                # 真实调用：MCP → HTTP → 平台数据
-                r = await pool.call_tool("query_inventory", {"channel": "taobao", "sku": "SKU-001"})
-                assert "库存" in r and "海洋" in r
-                r2 = await pool.call_tool("update_price", {"channel": "jd", "sku": "SKU-1", "new_price": 89.0})
-                assert "已更新为" in r2
-                r3 = await pool.call_tool("query_knowledge_base", {"topic": "退款政策"})
-                assert "知识库" in r3 and "退款" in r3
-                # 平台错误码链路：未知渠道 → 10002 错误文本透传
-                r4 = await pool.call_tool("query_anomalies", {"channel": "no-such"})
-                assert "[平台错误 10002]" in r4
-            finally:
-                await pool.close()
+            assert len(builtin_tools.tool_names()) == 12  # 11 电商操作 + save_skill
+            # 真实调用：内置 handler → HTTP → 平台数据
+            r = await builtin_tools.query_inventory("taobao", "SKU-001")
+            assert "库存" in r and "海洋" in r
+            r2 = await builtin_tools.update_price("jd", "SKU-1", 89.0)
+            assert "已更新为" in r2
+            r3 = await builtin_tools.query_knowledge_base("退款政策")
+            assert "知识库" in r3 and "退款" in r3
+            # 平台错误码链路：未知渠道 → 10002 错误文本透传
+            r4 = await builtin_tools.query_anomalies("no-such")
+            assert "[平台错误 10002]" in r4
 
         asyncio.run(scenario())
     finally:

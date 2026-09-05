@@ -74,6 +74,34 @@ def test_mock_script_existing_branches_unchanged():
     assert _collect_domain_tool("随便聊聊") == "query_inventory"
 
 
+def test_mock_script_skill_creator_branch():
+    """skill-creator 分支：「做成技能」→ load_skill skill_creator → save_skill。"""
+    assert _collect_domain_tool("把查库存的流程做成一个叫 stock_check_pro 的技能") == "save_skill"
+
+
+def test_mock_script_skill_creator_extracts_name():
+    """save_skill 的 name 参数从「叫 <name>」中提取（无则回退 created_skill）。"""
+
+    async def scenario():
+        backend = MockAgent(BackendConfig(provider=BackendProvider.MOCK, model="mock", api_key="x"))
+        messages = [{"role": "user", "content": "把查库存的流程做成一个叫 my_new_skill 的技能"}]
+        events = [ev async for ev in backend.chat(messages, [], "s1")]
+        load_start = next(ev for ev in events if ev.type == "tool_start")
+        assert load_start.input["skill_name"] == "skill_creator"
+        skill_name = load_start.input["skill_name"]
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "load_skill", "arguments": f'{{"skill_name": "{skill_name}"}}'},
+        }]})
+        messages.append({"role": "tool", "tool_call_id": "c1", "content": f"已加载技能 {skill_name}（测试）。"})
+        events2 = [ev async for ev in backend.chat(messages, [], "s1")]
+        domain = next(ev for ev in events2 if ev.type == "tool_start")
+        assert domain.tool_name == "save_skill"
+        assert domain.input["name"] == "my_new_skill"
+
+    asyncio.run(scenario())
+
+
 def test_mock_script_third_round_summary():
     """第三轮（domain 结果已回传）产出总结文本。"""
 

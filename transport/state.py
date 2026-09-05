@@ -20,7 +20,7 @@ from agent_backend.protocol import BackendConfig
 from agent_backend.factory import create_backend
 from agent_backend.provider_registry import DEFAULT_PROVIDER_REGISTRY
 from agent_runtime.base_agent import BaseAgent
-from mocks.channel_sources import create_taobao_source, create_jd_source, create_douyin_source
+from sources import builtin_tools
 from sources.mcp_client_pool import McpClientPool
 from permission.pre_tool_use import PreToolUsePipeline
 from permission.rule_engine import mode_gate_rule, workspace_rules_rule
@@ -30,10 +30,9 @@ from permission.rbac import role_gate_rule
 # 全局 MCP 客户端池 & 生命周期
 # ---------------------------------------------------------------------------
 
+# 工具三通道：内置平台 API 工具（builtin_tools，进程内直连 REST/Adapter）
+# + MCP 外部工具（mcp_pool，用户配置接入的第三方工具服务）。
 mcp_pool = McpClientPool()
-mcp_pool.register_source(create_taobao_source())
-mcp_pool.register_source(create_jd_source())
-mcp_pool.register_source(create_douyin_source())
 
 _channel_api_proc: Optional[subprocess.Popen] = None
 
@@ -226,8 +225,13 @@ def _restore_from_disk() -> None:
 
 
 def _build_tools() -> list[dict]:
-    """从 MCP 客户端池获取工具定义列表。"""
-    return mcp_pool.get_all_tool_definitions()
+    """工具定义合并：内置平台 API 工具 + MCP 外部工具（同名内置优先）。"""
+    defs = builtin_tools.get_definitions()
+    builtin_names = {d["name"] for d in defs}
+    defs.extend(
+        d for d in mcp_pool.get_all_tool_definitions() if d.get("name") not in builtin_names
+    )
+    return defs
 
 
 def _backend_provider_name() -> str:
@@ -271,5 +275,7 @@ def _build_agent(session: Session) -> BaseAgent:
     pipeline.add_checker(mode_gate_rule(lambda: session.permission_mode.name))
     agent.set_permission_pipeline(pipeline)
 
-    agent.set_tool_handlers(mcp_pool.get_all_handlers())
+    # handler 合并：内置平台 API 工具优先，MCP 外部工具补充
+    handlers = {**mcp_pool.get_all_handlers(), **builtin_tools.get_handlers()}
+    agent.set_tool_handlers(handlers)
     return agent

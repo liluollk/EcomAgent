@@ -1,9 +1,8 @@
-"""BaseAgent 渐进式技能加载测试 — 先菜单后点菜：load_skill → 工具按需暴露。
+"""BaseAgent 技能加载测试 — 新语义：技能=纯知识，工具常可见，SOP 按需注入。
 
-新语义（Progressive Skill Loading）：
-- 初始轮仅暴露 load_skill 元工具（技能菜单在描述里）；
-- 模型调用 load_skill 后，该技能的工具才加入后续轮次的可见工具集；
-- 未加载技能的工具对模型不可见。
+- 全部业务工具从第一轮起就可见（load_skill 元工具 + 工具池）；
+- load_skill 命中后，技能 SOP 正文注入系统提示词（渐进式披露作用于知识面）；
+- 不存在的技能 / 前置条件不满足 → load_skill 返回错误结果。
 """
 
 import asyncio
@@ -46,7 +45,7 @@ class RecordingBackend:
     async def chat(self, messages: list[dict], tools: list[dict], session_id: str):
         self.rounds += 1
         self.received_tools_by_round.append(list(tools))
-        self.last_messages = messages
+        self.last_messages = list(messages)  # 快照：回合结束后引擎会 pop 注入的 system
         yield TextDeltaEvent(text="好的")
 
 
@@ -62,7 +61,7 @@ class ProgressiveBackend(RecordingBackend):
     async def chat(self, messages: list[dict], tools: list[dict], session_id: str):
         self.rounds += 1
         self.received_tools_by_round.append(list(tools))
-        self.last_messages = messages
+        self.last_messages = list(messages)  # 快照：回合结束后引擎会 pop 注入的 system
         if self.rounds == 1:
             yield ToolStartEvent(
                 tool_name="load_skill",
@@ -75,7 +74,7 @@ class ProgressiveBackend(RecordingBackend):
                 (m.get("content", "") for m in reversed(messages) if m.get("role") == "tool"),
                 "",
             )
-            if "[已加载]" not in last_msg and "已加载" not in last_msg:
+            if "已加载" not in last_msg:
                 return
             yield ToolStartEvent(
                 tool_name=self._domain_tool,
@@ -106,56 +105,48 @@ def collect(backend, session: Session, message: str, tools: list[dict] | None = 
     return asyncio.run(run())
 
 
-def test_initial_round_only_load_skill_visible():
-    """初始轮：模型只看到 load_skill 元工具，业务工具不可见。"""
+def test_all_tools_visible_from_first_round():
+    """新语义：技能不绑定工具，全部业务工具第一轮起就可见（load_skill + 工具池）。"""
     backend = ProgressiveBackend("inventory_query", "query_inventory", {"channel": "taobao", "sku": "SKU-001"})
     session = make_session()
     collect(backend, session, "查询一下库存")
-    first_round = backend.received_tools_by_round[0]
-    names = [t["name"] for t in first_round]
-    assert names == ["load_skill"], f"初始轮应只有 load_skill，实际 {names}"
+    names = [t["name"] for t in backend.received_tools_by_round[0]]
+    assert names == ["load_skill", "query_inventory", "update_price", "create_promotion", "query_order_status"]
 
 
-def test_after_load_skill_domain_tools_exposed():
-    """load_skill 后第二轮：该技能绑定的工具进入可见工具集。"""
+def test_load_skill_injects_sop_into_system_prompt():
+    """load_skill 命中后，技能 SOP 正文注入后续轮次的系统提示词。"""
     backend = ProgressiveBackend("inventory_query", "query_inventory", {"channel": "taobao", "sku": "SKU-001"})
     session = make_session()
     events = collect(backend, session, "查询一下库存")
 
-    # 第一轮 tools：只有 load_skill
-    assert [t["name"] for t in backend.received_tools_by_round[0]] == ["load_skill"]
-    # 第二轮 tools：load_skill + 技能工具
     assert len(backend.received_tools_by_round) >= 2
-    names = [t["name"] for t in backend.received_tools_by_round[1]]
-    assert "load_skill" in names
-    assert "query_inventory" in names, f"加载后应暴露 query_inventory，实际 {names}"
-    assert "update_price" not in names, "未加载的技能工具不应暴露"
+    system_prompt = backend.last_messages[0]["content"]
+    assert "已加载技能 inventory_query" in system_prompt
+    assert "执行库存查询 SOP" in system_prompt  # SKILL.md 正文注入
 
-    # 事件流包含 load_skill 与 domain 工具调用
     tool_names = [e.tool_name for e in events if e.type == "tool_start"]
     assert "load_skill" in tool_names and "query_inventory" in tool_names
 
 
-def test_general_query_falls_back_to_readonly_tools():
-    """未加载任何技能时，模型仍只看到 load_skill（专用工具保持隐藏）。"""
+def test_no_skill_loaded_still_sees_all_tools():
+    """未加载任何技能时，业务工具同样常可见（知识注入与工具面解耦）。"""
     backend = RecordingBackend()
     session = make_session()
     collect(backend, session, "你好，今天天气怎么样")
     names = [t["name"] for t in backend.received_tools_by_round[0]]
-    assert names == ["load_skill"]
+    assert "load_skill" in names and "query_inventory" in names
 
 
 def test_load_skill_unknown_skill_returns_error():
-    """load_skill 传入不存在的技能名时返回错误结果，工具不扩展。"""
-    from events.agent_event import ToolResultEvent
-
+    """load_skill 传入不存在的技能名时返回错误结果，不产生 domain 调用。"""
     backend = ProgressiveBackend("no_such_skill", "query_inventory", {})
     session = make_session()
     collect(backend, session, "查询一下库存")
 
-    assert "不存在" in backend.last_messages[-1]["content"]
-    # 只有一轮（load_skill 失败后不再调用 domain）
-    assert backend.rounds == 1
+    tool_msgs = [m for m in session.messages if m["role"] == "tool"]
+    assert tool_msgs and "不存在" in tool_msgs[0]["content"]
+    assert "query_inventory" not in [c["tool_name"] for c in session.tool_calls]
 
 
 def test_unmet_prerequisite_blocks_skill_load():
@@ -168,7 +159,7 @@ def test_unmet_prerequisite_blocks_skill_load():
         description="抖音直播带货",
         keywords=["直播"],
         prerequisites=["source:douyin"],
-        tools=["query_inventory"],
+        body="执行直播 SOP。",
     ))
     backend = ProgressiveBackend("douyin_live", "query_inventory", {"channel": "douyin"})
     session = make_session(active_sources=["jd"])  # 无 douyin
@@ -182,16 +173,3 @@ def test_unmet_prerequisite_blocks_skill_load():
     results = [e for e in events if e.type == "tool_result" and e.tool_name == "load_skill"]
     assert results and results[0].is_error, "前置条件不满足应拒绝加载"
     assert "需要激活渠道 douyin" in results[0].result
-
-
-def test_load_skill_unknown_skill_returns_error():
-    """load_skill 传入不存在的技能名时返回错误结果，工具不扩展。"""
-    backend = ProgressiveBackend("no_such_skill", "query_inventory", {})
-    session = make_session()
-    collect(backend, session, "查询一下库存")
-
-    # load_skill 结果带错误信息（via tool_result 事件在 session 消息中体现）
-    tool_msgs = [m for m in session.messages if m["role"] == "tool"]
-    assert tool_msgs and "不存在" in tool_msgs[0]["content"]
-    # 错误后不产生 domain 工具调用（query_inventory 不进入 tool_calls）
-    assert "query_inventory" not in [c["tool_name"] for c in session.tool_calls]

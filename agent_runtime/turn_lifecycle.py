@@ -82,46 +82,10 @@ class TurnLifecycle:
         matched = registry.resolve(user_message)
         return [skill.name for skill in matched] if matched else ["general_query"]
 
-    def get_skill_tools(self, resolved_skills: list[str]) -> list[str]:
-        """获取解析出的技能所需的工具名并集（实例方法，使用实例配置的注册表）。
-
-        Args:
-            resolved_skills: 解析出的技能名称列表。
-
-        Returns:
-            list[str]: 去重后的工具名列表，无匹配技能时为空。
-        """
-        return TurnLifecycle.get_skill_tools_static(resolved_skills, self._registry)
-
-    @staticmethod
-    def get_skill_tools_static(resolved_skills: list[str], registry: SkillRegistry) -> list[str]:
-        """静态版本：获取解析出的技能所需的工具名并集，使用指定注册表。
-
-        供 BaseAgent._resolve_skills_and_tools 独立调用。
-
-        Args:
-            resolved_skills: 解析出的技能名称列表。
-            registry: 技能注册表。
-
-        Returns:
-            list[str]: 去重后的工具名列表，无匹配技能时为空。
-        """
-        tools: list[str] = []
-        for name in resolved_skills:
-            skill = registry.get(name)
-            if skill is None:
-                continue
-            for tool_name in skill.tools:
-                if tool_name not in tools:
-                    tools.append(tool_name)
-        return tools
-
     def unmet_prerequisites(self, resolved_skills: list[str]) -> list[str]:
         """计算技能未满足的前置条件。
 
-        规则：
-        - 前置条件 "source:<name>" 要求 <name> 在 session.active_sources 中；
-        - 技能声明了工具但会话未激活任何 Source 时视为未满足。
+        规则：前置条件 "source:<name>" 要求 <name> 在 session.active_sources 中。
 
         Args:
             resolved_skills: 解析出的技能名称列表。
@@ -141,8 +105,6 @@ class TurnLifecycle:
                         unmet.append(f"技能 {name} 需要激活渠道 {source_name}")
                 else:
                     unmet.append(f"技能 {name} 存在无法识别的前置条件 {prereq}")
-            if skill.tools and not self._session.active_sources:
-                unmet.append(f"技能 {name} 需要至少一个活跃渠道才能调用工具")
         return unmet
 
     def check_prerequisites(self, resolved_skills: list[str]) -> bool:
@@ -178,7 +140,7 @@ class TurnLifecycle:
         # 技能菜单（所有已启用技能）
         menu = self._registry.list_menu()
         if menu:
-            lines.append("【可用技能（调用 load_skill 加载后获取完整操作指南与工具）】")
+            lines.append("【可用技能（调用 load_skill 加载后获取完整操作指南）】")
             for name, desc in menu:
                 lines.append(f"- {name}: {desc}")
         # 已加载技能的 SOP 段
@@ -188,10 +150,10 @@ class TurnLifecycle:
             skill = self._registry.get(name)
             if skill is not None and skill.enabled:
                 section = f"【已加载技能 {name}】{skill.description}"
-                if skill.prompt:
-                    section += f"\nSOP：{skill.prompt}"
+                if skill.body:
+                    section += f"\nSOP：{skill.body}"
                 loaded_sections.append(section)
         if loaded_sections:
             lines.append("\n".join(loaded_sections))
-        lines.append("请根据用户需求，调用 load_skill 加载技能，或使用已加载技能的工具完成运营任务。")
+        lines.append("请根据用户需求，调用 load_skill 加载对应技能，并按 SOP 使用工具完成运营任务。")
         return "\n".join(lines)

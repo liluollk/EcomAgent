@@ -137,6 +137,8 @@ class MockAgent:
     @staticmethod
     def _skill_for(user_message: str) -> str:
         """按关键词映射技能名（与内置技能 keywords 对齐）。"""
+        if any(w in user_message for w in ("创建技能", "做成", "生成技能", "写个技能", "沉淀")):
+            return "skill_creator"
         if any(w in user_message for w in ("促销", "优惠", "折扣", "满减")):
             return "promotion_management"
         if any(w in user_message for w in ("价格", "调价", "改价", "定价", "降价")):
@@ -161,6 +163,24 @@ class MockAgent:
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        if any(w in last_user for w in ("做成", "创建技能", "生成技能", "沉淀")):
+            m_name = re.search(r"叫\s*([a-z][a-z0-9_]*)", last_user)
+            skill_name = m_name.group(1) if m_name else "created_skill"
+            return ToolStartEvent(
+                tool_name="save_skill",
+                tool_use_id="call_mock_save_skill",
+                input={
+                    "name": skill_name,
+                    "description": "库存查询流程沉淀技能",
+                    "keywords": ["库存盘点", "存货核查"],
+                    "body": (
+                        "执行库存盘点 SOP：\n"
+                        "1) 确认渠道与 SKU；\n"
+                        "2) 调用 query_inventory 获取库存；\n"
+                        "3) 汇总并向用户汇报。"
+                    ),
+                },
+            )
         if "促销" in last_user or "活动" in last_user:
             return ToolStartEvent(
                 tool_name="create_promotion",

@@ -124,14 +124,22 @@ const sources: ChannelSource[] = [
 ];
 
 const skills: Skill[] = [
-  { name: 'inventory_query', description: '查询商品库存与补货建议', keywords: ['库存', '存货', '补货', '盘点'], prerequisites: [], tools: ['query_inventory'], prompt: '执行库存查询 SOP：1) 确认渠道与 SKU；2) 调用 query_inventory；3) 汇报库存数量。', enabled: true, builtin: true },
-  { name: 'price_management', description: '商品价格调整管理', keywords: ['价格', '调价', '改价', '定价'], prerequisites: [], tools: ['update_price'], prompt: '调价 SOP：1) 确认新价格不低于成本价；2) 调用 update_price；3) 汇报结果。', enabled: true, builtin: true },
-  { name: 'promotion_management', description: '促销活动创建与检查', keywords: ['促销', '优惠', '折扣', '满减'], prerequisites: [], tools: ['create_promotion', 'query_promotions'], prompt: '促销 SOP：1) 确认参数；2) 调用 create_promotion；3) 汇报。', enabled: true, builtin: true },
+  { name: 'inventory_query', description: '查询商品库存与补货建议', keywords: ['库存', '存货', '补货', '盘点'], prerequisites: [], body: '执行库存查询 SOP：\n1) 确认渠道与 SKU；\n2) 调用 query_inventory；\n3) 汇报库存数量。', enabled: true, builtin: true },
+  { name: 'price_management', description: '商品价格调整管理', keywords: ['价格', '调价', '改价', '定价'], prerequisites: [], body: '执行调价 SOP：\n1) 确认新价格不低于成本价（成本保护规则）；\n2) 调用 update_price；\n3) 汇报新旧价格。', enabled: true, builtin: true },
+  { name: 'promotion_management', description: '促销活动创建与检查', keywords: ['促销', '优惠', '折扣', '满减'], prerequisites: [], body: '执行促销 SOP：\n1) 确认渠道/SKU/折扣/起止时间；\n2) 调用 create_promotion；\n3) 汇报活动信息。', enabled: true, builtin: true },
 ];
 
 // ---------------------------------------------------------------------------
 // 仓库操作
 // ---------------------------------------------------------------------------
+
+const mcpDemoTools = [
+  { name: 'query_exchange_rate', description: '查询币种对人民币参考汇率（模拟外部汇率服务）' },
+  { name: 'query_weather', description: '查询城市天气（模拟外部天气服务）' },
+];
+const mcpServers: { name: string; command: string; args: string[]; env: Record<string, string>; enabled: boolean }[] = [
+  { name: 'external-demo', command: 'python', args: ['-m', 'mocks.mcp_tool_server'], env: {}, enabled: true },
+];
 
 export const mockStore = {
   sessions: seedSessions,
@@ -336,8 +344,7 @@ export async function mockRequest(
       description: (payload.description as string) || name,
       keywords: Array.isArray(payload.keywords) ? payload.keywords as string[] : [],
       prerequisites: [],
-      tools: Array.isArray(payload.tools) ? payload.tools as string[] : [],
-      prompt: (payload.prompt as string) || '',
+      body: (payload.body as string) || (payload.prompt as string) || '',
       enabled: true,
       builtin: false,
       created_at: Date.now(),
@@ -351,15 +358,108 @@ export async function mockRequest(
     const s = mockStore.skills.find((x) => x.name === name);
     if (!s) return err(`技能不存在: ${name}`, 404);
     if (method === 'PATCH') {
+      if (s.builtin) return err(`内置技能 ${name} 只读，不可编辑`, 400);
       if (payload.keywords) s.keywords = payload.keywords as string[];
-      if (payload.tools) s.tools = payload.tools as string[];
-      if (payload.prompt) s.prompt = payload.prompt as string;
+      if (payload.body) s.body = payload.body as string;
+      if (payload.prompt) s.body = payload.prompt as string;
       if (typeof payload.enabled === 'boolean') s.enabled = payload.enabled;
       return ok(s);
     }
     if (method === 'DELETE') {
-      if (s.builtin) return err(`内置技能 ${name} 不可删除，可停用`, 400);
+      if (s.builtin) return err(`内置技能 ${name} 不可删除`, 400);
       mockStore.skills = mockStore.skills.filter((x) => x.name !== name);
+      return ok({ deleted: name });
+    }
+  }
+
+  // ---------- 工作台聚合（与后端 /workspace/overview 形状 1:1） ----------
+  if (method === 'GET' && path === '/workspace/overview') {
+    const channels = [
+      {
+        name: 'taobao', label: '淘宝', platform: 'mock', connected: true, error: null,
+        orders: 1280, gmv: 85600.0, avg_order: 66.9, refund_rate: 0.021, tickets: 27,
+        promotions: [{ name: '双11预热 9折', discount: 0.9 }, { name: '满300减50', discount: 0.83 }],
+        anomalies: ['价格低于成本价（SKU-009）', '库存预警（SKU-017 低于安全水位）'],
+        product: { sku: 'SKU-001', name: '海洋之风法式泡泡袖连衣裙', stock: 1523 },
+      },
+      {
+        name: 'jd', label: '京东', platform: 'mock', connected: true, error: null,
+        orders: 642, gmv: 51360.0, avg_order: 80.0, refund_rate: 0.015, tickets: 9,
+        promotions: [{ name: 'Plus 会员价 95折', discount: 0.95 }],
+        anomalies: ['无限 SKU 差评集中（SKU-003）'],
+        product: { sku: 'SKU-001', name: '海洋之风高腰 A 字半身裙', stock: 890 },
+      },
+      {
+        name: 'douyin', label: '抖音', platform: 'mock', connected: true, error: null,
+        orders: 2310, gmv: 120800.0, avg_order: 52.3, refund_rate: 0.038, tickets: 88,
+        promotions: [{ name: '直播间秒杀 7折', discount: 0.7 }],
+        anomalies: [],
+        product: { sku: 'SKU-001', name: '海洋之风复古针织开衫', stock: 2340 },
+      },
+    ];
+    return ok({
+      channels,
+      summary: {
+        total_channels: channels.length,
+        connected_channels: channels.filter((c) => c.connected).length,
+        total_orders: channels.reduce((s, c) => s + (c.orders ?? 0), 0),
+        total_gmv: channels.reduce((s, c) => s + (c.gmv ?? 0), 0),
+        total_promotions: channels.reduce((s, c) => s + c.promotions.length, 0),
+        total_anomalies: channels.reduce((s, c) => s + c.anomalies.length, 0),
+      },
+    });
+  }
+
+  // ---------- MCP 外部工具通道（与后端 /mcp/* 形状 1:1） ----------
+  if (method === 'GET' && path === '/mcp/status') {
+    const servers = mcpServers.filter((x) => x.enabled).map((x) => ({
+      name: x.name, connected: true, tools: mcpDemoTools,
+    }));
+    return ok({ connected: servers.length > 0, transport: 'stdio / JSON-RPC', servers, tools: mcpDemoTools });
+  }
+  if (path === '/mcp/servers') {
+    if (method === 'GET') {
+      return ok(mcpServers.map((x) => ({
+        ...x,
+        env: Object.fromEntries(Object.entries(x.env).map(([k, v]) => [k, v ? '****' : ''])),
+      })));
+    }
+    if (method === 'POST') {
+      const name = String(payload.name ?? '').trim();
+      const command = String(payload.command ?? '').trim();
+      if (!name || !command) return err('name 与 command 必填', 400);
+      if (mcpServers.some((x) => x.name === name)) return err(`MCP server 已存在: ${name}`, 400);
+      const entry = {
+        name, command,
+        args: Array.isArray(payload.args) ? (payload.args as string[]) : [],
+        env: (payload.env as Record<string, string>) ?? {},
+        enabled: payload.enabled !== false,
+      };
+      mcpServers.push(entry);
+      return ok(entry);
+    }
+  }
+  const mcpTestMatch = path.match(/^\/mcp\/servers\/([^/]+)\/test$/);
+  if (mcpTestMatch && method === 'POST') {
+    const name = decodeURIComponent(mcpTestMatch[1]);
+    if (!mcpServers.some((x) => x.name === name)) return err(`MCP server 不存在: ${name}`, 404);
+    return ok({ ok: true, tools: mcpDemoTools });
+  }
+  const mcpMatch = path.match(/^\/mcp\/servers\/([^/]+)$/);
+  if (mcpMatch) {
+    const name = decodeURIComponent(mcpMatch[1]);
+    const idx = mcpServers.findIndex((x) => x.name === name);
+    if (idx < 0) return err(`MCP server 不存在: ${name}`, 404);
+    if (method === 'PATCH') {
+      const s2 = mcpServers[idx];
+      if (payload.command !== undefined) s2.command = String(payload.command);
+      if (payload.args !== undefined) s2.args = payload.args as string[];
+      if (payload.env !== undefined) s2.env = payload.env as Record<string, string>;
+      if (typeof payload.enabled === 'boolean') s2.enabled = payload.enabled;
+      return ok(s2);
+    }
+    if (method === 'DELETE') {
+      mcpServers.splice(idx, 1);
       return ok({ deleted: name });
     }
   }

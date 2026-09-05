@@ -1,58 +1,44 @@
 """
-技能注册表 — 管理 Agent 技能的定义、生命周期与持久化。
+技能注册表 — SKILL.md 文件制（对齐业界 Agent Skills 格式）。
 
-SkillRegistry。
-技能是 Agent 能力的抽象单位，每个技能关联一组工具、触发关键词与 SOP 指令段。
-
-渐进式技能加载（Progressive Skill Loading）：
-- 意图路由：关键词匹配（轻量）判断用户请求属于哪个技能域；
-- 按域加载：命中技能时只在其工具集上叠加基础只读工具（见 base_agent）；
-- SOP 注入：命中时把技能 prompt（SOP 指令段）注入系统提示词，指导执行步骤；
-- 用户可在前端新增/启停/编辑技能，配置持久化到 data/skills.json。
+Skill = 纯运营知识（SOP 操作手册 / 平台规则），不绑定工具：
+- 格式：frontmatter（name/description/keywords/prerequisites/enabled）
+  + markdown SOP 正文；
+- 来源：内置 sources/skills_builtin/<name>/SKILL.md（只读、恒启用）
+  + 用户 data/skills/<name>/SKILL.md（前端/agent 可创建、可启停）；
+- 渐进式披露：菜单（name+description）常驻系统提示词，正文在
+  load_skill 命中后注入；工具面与技能无关（全部工具常可见）。
 """
 
 from __future__ import annotations
 
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Any, Optional
-
-# 内置技能名（不可删除，但可启停）
-BUILTIN_NAMES = {
-    "inventory_query",
-    "price_management",
-    "promotion_management",
-    "order_management",
-    "order_analytics",
-    "anomaly_detection",
-    "knowledge_inquiry",
-    "after_sales",
-    "product_listing",
-}
 
 
 @dataclass
 class Skill:
-    """技能定义，包含名称、描述、关键词、前置条件、关联工具与 SOP 指令。
+    """技能定义 — 运营知识包：SOP 操作手册 / 平台规则。
 
     Attributes:
         name: 技能名称，如 "inventory_query"。
-        description: 技能描述，用于 LLM 意图识别。
+        description: 技能描述，用于 LLM 意图识别（菜单常驻展示）。
         keywords: 触发关键词列表，如 ["库存", "存货", "查库存"]。
         prerequisites: 前置条件列表，如 ["source:taobao"]。
-        tools: 关联的工具名称列表。
-        prompt: SOP 指令段——命中时注入系统提示词，指导 LLM 按步骤执行。
-        enabled: 是否启用（停用的技能不参与解析）。
-        builtin: 是否为内置技能（内置不可删除，但可启停）。
+        body: SOP 正文（markdown）——加载时注入系统提示词，指导 LLM 按步骤执行。
+        enabled: 是否启用（停用的技能不进菜单、不参与解析；内置技能恒启用）。
+        builtin: 是否为内置技能（内置只读，不可编辑/删除/停用）。
+        created_at: 创建时间戳（用户技能，内存记录）。
     """
 
     name: str
     description: str
     keywords: list[str] = field(default_factory=list)
     prerequisites: list[str] = field(default_factory=list)
-    tools: list[str] = field(default_factory=list)
-    prompt: str = ""
+    body: str = ""
     enabled: bool = True
     builtin: bool = False
     created_at: Optional[int] = None
@@ -61,268 +47,184 @@ class Skill:
         return asdict(self)
 
 
-def _config_path() -> str:
-    return os.environ.get("SKILL_CONFIG_FILE") or os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "data", "skills.json")
+# ----------------------------------------------------------------------
+# SKILL.md 解析 / 序列化（frontmatter 为 YAML 子集：key: value / key: [a, b]）
+# ----------------------------------------------------------------------
+
+def _parse_list_value(v: str) -> list[str]:
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        v = v[1:-1]
+    if not v:
+        return []
+    return [x.strip() for x in v.split(",") if x.strip()]
+
+
+def parse_skill_md(text: str, *, builtin: bool = False) -> Skill:
+    """SKILL.md 文本 → Skill。frontmatter 缺 name 或格式错误时抛 ValueError。"""
+    text = text.lstrip("\ufeff").strip()
+    if not text.startswith("---"):
+        raise ValueError("SKILL.md 必须以 --- frontmatter 开头")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("SKILL.md frontmatter 未闭合")
+    data: dict[str, str] = {}
+    for line in parts[1].splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        data[k.strip()] = v.strip()
+    name = data.get("name", "")
+    if not name:
+        raise ValueError("SKILL.md frontmatter 缺少 name")
+    return Skill(
+        name=name,
+        description=data.get("description", ""),
+        keywords=_parse_list_value(data.get("keywords", "")),
+        prerequisites=_parse_list_value(data.get("prerequisites", "")),
+        body=parts[2].strip(),
+        enabled=data.get("enabled", "true").lower() != "false",
+        builtin=builtin,
     )
 
 
-def _to_skill(data: dict[str, Any]) -> Skill:
-    """dict → Skill（字段带默认值，兼容旧记录缺字段）。"""
-    known = {f: data.get(f) for f in (
-        "name", "description", "keywords", "prerequisites", "tools",
-        "prompt", "enabled", "builtin", "created_at",
-    )}
-    known["name"] = str(known["name"])
-    known["description"] = str(known.get("description") or "")
-    for lst_key in ("keywords", "prerequisites", "tools"):
-        val = known.get(lst_key)
-        known[lst_key] = [str(x) for x in val] if isinstance(val, list) else []
-    known["prompt"] = str(known.get("prompt") or "")
-    known["enabled"] = bool(known.get("enabled", True))
-    known["builtin"] = bool(known.get("builtin", False))
-    return Skill(**known)
+def to_skill_md(skill: Skill) -> str:
+    """Skill → SKILL.md 文本（用户技能持久化格式）。"""
+    lines = ["---", f"name: {skill.name}", f"description: {skill.description}"]
+    if skill.keywords:
+        lines.append(f"keywords: [{', '.join(skill.keywords)}]")
+    if skill.prerequisites:
+        lines.append(f"prerequisites: [{', '.join(skill.prerequisites)}]")
+    if not skill.enabled:
+        lines.append("enabled: false")
+    lines += ["---", "", skill.body, ""]
+    return "\n".join(lines)
 
 
-def _default_skills() -> list[Skill]:
-    """内置 9 个电商运营技能（keywords/tools 与历史一致；prompt 为 SOP 指令段）。"""
-    return [
-        Skill(
-            name="inventory_query",
-            description="查询商品库存与补货建议",
-            keywords=["库存", "存货", "补货", "盘点"],
-            tools=["query_inventory"],
-            prompt=(
-                "执行库存查询 SOP：1) 先确认用户指定了渠道与 SKU；2) 调用 "
-                "query_inventory 获取当前库存；3) 向用户汇报库存数量与商品名。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="price_management",
-            description="商品价格调整管理",
-            keywords=["价格", "调价", "改价", "定价", "降价"],
-            tools=["update_price"],
-            prompt=(
-                "执行调价 SOP：1) 确认目标价与成本价；2) 若新价格低于成本价则"
-                "向用户说明无法执行（成本保护规则）；3) 调用 update_price 调整价格；"
-                "4) 汇报新旧价格。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="promotion_management",
-            description="促销活动创建与活动检查",
-            keywords=["促销", "优惠", "折扣", "满减", "活动检查"],
-            tools=["create_promotion", "query_promotions", "query_inventory"],
-            prompt=(
-                "执行促销 SOP：1) 确认渠道/SKU/折扣/起止时间；2) 如需检查现有活动先"
-                "调用 query_promotions；3) 调用 create_promotion 创建；4) 汇报活动信息。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="order_management",
-            description="订单状态查询与跟进",
-            keywords=["订单", "发货", "物流"],
-            tools=["query_order_status"],
-            prompt=(
-                "执行订单查询 SOP：1) 确认渠道与订单号；2) 调用 query_order_status "
-                "查询；3) 汇报订单当前状态。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="order_analytics",
-            description="订单/销售分析",
-            keywords=["销售分析", "成交", "销售额", "GMV", "订单分析"],
-            tools=["query_order_stats"],
-            prompt=(
-                "执行销售分析 SOP：1) 确认渠道与统计周期；2) 调用 query_order_stats "
-                "获取订单量/GMV/客单价；3) 汇总关键指标并给出结论。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="anomaly_detection",
-            description="经营异常排查（价格/库存/评分）",
-            keywords=["异常", "预警", "排查", "风控"],
-            tools=["query_anomalies"],
-            prompt=(
-                "执行异常排查 SOP：1) 确认渠道；2) 调用 query_anomalies 拉取异常项；"
-                "3) 逐条向用户说明异常并给出处理建议。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="knowledge_inquiry",
-            description="经营知识库查询",
-            keywords=["知识库", "规范", "话术", "政策"],
-            tools=["query_knowledge_base"],
-            prompt=(
-                "执行知识库查询 SOP：1) 提炼用户主题；2) 调用 query_knowledge_base "
-                "检索；3) 命中则引用条目回答，未命中则建议补充知识库。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="after_sales",
-            description="售后与客诉处理（工单/退款分析）",
-            keywords=["售后", "客诉", "投诉", "退款", "工单"],
-            tools=["query_order_status", "service_ticket", "query_after_sales_stats"],
-            prompt=(
-                "执行售后处理 SOP：1) 先查订单状态（query_order_status）；2) 根据"
-                "客诉内容创建售后工单（service_ticket，注明优先级）；3) 汇报工单号。"
-            ),
-            builtin=True,
-        ),
-        Skill(
-            name="product_listing",
-            description="商品上架/下架管理",
-            keywords=["上架", "下架", "新品发布", "下柜"],
-            tools=["product_shelf", "query_inventory"],
-            prompt=(
-                "执行上下架 SOP：1) 确认渠道/SKU/动作（on=上架 off=下架）；2) 可选"
-                "先查库存；3) 调用 product_shelf 执行；4) 汇报结果。"
-            ),
-            builtin=True,
-        ),
-    ]
+# ----------------------------------------------------------------------
+# 目录约定
+# ----------------------------------------------------------------------
+
+def _builtin_dir() -> Path:
+    return Path(__file__).resolve().parent / "skills_builtin"
 
 
-class _Store:
-    """JSON 配置读写 + mtime 缓存（技能持久化，跨进程 mtime 检测变更）。"""
+def _user_dir() -> Path:
+    env = os.environ.get("SKILLS_DIR")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / "data" / "skills"
 
-    def __init__(self) -> None:
-        self._mtime: float = -1
-        self._skills: Optional[list[dict[str, Any]]] = None
 
-    def load(self) -> list[dict[str, Any]]:
-        path = _config_path()
+def _scan_dir(root: Path, builtin: bool) -> list[Skill]:
+    """扫描 <root>/<name>/SKILL.md，坏文件跳过（不影响其余技能加载）。"""
+    out: list[Skill] = []
+    if not root.exists():
+        return out
+    for sub in sorted(root.iterdir()):
+        f = sub / "SKILL.md"
+        if not f.is_file():
+            continue
         try:
-            mtime = os.path.getmtime(path)
-            if mtime != self._mtime:
-                with open(path, "r", encoding="utf-8") as f:
-                    import json
-
-                    data = json.load(f)
-                self._skills = data.get("skills", [])
-                self._mtime = mtime
-        except (OSError, ValueError):
-            if self._skills is None:
-                self._skills = [s.to_dict() for s in _default_skills()]
-        return list(self._skills) if self._skills is not None else [s.to_dict() for s in _default_skills()]
-
-    def save(self, skills: list[dict[str, Any]]) -> None:
-        path = _config_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            import json
-
-            json.dump({"skills": skills}, f, ensure_ascii=False, indent=2)
-        self._mtime = os.path.getmtime(path)
-        self._skills = [dict(c) for c in skills]
-
-
-_store = _Store()
+            out.append(parse_skill_md(f.read_text(encoding="utf-8"), builtin=builtin))
+        except (ValueError, OSError):
+            continue
+    return out
 
 
 class SkillRegistry:
-    """技能注册表：关键词解析 + 持久化 CRUD（前端可新增/启停/编辑技能）。"""
+    """技能注册表：SKILL.md 文件制 + mtime 热加载 + 用户技能 CRUD。
 
-    def __init__(self, load_persisted: bool = True) -> None:
+    内置技能（sources/skills_builtin/）只读恒启用；用户技能
+    （data/skills/，env SKILLS_DIR 可覆盖）可新增/编辑/启停/删除。
+    """
+
+    def __init__(
+        self,
+        load_persisted: bool = True,
+        builtin_dir: Optional[Path] = None,
+        user_dir: Optional[Path] = None,
+    ) -> None:
         """初始化技能注册表。
 
         Args:
-            load_persisted: 是否从磁盘加载持久化技能（测试注入自定义注册表时传 False）。
+            load_persisted: 是否扫描磁盘技能（测试注入内存技能时传 False）。
+            builtin_dir: 覆盖内置技能目录（测试用）。
+            user_dir: 覆盖用户技能目录（测试用）。
         """
+        self._load_persisted = load_persisted
+        self._builtin_dir = Path(builtin_dir) if builtin_dir else _builtin_dir()
+        self._user_dir = Path(user_dir) if user_dir else _user_dir()
         self._skills: dict[str, Skill] = {}
+        self._cached_mtime = -1.0
         if load_persisted:
             self._load_all()
 
     # ------------------------------------------------------------------
-    # 持久化
+    # 加载与热更新
     # ------------------------------------------------------------------
 
+    def _tree_mtime(self) -> float:
+        m = 0.0
+        for root in (self._builtin_dir, self._user_dir):
+            if not root.exists():
+                continue
+            m = max(m, root.stat().st_mtime)
+            for sub in root.iterdir():
+                f = sub / "SKILL.md"
+                if f.is_file():
+                    m = max(m, f.stat().st_mtime)
+        return m
+
+    def _maybe_reload(self) -> None:
+        if not self._load_persisted:
+            return
+        cur = self._tree_mtime()
+        if cur != self._cached_mtime:
+            self._load_all()
+            self._cached_mtime = cur
+
     def _load_all(self) -> None:
-        """从磁盘加载全部技能（文件缺失时回退内置 9 个）。"""
+        """扫描内置 + 用户目录（内置优先，同名用户技能被跳过）。"""
         self._skills = {}
-        for data in _store.load():
-            skill = _to_skill(data)
+        for skill in _scan_dir(self._builtin_dir, builtin=True):
+            skill.enabled = True  # 内置技能恒启用
+            self._skills[skill.name] = skill
+        for skill in _scan_dir(self._user_dir, builtin=False):
+            if skill.name in self._skills:
+                continue
+            skill.created_at = skill.created_at or int(time.time())
             self._skills[skill.name] = skill
 
-    def _save_all(self) -> None:
-        """全量写盘（含内置技能，保持「内置+自定义」单文件结构）。"""
-        _store.save([s.to_dict() for s in self._skills.values()])
+    # ------------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------------
 
     def list(self) -> list[Skill]:
         """返回全部技能（含 disabled）。"""
+        self._maybe_reload()
         return list(self._skills.values())
 
     def list_menu(self) -> list[tuple[str, str]]:
         """技能菜单：(name, description) 列表，仅启用技能（供 load_skill 注入）。"""
-        return [
-            (s.name, s.description)
-            for s in self._skills.values()
-            if s.enabled
-        ]
+        self._maybe_reload()
+        return [(s.name, s.description) for s in self._skills.values() if s.enabled]
 
     def list_menu_names(self) -> list[str]:
         """已启用技能名列表（供状态消息/错误提示）。"""
+        self._maybe_reload()
         return [s.name for s in self._skills.values() if s.enabled]
-
-    def add(self, skill: Skill) -> Skill:
-        """新增技能（用户自定义）。"""
-        if skill.name in self._skills:
-            raise ValueError(f"技能已存在: {skill.name}")
-        if skill.builtin or skill.name in BUILTIN_NAMES:
-            raise ValueError(f"内置技能 {skill.name} 不可重复新增")
-        skill.created_at = skill.created_at or int(time.time())
-        self._skills[skill.name] = skill
-        self._save_all()
-        return skill
-
-    def update(self, name: str, patch: dict[str, Any]) -> Skill:
-        """更新技能（改 keywords/tools/prompt/enabled 等）。"""
-        skill = self._skills.get(name)
-        if skill is None:
-            raise KeyError(name)
-        updated = Skill(**{
-            **skill.to_dict(),
-            **{k: v for k, v in patch.items() if k not in {"name", "builtin", "created_at"}},
-        })
-        self._skills[name] = updated
-        self._save_all()
-        return updated
-
-    def remove(self, name: str) -> None:
-        """删除技能（内置技能不可删，仅可启停）。"""
-        if name in BUILTIN_NAMES or (self._skills.get(name) and self._skills[name].builtin):
-            raise ValueError(f"内置技能 {name} 不可删除，可停用")
-        if name not in self._skills:
-            raise KeyError(name)
-        del self._skills[name]
-        self._save_all()
-
-    def set_enabled(self, name: str, enabled: bool) -> Skill:
-        """启停技能。"""
-        return self.update(name, {"enabled": enabled})
-
-    # ------------------------------------------------------------------
-    # 兼容旧接口
-    # ------------------------------------------------------------------
-
-    def register(self, skill: Skill) -> None:
-        """注册一个技能到注册表（内存；不写盘，供内置与测试注入）。"""
-        self._skills[skill.name] = skill
-
-    def unregister(self, skill_name: str) -> None:
-        """注销一个技能（内存）。"""
-        self._skills.pop(skill_name, None)
 
     def get(self, skill_name: str) -> Optional[Skill]:
         """获取指定名称的技能（含 disabled，供前置条件/提示词读取）。"""
+        self._maybe_reload()
         return self._skills.get(skill_name)
+
+    def get_all(self) -> dict[str, Skill]:
+        """获取所有已注册的技能。"""
+        self._maybe_reload()
+        return dict(self._skills)
 
     def resolve(self, user_message: str) -> list[Skill]:
         """根据用户消息解析匹配的技能（关键词子串匹配，跳过 disabled）。
@@ -333,6 +235,7 @@ class SkillRegistry:
         Returns:
             list[Skill]: 匹配到的已启用技能列表。
         """
+        self._maybe_reload()
         matched = []
         for skill in self._skills.values():
             if not skill.enabled:
@@ -343,18 +246,88 @@ class SkillRegistry:
                     break  # 一个技能只匹配一次
         return matched
 
-    def get_all(self) -> dict[str, Skill]:
-        """获取所有已注册的技能。"""
-        return dict(self._skills)
+    # ------------------------------------------------------------------
+    # 用户技能 CRUD（内置只读）
+    # ------------------------------------------------------------------
+
+    def _is_builtin(self, name: str) -> bool:
+        skill = self._skills.get(name)
+        return bool(skill and skill.builtin)
+
+    def add(self, skill: Skill) -> Skill:
+        """新增用户技能（写 data/skills/<name>/SKILL.md）。"""
+        self._maybe_reload()
+        if skill.name in self._skills:
+            raise ValueError(f"技能已存在: {skill.name}")
+        if skill.builtin or self._is_builtin(skill.name):
+            raise ValueError(f"内置技能 {skill.name} 不可重复新增")
+        skill.created_at = skill.created_at or int(time.time())
+        target = self._user_dir / skill.name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "SKILL.md").write_text(to_skill_md(skill), encoding="utf-8")
+        self._skills[skill.name] = skill
+        self._cached_mtime = self._tree_mtime()
+        return skill
+
+    def update(self, name: str, patch: dict[str, Any]) -> Skill:
+        """更新用户技能（改 keywords/prerequisites/body/enabled 等）。内置技能只读。"""
+        self._maybe_reload()
+        skill = self._skills.get(name)
+        if skill is None:
+            raise KeyError(name)
+        if skill.builtin:
+            raise ValueError(f"内置技能 {name} 只读，不可编辑")
+        updated = Skill(**{
+            **skill.to_dict(),
+            **{k: v for k, v in patch.items() if k not in {"name", "builtin", "created_at"}},
+        })
+        updated.builtin = False
+        updated.created_at = skill.created_at
+        (self._user_dir / name / "SKILL.md").write_text(to_skill_md(updated), encoding="utf-8")
+        self._skills[name] = updated
+        self._cached_mtime = self._tree_mtime()
+        return updated
+
+    def remove(self, name: str) -> None:
+        """删除用户技能（内置技能不可删）。"""
+        self._maybe_reload()
+        if self._is_builtin(name):
+            raise ValueError(f"内置技能 {name} 不可删除")
+        if name not in self._skills:
+            raise KeyError(name)
+        import shutil
+
+        shutil.rmtree(self._user_dir / name, ignore_errors=True)
+        del self._skills[name]
+        self._cached_mtime = self._tree_mtime()
+
+    def set_enabled(self, name: str, enabled: bool) -> Skill:
+        """启停用户技能（内置技能恒启用）。"""
+        if self._is_builtin(name):
+            raise ValueError(f"内置技能 {name} 恒启用，不可停用")
+        return self.update(name, {"enabled": enabled})
+
+    # ------------------------------------------------------------------
+    # 内存接口（测试注入 / 无持久化场景）
+    # ------------------------------------------------------------------
+
+    def register(self, skill: Skill) -> None:
+        """注册一个技能到注册表（仅内存；不写盘）。"""
+        self._skills[skill.name] = skill
+
+    def unregister(self, skill_name: str) -> None:
+        """注销一个技能（内存）。"""
+        self._skills.pop(skill_name, None)
 
 
 def create_default_registry() -> SkillRegistry:
-    """创建含内置技能的注册表（用于测试注入 / 无持久化场景）。"""
+    """创建含内置技能的注册表（扫描 skills_builtin，不读用户目录）。"""
     registry = SkillRegistry(load_persisted=False)
-    for skill in _default_skills():
+    for skill in _scan_dir(_builtin_dir(), builtin=True):
+        skill.enabled = True
         registry.register(skill)
     return registry
 
 
-# 模块级默认注册表：TurnLifecycle 未显式注入时使用（持久化驱动）
+# 模块级默认注册表：TurnLifecycle 未显式注入时使用（文件制 + mtime 热加载）
 DEFAULT_SKILL_REGISTRY = SkillRegistry()

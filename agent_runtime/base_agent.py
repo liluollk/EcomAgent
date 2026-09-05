@@ -269,9 +269,9 @@ class BaseAgent:
         return {
             "name": "load_skill",
             "description": (
-                "加载指定技能的完整操作指南（SOP）与可用工具。\n"
+                "加载指定技能的完整操作指南（SOP）。\n"
                 f"可用技能菜单：\n{menu_lines}\n"
-                "调用时传入技能名；加载成功后即可使用该技能的工具。"
+                "调用时传入技能名；加载成功后按 SOP 执行运营任务。"
             ),
             "parameters": {
                 "type": "object",
@@ -301,21 +301,13 @@ class BaseAgent:
     def _visible_tools(self) -> list[dict]:
         """计算当前轮次对 LLM 可见的工具集。
 
-        渐进式：load_skill（元工具）恒可见；已加载技能绑定的工具才暴露；
-        未加载技能的工具对模型隐藏。
+        技能是纯知识（SOP/平台规则），不绑定工具：全部业务工具常可见，
+        渐进式披露只作用于知识注入（load_skill 命中才注入 SOP 正文）。
         """
         visible: list[dict] = []
         if self._load_skill_def:
             visible.append(self._load_skill_def)
-        reg = self._skill_registry
-        loaded_tool_names: set[str] = set()
-        for name in self._loaded_skills:
-            skill = reg.get(name)
-            if skill is not None:
-                loaded_tool_names.update(skill.tools)
-        for t in self._all_tools:
-            if t.get("name") in loaded_tool_names:
-                visible.append(t)
+        visible.extend(self._all_tools)
         return visible
 
     async def _handle_load_skill(
@@ -357,14 +349,12 @@ class BaseAgent:
         self._current_system_prompt = self._build_system_prompt_text(
             lifecycle, lifecycle._session, ""
         ) if lifecycle is not None else self._current_system_prompt
-        tools_desc = "、".join(skill.tools) if skill.tools else "（无绑定工具）"
         return ToolResultEvent(
             tool_use_id=event.tool_use_id,
             tool_name="load_skill",
             result=(
                 f"已加载技能 {skill_name}（{skill.description}）。\n"
-                f"SOP：{skill.prompt or '按描述执行'}\n"
-                f"可用工具：{tools_desc}"
+                f"SOP：{skill.body or '按描述执行'}"
             ),
             is_error=False,
         )
@@ -690,7 +680,7 @@ class BaseAgent:
     async def _execute_tool(self, event: ToolStartEvent) -> ToolResultEvent:
         """执行单个工具调用，返回结果事件。
 
-        load_skill 是元工具（不经过 MCP handler），由 agent 内部处理；
+        load_skill 是元工具，由 agent 内部处理；
         其余工具委托给 tool_handlers 映射。
         """
         if event.tool_name == "load_skill":

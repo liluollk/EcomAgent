@@ -176,14 +176,13 @@ export const PLATFORM_LABELS: Record<ChannelPlatform, string> = {
 
 export const CHANNEL_PLATFORMS: ChannelPlatform[] = ['mock', 'taobao', 'jd', 'douyin', 'open'];
 
-/** 技能（后端 /skills 返回） */
+/** 技能（后端 /skills 返回，SKILL.md 知识包） */
 export interface Skill {
   name: string;
   description: string;
   keywords: string[];
   prerequisites: string[];
-  tools: string[];
-  prompt: string;
+  body: string;
   enabled: boolean;
   builtin: boolean;
   created_at?: number;
