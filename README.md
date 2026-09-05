@@ -17,14 +17,15 @@
 
 - **多模型后端抽象**：OpenAI 兼容 / Anthropic / Mock 统一 `AgentBackend` 契约，流式 Tool Calling 增量解析与跨后端消息归一化在 adapter 内消化，运行时与 UI 不感知具体 SDK。
 - **Workspace / Session 状态隔离**：业务规则、凭据引用、模型状态、执行状态、会话审计由两层运行边界承载，JSONL 增量落盘，支持多会话并行与中断后恢复。
-- **工具权限治理**：执行前 PreToolUse 管线 = RBAC 身份门（店长/运营/客服/财务，工具级 ACL）→ 业务规则（成本保护）→ 模式门（READONLY / ASK / EXECUTE），allow / block / prompt 三语义，审计带操作人追责。
+- **工具权限治理**：执行前 PreToolUse 管线 = RBAC 身份门（店长/运营/客服/财务，工具级 ACL）→ 业务规则（成本保护）→ 模式门（READONLY / ASK / EXECUTE），allow / block / prompt 三语义，审计带操作人追责；**审批中心**跨会话聚合待审批请求（对话内权限卡 + 审批页双入口，REST 决定唤醒挂起 turn），高危操作 Human-in-the-Loop 人工确认后放行。
 - **工具三通道**：内置平台 API 工具（11 个电商语义操作 + save_skill，handler 经 REST 客户端 → 平台 Adapter 直达渠道服务；当前为本地模拟网关，真实平台适配层为 TODO）；MCP 外部工具（官方 MCP SDK 客户端池，stdio / JSON-RPC，用户可经 `data/mcp_servers.json` 或前端 MCP 页（粘贴 JSON，兼容 Claude Desktop / Cursor 配置格式）自行接入想用的 MCP server，内置外部工具模拟演示服务）；专用工具（save_skill 技能创建）。
 - **技能体系（SKILL.md）**：技能 = 纯运营知识包（SOP 操作手册 / 平台规则），对齐业界 Agent Skills 格式（frontmatter + markdown 正文）；渐进式披露——菜单常驻系统提示词，`load_skill` 命中才注入正文；内置 10 技能（9 电商 + skill_creator 元技能），用户/agent 可经 save_skill 创建新技能（写操作，经 HITL 人工确认后落盘热加载）。
 - **渠道配置化接入**：渠道注册表持久化（`data/channels.json`），设置页可新增 / 修改 / 停用渠道（base_url / 鉴权方式 / API Key），保存后即时生效无需重启；每个渠道独立的 REST client（各自 base_url + 鉴权）。
+- **运营看板**：跨渠道聚合概览——近 7 天 GMV 趋势、渠道构成、库存水位与经营预警（真实协议层取数，与工作台的渠道明细互补，聚焦时间维度）。
 - **可靠性**：平台错误码语义化、写操作幂等（幂等键 + 重试复用同键，防重复创建）、限流/连接失败重试。
 - **流式事件状态机**：八类 AgentEvent 驱动 UI；单轮多工具 asyncio 并发执行，结果按 Tool Call ID 归位；AbortHandler + 后端 abort 双通道中断。
-- **上下文压缩**：以「模型上下文窗口 - 13k 安全边际」为阈值自动压缩超长会话，也可由用户手动压缩（WS compact 指令）；早期对话折叠为结构化摘要（目标 / 决策 / 进度 / 已用工具），保留近期原文，占用上下文不膨胀。
-- **长期记忆**：Claude Code 式索引记忆——`MEMORY.md` 索引 + 独立记忆文件（user / feedback / project / reference 四类型），自动提取沉淀 + 显式「记住/忘记」指令；新会话注入索引与关键词命中的记忆文件全文，跨会话保留经营决策与偏好。
+- **上下文压缩**：以「模型上下文窗口 - 13k 安全边际」为阈值自动压缩超长会话，也可由用户手动压缩（WS compact 指令）；早期对话折叠为结构化摘要（目标 / 决策 / 进度 / 已用工具），保留近期原文；压缩摘要自动沉淀为长期记忆（易失摘要 → 持久决策，OpenClaw 式压缩-记忆联动），占用上下文不膨胀。
+- **长期记忆**：Claude Code 式索引记忆——`MEMORY.md` 索引 + 独立记忆文件（user / feedback / project / reference 四类型），自动提取沉淀 + 显式「记住/忘记」指令；写入经矛盾整合（Mem0 式判定：新增 / 覆盖更新 / 废弃替换 / 冗余跳过，判定器可注入），新会话注入索引与关键词命中的记忆文件全文，跨会话保留经营决策与偏好。
 
 ## 技术栈
 
@@ -168,6 +169,7 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 - **执行闭环**：Workspace/Session → Skill/Source 装配 → AgentBackend（OpenAI/Anthropic/Mock 统一契约）→ 多轮工具并发执行 → PreToolUse 权限管线 → AgentEvent 流式状态机。
 - **权限治理**：RBAC 四角色 + READONLY/ASK/EXECUTE 模式 + 业务规则（成本保护），审计带操作人。
 - **工具三通道**：内置平台 API 工具（REST 真实 HTTP → Adapter）；MCP 外部工具（stdio/JSON-RPC，server 配置前端可增删改 + 测连通，支持粘贴 JSON 接入）；专用工具（save_skill 经 HITL 创建技能）。渠道注册表配置化，设置页可新增 / 启停 / 测连通，保存即时生效。
+- **运营看板**：跨渠道聚合概览——近 7 天 GMV 趋势、渠道构成、库存水位与经营预警（真实协议层取数，与工作台的渠道明细互补，聚焦时间维度）。
 - **可靠性**：幂等键 + 限流重试 + 平台错误码语义化 + 会话 JSONL 持久化与恢复。
 - **上下文压缩**：模型窗口 - 13k 阈值自动压缩 + 手动压缩，早期对话折叠为结构化摘要。
 - **长期记忆**：MEMORY.md 索引 + 独立记忆文件（user/feedback/project/reference 四类型），自动提取 + 显式记住/忘记。
