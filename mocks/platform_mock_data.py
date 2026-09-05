@@ -4,6 +4,8 @@
 真实项目：换真实渠道时此模块被真实平台 API 响应取代，Runtime 侧无感知。
 """
 
+import time as _time
+
 # 各渠道商品库存（渠道维度不同字段，商品域为女装——与项目定位一致）
 INVENTORY = {
     "taobao": {"name": "海洋之风法式泡泡袖连衣裙", "stock": 1523, "channel_cn": "淘宝"},
@@ -56,6 +58,31 @@ KNOWLEDGE = {
 
 # 校验用渠道白名单
 VALID_CHANNELS = frozenset({"taobao", "jd", "douyin"})
+
+
+def _sales_trend(base_gmv: float, base_orders: int, weekend_lift: float) -> list[dict]:
+    """确定性生成近 7 天销售序列（无随机量，可复现）：近两日按周末系数上翘。"""
+    rows: list[dict] = []
+    now = _time.time()
+    for i in range(7):
+        ts = now - (6 - i) * 86400
+        factor = 1.0 + (weekend_lift if i >= 5 else -0.06 * ((6 - i) % 3))
+        rows.append(
+            {
+                "date": _time.strftime("%m-%d", _time.localtime(ts)),
+                "gmv": round(base_gmv * factor / 7, 2),
+                "orders": max(1, round(base_orders * factor / 7)),
+            }
+        )
+    return rows
+
+
+# 近 7 天销售趋势（渠道维度；真实项目由平台统计接口提供）
+SALES_TREND = {
+    "taobao": _sales_trend(ORDER_STATS["taobao"]["gmv"], ORDER_STATS["taobao"]["orders"], 0.30),
+    "jd": _sales_trend(ORDER_STATS["jd"]["gmv"], ORDER_STATS["jd"]["orders"], 0.20),
+    "douyin": _sales_trend(ORDER_STATS["douyin"]["gmv"], ORDER_STATS["douyin"]["orders"], 0.45),
+}
 
 
 def match_knowledge(topic: str) -> tuple[str, str] | None:

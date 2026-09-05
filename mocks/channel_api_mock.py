@@ -29,6 +29,7 @@ from mocks.platform_mock_data import (
     ORDER_STATS,
     ORDER_STATUS,
     PROMOTIONS,
+    SALES_TREND,
     VALID_CHANNELS,
     match_knowledge,
 )
@@ -151,6 +152,14 @@ async def order_stats(channel: str, period: str = Query("近7天"), x_api_key: s
     _check_channel(channel)
     d = ORDER_STATS.get(channel, {"orders": 0, "gmv": 0.0, "avg": 0.0})
     return _ok({"channel": channel, "period": period, **d})
+
+
+@app.get("/v1/{channel}/sales-trend")
+async def sales_trend(channel: str, days: int = Query(7, ge=1, le=30), x_api_key: str | None = Header(None)):
+    _check_auth(x_api_key)
+    _check_channel(channel)
+    rows = SALES_TREND.get(channel, [])[-days:]
+    return _ok({"channel": channel, "days": len(rows), "trend": rows})
 
 
 @app.get("/v1/{channel}/anomalies")
