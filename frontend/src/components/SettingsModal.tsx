@@ -281,8 +281,8 @@ function ModelSettings({ activeProvider, onProvidersChange }: { activeProvider: 
                   >
                     <option value="">思考强度：不启用</option>
                     <option value="low">思考强度：低（Anthropic→thinking / OpenAI→reasoning_effort）</option>
-                    <option value="medium">思考强度：中</option>
                     <option value="high">思考强度：高</option>
+                    <option value="highest">思考强度：最高</option>
                   </select>
                   <div className="col-span-2 flex justify-end gap-2">
                     <button
@@ -323,8 +323,8 @@ function ModelSettings({ activeProvider, onProvidersChange }: { activeProvider: 
           >
             <option value="">思考强度：不启用</option>
             <option value="low">思考强度：低</option>
-            <option value="medium">思考强度：中</option>
             <option value="high">思考强度：高</option>
+            <option value="highest">思考强度：最高</option>
           </select>
           <button
             onClick={addProviderFn}

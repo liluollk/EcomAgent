@@ -10,6 +10,12 @@ const MODES: { id: PermissionModeType; label: string; dot: string; desc: string 
 
 const PROVIDER_DOT: Record<string, string> = { openai: 'bg-accent', anthropic: 'bg-amber-500', mock: 'bg-ink-3/50' };
 
+const THINKING_OPTIONS: { id: string; label: string }[] = [
+  { id: 'low', label: '思考：低' },
+  { id: 'high', label: '思考：高' },
+  { id: 'highest', label: '思考：最高' },
+];
+
 interface ChatInputProps {
   onSend: (text: string) => void;
   onAbort: () => void;
@@ -20,6 +26,8 @@ interface ChatInputProps {
   activeProvider: string;
   onActivateProvider: (name: string) => void;
   onModeChange: (mode: PermissionModeType) => void;
+  thinkingLevel: string;
+  onThinkingLevelChange: (level: string) => void;
 }
 
 /** 底部输入区：Enter 发送 / Shift+Enter 换行 / Esc 中断，自动增高；左下角内嵌模型与权限模式切换 */
@@ -33,13 +41,17 @@ export function ChatInput({
   activeProvider,
   onActivateProvider,
   onModeChange,
+  thinkingLevel,
+  onThinkingLevelChange,
 }: ChatInputProps) {
   const [value, setValue] = useState('');
   const [modeOpen, setModeOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const thinkingRef = useRef<HTMLDivElement>(null);
 
   const resize = useCallback(() => {
     const el = ref.current;
@@ -58,14 +70,15 @@ export function ChatInput({
 
   /* 点击外部关闭下拉 */
   useEffect(() => {
-    if (!modeOpen && !modelOpen) return;
+    if (!modeOpen && !modelOpen && !thinkingOpen) return;
     const onDown = (e: MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setModeOpen(false);
       if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) setModelOpen(false);
+      if (thinkingRef.current && !thinkingRef.current.contains(e.target as Node)) setThinkingOpen(false);
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
-  }, [modeOpen, modelOpen]);
+  }, [modeOpen, modelOpen, thinkingOpen]);
 
   const current = MODES.find((m) => m.id === mode) ?? MODES[1];
   const currentProvider = providers.find((p) => p.name === activeProvider);
@@ -206,6 +219,54 @@ export function ChatInput({
                           </span>
                           <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-3">{m.desc}</span>
                         </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* 思考强度（Codex 风格：composer 左下角 chip + 向上弹层） */}
+              <div ref={thinkingRef} className="relative">
+                <button
+                  onClick={() => setThinkingOpen((v) => !v)}
+                  disabled={isStreaming}
+                  title="切换思考强度"
+                  className="flex h-7 items-center gap-1.5 rounded-lg border border-line px-2 text-[11.5px] text-ink-2 transition-colors hover:bg-black/[0.03] disabled:opacity-50"
+                >
+                  <svg className="h-3.5 w-3.5 text-ink-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  <span>{THINKING_OPTIONS.find((o) => o.id === thinkingLevel)?.label ?? '思考强度'}</span>
+                  <svg
+                    className={`h-3 w-3 text-ink-3 transition-transform ${thinkingOpen ? 'rotate-180' : ''}`}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+
+                {thinkingOpen && (
+                  <div className="animate-fade-up absolute bottom-full left-0 z-20 mb-2 w-[200px] rounded-xl border border-line bg-elevated p-1 shadow-pop">
+                    {THINKING_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => {
+                          onThinkingLevelChange(opt.id);
+                          setThinkingOpen(false);
+                        }}
+                        className={`flex w-full items-center rounded-lg px-2.5 py-2 text-left text-[12.5px] transition-colors ${
+                          opt.id === thinkingLevel ? 'bg-accent-soft font-medium text-accent' : 'text-ink hover:bg-black/[0.04]'
+                        }`}
+                      >
+                        {opt.label}
+                        {opt.id === thinkingLevel && <span className="ml-auto text-[10.5px] font-normal text-accent">当前</span>}
                       </button>
                     ))}
                   </div>
