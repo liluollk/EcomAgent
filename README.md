@@ -1,8 +1,8 @@
-# 电商运营 Agent Runtime
+# EcomAgent · 电商运营 Agent Runtime
 
 面向多品牌女装电商运营场景的通用 Agent Runtime。它将「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 结果返回」抽象为统一执行闭环，供不同的经营 Agent / Skill 复用同一套执行底座（库存查询、订单分析、促销配置、上下架、售后工单等任务统一在此运行）。
 
-核心链路由 **308 个单元与集成测试**覆盖（全部离线运行，含 E2E 全链路演示脚本），并由**离线评测 Harness**（`harness/`）以行为契约场景 + baseline 指纹做验收对比。
+核心链路由 **316 个单元与集成测试**覆盖（全部离线运行，含 E2E 全链路演示脚本），并由**离线评测 Harness**（`harness/`）以行为契约场景 + baseline 指纹做验收对比。
 
 ## 两份交付物
 
@@ -69,7 +69,7 @@ REST 客户端 (httpx, 真实 HTTP)
 | `harness/` | 离线评测 Harness：行为契约场景集、运行器、轨迹记录、指标与 baseline 验收对比 |
 | `frontend/` | 可交付版 React + TS 控制台（对话流、工具卡、权限卡），接后端真实 API |
 | `demo/` | 展示版：独立可跑的 mock 前端 + 配套说明；无需后端即可完整交互 |
-| `tests/` | 308 个测试，按模块分目录；含 E2E 全链路（`tests/e2e/`）与 harness 自身单测（`tests/harness/`） |
+| `tests/` | 316 个测试，按模块分目录；含 E2E 全链路（`tests/e2e/`）与 harness 自身单测（`tests/harness/`） |
 
 ## 快速开始
 
@@ -77,7 +77,7 @@ REST 客户端 (httpx, 真实 HTTP)
 # 依赖
 pip install -e ".[dev]"
 
-# 测试（308 个，全部离线）
+# 测试（316 个，全部离线）
 python -m pytest tests/ -q
 
 # 离线评测 Harness（行为契约场景 + baseline 验收：通过率退化即非零退出码）
@@ -176,7 +176,7 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 
 ### 验证
 
-- 308 个测试全离线通过（含 E2E 全链路脚本 `tests/e2e/test_e2e_demo.py`）；
+- 316 个测试全离线通过（含 E2E 全链路脚本 `tests/e2e/test_e2e_demo.py`）；
 - E2E 已验证：六步业务演示链路、动态渠道新增 → 对话即时调用、幂等回放、成本拦截、跨会话记忆沉淀、技能创建（save_skill 落盘 + 热加载进菜单）；
 - 离线评测 Harness 验收：`python -m harness` 以行为契约场景驱动完整链路（内置工具 + 真实 MCP 子进程 + 剧本后端），
   事件流 trace 落盘 `.harness-runs/{run_id}/`；与 `baseline.json` 场景指纹 + 通过率对比，
