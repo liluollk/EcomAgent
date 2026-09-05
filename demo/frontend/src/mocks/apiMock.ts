@@ -48,6 +48,83 @@ function toolCall(id: string, name: string, argumentsStr: string) {
   return { id, type: 'function' as const, function: { name, arguments: argumentsStr } };
 }
 
+// ---------- 审批中心 & 运营看板（展示版静态数据） ----------
+const decidedMock = new Set<string>();
+const mockPending = [
+  {
+    request_id: 'perm_demo_1',
+    session_id: 'demo-001',
+    tool_name: 'update_price',
+    tool_input: { channel: 'taobao', sku: 'SKU-001', price: 79 },
+    reason: '改价为高危写操作，已按 ASK 模式挂起等待确认',
+    timestamp: Date.now() / 1000 - 180,
+  },
+  {
+    request_id: 'perm_demo_2',
+    session_id: 'demo-001',
+    tool_name: 'product_shelf',
+    tool_input: { channel: 'jd', sku: 'SKU-002', status: 'off' },
+    reason: '下架操作需店长确认',
+    timestamp: Date.now() / 1000 - 60,
+  },
+];
+const mockHistory: Array<{ request_id: string; session_id: string; tool_name: string; approved: boolean; timestamp: number }> = [
+  { request_id: 'perm_demo_0', session_id: 'demo-001', tool_name: 'create_promotion', approved: true, timestamp: Date.now() / 1000 - 3600 },
+];
+
+function trendRows(baseGmv: number, baseOrders: number, lift: number) {
+  const rows: Array<{ date: string; gmv: number; orders: number }> = [];
+  const nowMs = Date.now();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(nowMs - (6 - i) * 86400000);
+    const factor = 1 + (i >= 5 ? lift : -0.06 * ((6 - i) % 3));
+    rows.push({
+      date: `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      gmv: Math.round(((baseGmv * factor) / 7) * 100) / 100,
+      orders: Math.max(1, Math.round((baseOrders * factor) / 7)),
+    });
+  }
+  return rows;
+}
+
+const mockChannels: Record<string, { label: string; gmv: number; orders: number; stock: number; product: string; anomalies: string[] }> = {
+  taobao: { label: '淘宝', gmv: 85600, orders: 1280, stock: 1523, product: '海洋之风法式泡泡袖连衣裙', anomalies: ['价格低于成本价（SKU-009）', '库存预警（SKU-017 低于安全水位）'] },
+  jd: { label: '京东', gmv: 51360, orders: 642, stock: 890, product: '海洋之风高腰 A 字半身裙', anomalies: ['无限 SKU 差评集中（SKU-003）'] },
+  douyin: { label: '抖音', gmv: 120800, orders: 2310, stock: 2340, product: '海洋之风复古针织开衫', anomalies: [] },
+};
+
+function dashboardSummary() {
+  const channels = Object.entries(mockChannels).map(([name, c]) => ({
+    name, label: c.label, connected: true, gmv: c.gmv, orders: c.orders, stock: c.stock, product: c.product, anomalies: c.anomalies,
+  }));
+  const trendSrc: Record<string, Array<{ date: string; gmv: number; orders: number }>> = {
+    taobao: trendRows(85600, 1280, 0.3),
+    jd: trendRows(51360, 642, 0.2),
+    douyin: trendRows(120800, 2310, 0.45),
+  };
+  const trendByDate: Record<string, { date: string; gmv: number; orders: number }> = {};
+  for (const rows of Object.values(trendSrc)) {
+    for (const r of rows) {
+      const slot = trendByDate[r.date] ?? (trendByDate[r.date] = { date: r.date, gmv: 0, orders: 0 });
+      slot.gmv = Math.round((slot.gmv + r.gmv) * 100) / 100;
+      slot.orders += r.orders;
+    }
+  }
+  const alerts = channels.flatMap((c) => c.anomalies.map((text) => ({ channel: c.label, text })));
+  return {
+    summary: {
+      total_gmv: channels.reduce((s, c) => s + c.gmv, 0),
+      total_orders: channels.reduce((s, c) => s + c.orders, 0),
+      total_stock: channels.reduce((s, c) => s + c.stock, 0),
+      connected_channels: channels.length,
+      alert_count: alerts.length,
+    },
+    trend: Object.keys(trendByDate).sort().map((k) => trendByDate[k]),
+    channels,
+    alerts,
+  };
+}
+
 const seedSessions: MockSession[] = [
   {
     session_id: 'demo-001',
@@ -187,6 +264,37 @@ export async function mockRequest(
   await delay();
   const path = url.split('?')[0];
   const payload = (body ?? {}) as Record<string, unknown>;
+
+  // ---------- 审批中心 ----------
+  if (method === 'GET' && path === '/approvals/pending') {
+    const pending = mockPending.filter((p) => !decidedMock.has(p.request_id));
+    return ok({ pending, total: pending.length });
+  }
+  const decisionMatch = path.match(/^\/approvals\/([^/]+)\/decision$/);
+  if (method === 'POST' && decisionMatch) {
+    const requestId = decisionMatch[1];
+    const item = mockPending.find((p) => p.request_id === requestId);
+    if (!item || decidedMock.has(requestId)) {
+      return { ok: false, status: 404, json: async () => ({ error: '审批请求不存在或已处理' }) };
+    }
+    decidedMock.add(requestId);
+    mockHistory.unshift({
+      request_id: requestId,
+      session_id: item.session_id,
+      tool_name: item.tool_name,
+      approved: Boolean(payload.approved),
+      timestamp: Date.now() / 1000,
+    });
+    return ok({ request_id: requestId, approved: Boolean(payload.approved) });
+  }
+  if (method === 'GET' && path === '/approvals/history') {
+    return ok({ history: mockHistory, total: mockHistory.length });
+  }
+
+  // ---------- 运营看板 ----------
+  if (method === 'GET' && path === '/dashboard/summary') {
+    return ok(dashboardSummary());
+  }
 
   // ---------- 会话 ----------
   if (method === 'GET' && path === '/sessions') {

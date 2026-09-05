@@ -3,14 +3,24 @@ import type { PermissionModeType, SessionMeta } from '../types';
 import { relativeTime } from '../lib/format';
 import { ROLE_OPTIONS } from '../lib/roles';
 
-export type Page = 'chat' | 'workspace' | 'skills' | 'mcp';
+export type Page = 'dashboard' | 'chat' | 'approvals' | 'workspace' | 'skills' | 'mcp';
 
 /** 功能导航（左上角） */
 const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
   {
+    id: 'dashboard',
+    label: '看板',
+    icon: 'M3 3v18h18 M8 17V9 M13 17V5 M18 17v-3',
+  },
+  {
     id: 'chat',
     label: '对话',
     icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z',
+  },
+  {
+    id: 'approvals',
+    label: '审批中心',
+    icon: 'M9 12l2 2 4-4 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z',
   },
   {
     id: 'workspace',
