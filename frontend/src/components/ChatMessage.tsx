@@ -3,7 +3,6 @@ import { clockTime } from '../lib/format';
 import { Markdown } from '../lib/markdown';
 import { ToolCallCard } from './ToolCallCard';
 import { PermissionCard } from './PermissionCard';
-import { WaveMark } from './Sidebar';
 
 /** 单条消息渲染：用户右侧气泡 / 助手全宽带头像 / 系统居中弱化 */
 export function ChatMessageView({
@@ -36,13 +35,10 @@ export function ChatMessageView({
   }
 
   return (
-    <div className="flex gap-3 animate-fade-up">
-      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-[#6FB6F2] text-white shadow-card">
-        <WaveMark className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 flex-1">
+    <div className="animate-fade-up">
+      <div className="min-w-0">
         <div className="flex items-baseline gap-2">
-          <span className="text-[12.5px] font-semibold text-ink">OceanBreeze</span>
+          <span className="text-[12.5px] font-semibold text-ink">电商运营 Agent</span>
           <span className="text-[10.5px] text-ink-3">{clockTime(msg.timestamp)}</span>
         </div>
 

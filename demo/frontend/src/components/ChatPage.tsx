@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import type { ChatMessage, PermissionModeType } from '../types';
+import type { ChatMessage, ModelProvider, PermissionModeType } from '../types';
 import { ChatMessageView } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { EmptyState } from './EmptyState';
@@ -10,19 +10,25 @@ interface ChatPageProps {
   statusText: string;
   connected: boolean;
   mode: PermissionModeType;
+  providers: ModelProvider[];
+  activeProvider: string;
+  onActivateProvider: (name: string) => void;
   onModeChange: (mode: PermissionModeType) => void;
   onSend: (text: string) => void;
   onAbort: () => void;
   onRespondPermission: (requestId: string, approved: boolean) => void;
 }
 
-/** 对话页：消息流 + 底部输入；空状态展示快捷指令 */
+/** 对话页：消息流 + 底部输入（含模型/权限切换）；空状态展示快捷指令 */
 export function ChatPage({
   messages,
   isStreaming,
   statusText,
   connected,
   mode,
+  providers,
+  activeProvider,
+  onActivateProvider,
   onModeChange,
   onSend,
   onAbort,
@@ -50,12 +56,12 @@ export function ChatPage({
         <EmptyState onPrompt={onSend} />
       ) : (
         <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[760px] space-y-5 px-6 py-6">
+          <div className="mx-auto max-w-[1060px] space-y-4 px-5 py-5">
             {messages.map((m) => (
               <ChatMessageView key={m.id} msg={m} onRespondPermission={onRespondPermission} />
             ))}
             {isStreaming && (
-              <div className="flex animate-fade-up items-center gap-2 pl-10 text-[12px] text-ink-3">
+              <div className="flex animate-fade-up items-center gap-2 text-[12px] text-ink-3">
                 <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/25 border-t-accent" />
                 {statusText || '正在思考…'}
               </div>
@@ -69,6 +75,9 @@ export function ChatPage({
         isStreaming={isStreaming}
         disabled={!connected}
         mode={mode}
+        providers={providers}
+        activeProvider={activeProvider}
+        onActivateProvider={onActivateProvider}
         onModeChange={onModeChange}
       />
     </div>

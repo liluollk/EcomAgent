@@ -3,9 +3,9 @@
 export type ChannelId = 'taobao' | 'jd' | 'douyin';
 
 export const CHANNEL_META: Record<ChannelId, { label: string; color: string }> = {
-  taobao: { label: '淘宝', color: '#F2641E' },
-  jd: { label: '京东', color: '#E5484D' },
-  douyin: { label: '抖音', color: '#FE2C55' },
+  taobao: { label: '淘宝', color: '#FF5000' },
+  jd: { label: '京东', color: '#E1251B' },
+  douyin: { label: '抖音', color: '#12B7BF' },
 };
 
 export const CHANNEL_LIST = (Object.keys(CHANNEL_META) as ChannelId[]).map((id) => ({

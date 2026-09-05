@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { ChannelPlatform, ChannelSource, ModelProvider, PermissionModeType, ProvidersResponse, Skill } from '../types';
+import type { ChannelPlatform, ChannelSource, ModelProvider, PermissionModeType, ProvidersResponse } from '../types';
+import { SkillManager } from './SkillManager';
 import { api } from '../lib/api';
+import { toast } from '../lib/toast';
 
 const MODE_INFO: { id: PermissionModeType; name: string; desc: string; dot: string }[] = [
   { id: 'READONLY', name: '只读模式', desc: '只读操作自动执行，写操作自动拦截', dot: 'bg-ok' },
@@ -92,6 +94,7 @@ function ModelSettings({ activeProvider, onProvidersChange }: { activeProvider: 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
 
   // 正在编辑的供应商（空 = 未在编辑）
   const [editing, setEditing] = useState<ModelProvider | null>(null);
@@ -145,6 +148,20 @@ function ModelSettings({ activeProvider, onProvidersChange }: { activeProvider: 
       onProvidersChange();
     } else {
       setNotice(data.message || data.error || '切换失败');
+    }
+  }
+
+  /** 测连通：校验供应商配置能否构建后端实例（离线，不实际调用 LLM 网络） */
+  async function testProvider(p: ModelProvider) {
+    setTesting(p.name);
+    try {
+      const resp = await api(`/providers/${p.name}/test`, { method: 'POST' });
+      const data = await resp.json();
+      setNotice(`${p.label || p.name}: ${data.message ?? (data.ok ? '配置可用' : '测试失败')}`);
+    } catch {
+      setNotice(`${p.label || p.name}: 测试请求失败`);
+    } finally {
+      setTesting(null);
     }
   }
 
@@ -233,6 +250,12 @@ function ModelSettings({ activeProvider, onProvidersChange }: { activeProvider: 
                       设为当前
                     </button>
                   )}
+                  <button
+                    onClick={() => testProvider(p)}
+                    className="rounded-md px-2 py-1 text-[11.5px] text-ink-2 transition-colors hover:bg-black/5"
+                  >
+                    {testing === p.name ? '测试中…' : '测连通'}
+                  </button>
                   <button
                     onClick={() => setEditing(editing?.name === p.name ? null : p)}
                     className="rounded-md px-2 py-1 text-[11.5px] text-ink-2 transition-colors hover:bg-black/5"
@@ -634,151 +657,7 @@ function ChannelSettings() {
 }
 
 function SkillSettings() {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Skill | null>(null);
-  const [editKeywords, setEditKeywords] = useState('');
-  const [editTools, setEditTools] = useState('');
-  const [editPrompt, setEditPrompt] = useState('');
-
-  const [addName, setAddName] = useState('');
-  const [addDesc, setAddDesc] = useState('');
-  const [addKeywords, setAddKeywords] = useState('');
-  const [addTools, setAddTools] = useState('');
-  const [addPrompt, setAddPrompt] = useState('');
-
-  async function refresh() {
-    try {
-      const resp = await api('/skills');
-      const data = await resp.json();
-      setSkills(Array.isArray(data) ? data : []);
-      setError(null);
-    } catch { setError('加载技能列表失败'); }
-    finally { setLoading(false); }
-  }
-
-  useEffect(() => { refresh(); }, []);
-
-  useEffect(() => {
-    if (editing) {
-      setEditKeywords((editing.keywords ?? []).join(', '));
-      setEditTools((editing.tools ?? []).join(', '));
-      setEditPrompt(editing.prompt ?? '');
-    }
-  }, [editing]);
-
-  async function toggleEnabled(s: Skill) {
-    const resp = await api(`/skills/${s.name}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !s.enabled }),
-    });
-    if (resp.ok) refresh();
-  }
-
-  async function saveEdit() {
-    if (!editing) return;
-    const body: Record<string, unknown> = {};
-    if (editKeywords.trim()) body.keywords = editKeywords.split(',').map((x) => x.trim()).filter(Boolean);
-    if (editTools.trim()) body.tools = editTools.split(',').map((x) => x.trim()).filter(Boolean);
-    if (editPrompt.trim()) body.prompt = editPrompt.trim();
-    const resp = await api(`/skills/${editing.name}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (resp.ok) { setNotice(`已保存 ${data.name}`); setEditing(null); refresh(); }
-    else { setNotice(data.error || '保存失败'); }
-  }
-
-  async function addSkill() {
-    if (!addName.trim()) { setNotice('请填写技能标识（name）'); return; }
-    const body: Record<string, unknown> = { name: addName.trim(), description: addDesc.trim() || addName.trim() };
-    if (addKeywords.trim()) body.keywords = addKeywords.split(',').map((x) => x.trim()).filter(Boolean);
-    if (addTools.trim()) body.tools = addTools.split(',').map((x) => x.trim()).filter(Boolean);
-    if (addPrompt.trim()) body.prompt = addPrompt.trim();
-    const resp = await api('/skills', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (resp.ok) {
-      setNotice(`已新增技能 ${data.name}`);
-      setAddName(''); setAddDesc(''); setAddKeywords(''); setAddTools(''); setAddPrompt('');
-      refresh();
-    } else { setNotice(data.error || '新增技能失败'); }
-  }
-
-  async function removeSkill(s: Skill) {
-    const resp = await api(`/skills/${s.name}`, { method: 'DELETE' });
-    const data = await resp.json();
-    setNotice(data.error || `已删除技能 ${s.name}`);
-    refresh();
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="text-[12.5px] font-medium text-ink">技能管理（渐进式加载：对话中先调 load_skill 加载技能后使用其工具）</div>
-      {loading ? <p className="text-[12px] text-ink-3">加载中…</p>
-      : error ? <p className="text-[12px] text-danger">{error}</p>
-      : <div className="space-y-2">
-          {skills.map((s) => (
-            <div key={s.name} className="rounded-xl border border-line px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <span className={`h-2 w-2 rounded-full ${s.enabled ? 'bg-ok' : 'bg-ink-3/50'}`} />
-                  <span className="text-[13.5px] text-ink">{s.name}</span>
-                  <span className="font-mono text-[11px] text-ink-3">{s.description}</span>
-                  {s.builtin && <span className="text-[11px] text-ink-3">内置</span>}
-                </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={() => toggleEnabled(s)}
-                    className="rounded-md px-2 py-1 text-[11.5px] text-ink-2 transition-colors hover:bg-black/5">
-                    {s.enabled ? '停用' : '启用'}
-                  </button>
-                  <button onClick={() => setEditing(editing?.name === s.name ? null : s)}
-                    className="rounded-md px-2 py-1 text-[11.5px] text-ink-2 transition-colors hover:bg-black/5">
-                    {editing?.name === s.name ? '收起' : '编辑'}
-                  </button>
-                  {!s.builtin && <button onClick={() => removeSkill(s)}
-                    className="rounded-md px-2 py-1 text-[11.5px] text-danger transition-colors hover:bg-red-50">删除</button>}
-                </div>
-              </div>
-              {editing?.name === s.name && (
-                <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line pt-3">
-                  <InputField value={editKeywords} onChange={setEditKeywords} placeholder="关键词（逗号分隔）" wide />
-                  <InputField value={editTools} onChange={setEditTools} placeholder="工具（逗号分隔）" wide />
-                  <InputField value={editPrompt} onChange={setEditPrompt} placeholder="SOP 指令（可选）" wide />
-                  <div className="col-span-2 flex justify-end gap-2">
-                    <button onClick={() => setEditing(null)}
-                      className="h-8 rounded-lg px-3 text-[12.5px] text-ink-2 transition-colors hover:bg-black/5">取消</button>
-                    <button onClick={saveEdit}
-                      className="h-8 rounded-lg bg-accent px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90">保存</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>}
-      {notice && <p className="text-[12px] text-ink-2">{notice}</p>}
-      <div className="rounded-xl border border-line bg-black/[0.02] p-4">
-        <div className="mb-2 text-[12.5px] font-medium text-ink">新增技能</div>
-        <div className="grid grid-cols-2 gap-2">
-          <InputField value={addName} onChange={setAddName} placeholder="标识（name）" />
-          <InputField value={addDesc} onChange={setAddDesc} placeholder="描述" />
-          <InputField value={addKeywords} onChange={setAddKeywords} placeholder="关键词（逗号分隔）" wide />
-          <InputField value={addTools} onChange={setAddTools} placeholder="工具（逗号分隔）" wide />
-          <InputField value={addPrompt} onChange={setAddPrompt} placeholder="SOP 指令（可选）" wide />
-          <button onClick={addSkill}
-            className="h-8 rounded-lg bg-accent px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90">添加</button>
-        </div>
-      </div>
-    </div>
-  );
+  return <SkillManager />;
 }
 
 function InputField({
@@ -831,8 +710,27 @@ function NotifySettings() {
   const [promoExpiry, setPromoExpiry] = useState(true);
   const [dailyReport, setDailyReport] = useState(false);
 
+  /** 通知服务未开通：开关可交互（本地预览），点击时提示实际状态 */
+  const notifyToggle = (setter: (v: boolean) => void) => (v: boolean) => {
+    setter(v);
+    toast('通知推送服务未开通：企业微信 / 短信通道接入中，设置暂不生效', 'warn');
+  };
+
   return (
     <div className="space-y-5">
+      <div className="flex items-start gap-2 rounded-xl border border-[#F0D48A] bg-[#FFFBEB] px-4 py-3">
+        <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-[#92610A]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <div>
+          <div className="text-[12.5px] font-medium text-[#92610A]">通知推送服务未开通</div>
+          <div className="mt-0.5 text-[11.5px] leading-relaxed text-[#92610A]/80">
+            企业微信 / 短信通道接入中，以下设置可预览交互但暂不生效；经营异常当前可在「工作台 → 总览」查看。
+          </div>
+        </div>
+      </div>
       <div>
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[12.5px] font-medium text-ink">库存预警阈值</span>
@@ -848,9 +746,9 @@ function NotifySettings() {
           className="w-full accent-accent"
         />
       </div>
-      <ToggleRow label="价格变动通知" desc="商品价格调整时推送通知" checked={priceChange} onChange={setPriceChange} />
-      <ToggleRow label="促销到期提醒" desc="促销活动结束前 24 小时提醒" checked={promoExpiry} onChange={setPromoExpiry} />
-      <ToggleRow label="每日运营报告" desc="每日自动生成运营数据汇总" checked={dailyReport} onChange={setDailyReport} />
+      <ToggleRow label="价格变动通知" desc="商品价格调整时推送通知" checked={priceChange} onChange={notifyToggle(setPriceChange)} />
+      <ToggleRow label="促销到期提醒" desc="促销活动结束前 24 小时提醒" checked={promoExpiry} onChange={notifyToggle(setPromoExpiry)} />
+      <ToggleRow label="每日运营报告" desc="每日自动生成运营数据汇总" checked={dailyReport} onChange={notifyToggle(setDailyReport)} />
     </div>
   );
 }

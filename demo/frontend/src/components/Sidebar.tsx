@@ -3,7 +3,7 @@ import type { PermissionModeType, SessionMeta } from '../types';
 import { relativeTime } from '../lib/format';
 import { ROLE_OPTIONS } from '../lib/roles';
 
-type Page = 'chat' | 'workspace';
+export type Page = 'chat' | 'workspace' | 'skills' | 'mcp';
 
 /** 功能导航（左上角） */
 const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
@@ -17,6 +17,16 @@ const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
     label: '工作台',
     icon: 'M3 3h7v7H3z M14 3h7v7h-7z M14 14h7v7h-7z M3 14h7v7H3z',
   },
+  {
+    id: 'skills',
+    label: '技能',
+    icon: 'M13 2 3 14h9l-1 8 10-12h-9l1-8z',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP',
+    icon: 'M2 5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z M2 15a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z M6 7.5h.01 M6 17.5h.01',
+  },
 ];
 
 interface SidebarProps {
@@ -25,7 +35,6 @@ interface SidebarProps {
   page: Page;
   connected: boolean;
   reconnecting: boolean;
-  model: string;
   mode: PermissionModeType;
   role: string;
   onRoleChange: (role: string) => void;
@@ -42,7 +51,6 @@ export function Sidebar({
   page,
   connected,
   reconnecting,
-  model,
   onNav,
   onSelect,
   onCreate,
@@ -55,15 +63,10 @@ export function Sidebar({
 
   return (
     <aside className="flex w-[264px] flex-shrink-0 flex-col bg-sidebar">
-      {/* 品牌 */}
-      <div className="flex items-center gap-2.5 px-4 pt-4">
-        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-accent to-[#6FB6F2] text-white shadow-card">
-          <WaveMark className="h-[18px] w-[18px]" />
-        </div>
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-[13.5px] font-semibold text-ink">OceanBreeze</div>
-          <div className="text-[11px] text-ink-3">电商运营 Agent</div>
-        </div>
+      {/* 品牌（纯文字，无 logo） */}
+      <div className="px-4 pb-1 pt-5">
+        <div className="text-[14px] font-semibold tracking-tight text-ink">电商运营 Agent 平台</div>
+        <div className="mt-0.5 text-[11px] text-ink-3">多渠道智能运营</div>
       </div>
 
       {/* 功能导航（左上角） */}
@@ -75,10 +78,13 @@ export function Sidebar({
               setConfirmId(null);
               onNav(item.id);
             }}
-            className={`flex h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
-              page === item.id ? 'bg-elevated font-medium text-ink shadow-card' : 'text-ink-2 hover:bg-black/[0.04] hover:text-ink'
+            className={`relative flex h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+              page === item.id ? 'bg-elevated font-medium text-ink' : 'text-ink-2 hover:bg-black/[0.04] hover:text-ink'
             }`}
           >
+            {page === item.id && (
+              <span className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-r-full bg-accent" />
+            )}
             <svg
               className={`h-4 w-4 ${page === item.id ? 'text-accent' : 'text-ink-3'}`}
               viewBox="0 0 24 24"
@@ -104,37 +110,17 @@ export function Sidebar({
             <line x1="12" y1="5" x2="12" y2="19" />
             <line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          新对话
+          新建任务
         </button>
-
-        {/* 身份角色选择（影响下一次创建会话的 user.role） */}
-        <label className="mt-2 flex h-8 items-center gap-2 rounded-lg border border-line bg-sidebar px-2.5">
-          <span className="flex-shrink-0 text-[11px] text-ink-3">身份</span>
-          <select
-            value={role}
-            onChange={(e) => onRoleChange(e.target.value)}
-            className="h-full min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none"
-            title="新建会话时使用的身份角色（RBAC）"
-          >
-            {ROLE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
       </nav>
 
-      {/* 弹性空间 */}
-      <div className="min-h-4 flex-1" />
-
-      {/* 历史会话（左下角，内部滚动） */}
-      <div className="flex min-h-0 flex-col">
+      {/* 历史会话（中部，内部可滑动） */}
+      <div className="mt-3 flex min-h-0 flex-1 flex-col border-t border-line/70 pt-2">
         <div className="flex items-baseline justify-between px-4 pb-1">
-          <span className="text-[11px] font-medium text-ink-3">历史会话</span>
+          <span className="text-[11px] font-medium text-ink-3">任务记录</span>
           <span className="text-[10.5px] text-ink-3">{sessions.length}</span>
         </div>
-        <nav className="max-h-[38vh] overflow-y-auto px-2 pb-2">
+        <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {sessions.map((s) => (
             <SessionItem
               key={s.session_id}
@@ -153,11 +139,11 @@ export function Sidebar({
               }}
             />
           ))}
-          {sessions.length === 0 && <div className="px-3 py-2 text-[12px] text-ink-3">暂无历史会话</div>}
+          {sessions.length === 0 && <div className="px-3 py-2 text-[12px] text-ink-3">暂无任务记录</div>}
         </nav>
       </div>
 
-      {/* 底部：设置 + 连接状态 */}
+      {/* 左下角：设置 + 身份切换 + 连接状态 */}
       <div className="flex-shrink-0 border-t border-line px-2 py-2">
         <div className="flex items-center justify-between">
           <button
@@ -177,9 +163,22 @@ export function Sidebar({
             }`}
           />
         </div>
-        <div className="px-3 pb-0.5 pt-0.5 text-[10.5px] text-ink-3">
-          模型 <span className="font-mono">{model}</span>
-        </div>
+        {/* 身份角色选择（影响下一次创建会话的 user.role） */}
+        <label className="mt-1 flex h-8 items-center gap-2 rounded-lg border border-line bg-sidebar px-3">
+          <span className="flex-shrink-0 text-[11px] text-ink-3">身份</span>
+          <select
+            value={role}
+            onChange={(e) => onRoleChange(e.target.value)}
+            className="h-full min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none"
+            title="新建会话时使用的身份角色（RBAC）"
+          >
+            {ROLE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </aside>
   );
@@ -261,14 +260,5 @@ function SessionItem({
         </>
       )}
     </div>
-  );
-}
-
-export function WaveMark({ className = 'h-[18px] w-[18px]' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2 12c1.5-2 4-4 6-2s4 4 6 2 4-4 6-2" />
-      <path d="M2 17c1.5-2 4-4 6-2s4 4 6 2 4-4 6-2" />
-    </svg>
   );
 }

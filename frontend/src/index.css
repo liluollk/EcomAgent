@@ -3,27 +3,38 @@
 @tailwind utilities;
 
 /* =============================================================================
-   OceanBreeze 设计令牌 —— 对齐 ZCode 桌面版浅色风格
-   主背景 #F7F8F9 · 侧边栏 #ECEDEF · 白色卡片浮起 · 正文 #24262B · 强调蓝 #2E7CF0
+   电商运营 Agent 平台设计令牌 —— 「白与黑」
+   不同深浅的白组装层次（纯白主区 / 暖白侧栏 / 灰白内嵌）· 近黑主操作
+   彩色只留给渠道品牌色与状态语义 · 数据等宽 · hairline 分层
 ============================================================================= */
 :root {
-  --bg: #f7f8f9;
-  --bg-sidebar: #ecedef;
+  /* 面：白色分层——层次靠白的差值，不靠彩色 */
+  --bg: #ffffff;
+  --bg-sidebar: #f7f7f5;
   --bg-elevated: #ffffff;
-  --bg-inset: #f2f3f5;
-  --border: rgba(17, 20, 26, 0.08);
-  --border-strong: rgba(17, 20, 26, 0.14);
-  --text: #24262b;
-  --text-2: #6b6f78;
-  --text-3: #9a9ea8;
-  --accent: #2e7cf0;
-  --accent-hover: #1f6ce0;
-  --accent-soft: rgba(46, 124, 240, 0.09);
-  --success: #16803c;
+  --bg-inset: #f2f2ef;
+  /* 线：暖灰 hairline */
+  --border: rgba(28, 30, 27, 0.09);
+  --border-strong: rgba(28, 30, 27, 0.16);
+  /* 字：暖近黑 */
+  --text: #1c1e1b;
+  --text-2: #5f6159;
+  --text-3: #93948b;
+  /* 强调：近黑（发送 / 新建任务 / 激活态） */
+  --accent: #1c1e1b;
+  --accent-hover: #000000;
+  --accent-soft: #f0f0ed;
+  /* 状态语义色（仅状态使用） */
+  --success: #1a7f5a;
   --warning: #b45309;
-  --danger: #dc2626;
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --shadow-pop: 0 12px 32px rgba(16, 24, 40, 0.16);
+  --danger: #c2403a;
+  /* 渠道品牌色（数据语义：状态点 / 工具卡色条 / 渠道卡顶条） */
+  --ch-taobao: #ff5000;
+  --ch-jd: #e1251b;
+  --ch-douyin: #12b7bf;
+  /* 阴影：卡片几乎不可见，浮层收小扩散 */
+  --shadow-card: 0 1px 2px rgba(28, 30, 27, 0.05);
+  --shadow-pop: 0 10px 28px -10px rgba(28, 30, 27, 0.18), 0 2px 6px rgba(28, 30, 27, 0.06);
 }
 
 * {
@@ -60,13 +71,13 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(17, 20, 26, 0.14);
+  background: rgba(28, 30, 27, 0.14);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(17, 20, 26, 0.24);
+  background: rgba(28, 30, 27, 0.24);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
@@ -78,11 +89,16 @@ code {
 
 select {
   appearance: none;
-  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239a9ea8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2393948b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
   background-position: right 0.5rem center;
   background-repeat: no-repeat;
   background-size: 1.1em 1.1em;
   padding-right: 2rem;
+}
+
+/* 数据等宽：价格 / 库存 / GMV / 状态码统一 tabular-nums，数字不跳动 */
+.tnum {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 动画 */

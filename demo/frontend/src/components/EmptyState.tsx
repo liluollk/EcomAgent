@@ -1,6 +1,5 @@
 import { TOOL_META } from '../lib/format';
 import BlurText from './reactbits/BlurText';
-import { WaveMark } from './Sidebar';
 
 /** 空状态快捷指令：点击直接发送（对应后端四类真实工具） */
 const QUICK_PROMPTS: { tool: string; label: string; desc: string; prompt: string }[] = [
@@ -34,15 +33,12 @@ export function EmptyState({ onPrompt }: { onPrompt: (text: string) => void }) {
   return (
     <div className="flex flex-1 items-center justify-center overflow-y-auto px-6">
       <div className="w-full max-w-[560px] animate-fade-up pb-10 text-center">
-        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-[#6FB6F2] text-white shadow-card">
-          <WaveMark className="h-6 w-6" />
-        </div>
         <h2 className="sr-only">你好，我是你的电商运营助手</h2>
         <BlurText
           text="你好，我是你的电商运营助手"
           animateBy="letters"
           delay={35}
-          className="mt-5 justify-center text-[20px] font-semibold tracking-tight text-ink"
+          className="mt-0 justify-center text-[20px] font-semibold tracking-tight text-ink"
         />
         <p className="mx-auto mt-2 max-w-[420px] text-[13px] leading-relaxed text-ink-2">
           已接入淘宝、京东、抖音三个渠道。用一句话就能查库存、调价格、创建促销、跟踪订单，我来执行并汇报结果。

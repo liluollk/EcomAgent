@@ -1,14 +1,8 @@
-import { useCallback, useState } from 'react';
-import { CHANNEL_META, CHANNEL_LIST } from '../../lib/format';
+import { useCallback, useEffect, useState } from 'react';
+import { CHANNEL_META } from '../../lib/format';
+import { toast } from '../../lib/toast';
 import CountUp from '../reactbits/CountUp';
-import {
-  CHANNEL_SUMMARIES,
-  INITIAL_TASKS,
-  PRODUCTS,
-  PROMOTIONS,
-  type Product,
-  type Task,
-} from './data';
+import { INITIAL_TASKS, type Task } from './data';
 
 type WorkspaceTab = 'overview' | 'products' | 'promotions' | 'tasks';
 
@@ -19,9 +13,86 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'tasks', label: '任务' },
 ];
 
-/** 工作台：总览 / 商品 / 促销 / 任务 四个分区（当前为演示数据） */
-export function WorkspacePage() {
+/* ============================== 数据类型（后端 /workspace/overview） ============================== */
+
+interface ChannelRow {
+  name: string;
+  label: string;
+  platform: string;
+  connected: boolean;
+  error: string | null;
+  orders: number | null;
+  gmv: number | null;
+  avg_order: number | null;
+  refund_rate: number | null;
+  tickets: number | null;
+  promotions: { name: string; discount: number }[];
+  anomalies: string[];
+  product: { sku: string; name: string; stock: number } | null;
+}
+
+interface OverviewResp {
+  channels: ChannelRow[];
+  summary: {
+    total_channels: number;
+    connected_channels: number;
+    total_orders: number;
+    total_gmv: number;
+    total_promotions: number;
+    total_anomalies: number;
+  };
+}
+
+/** 渠道展示元信息：内置三渠道有品牌色，动态渠道回退灰色 */
+function channelMeta(name: string): { label: string; color: string } {
+  const meta = (CHANNEL_META as Record<string, { label: string; color: string }>)[name];
+  return meta ?? { label: name, color: '#64748B' };
+}
+
+function money(v: number | null): string {
+  if (v === null || v === undefined) return '—';
+  return `¥${Math.round(v).toLocaleString()}`;
+}
+
+function discountLabel(d: number): string {
+  const zhe = Math.round(d * 100) / 10;
+  return `${zhe % 1 === 0 ? zhe.toFixed(0) : zhe.toFixed(1)} 折`;
+}
+
+/** 工作台：总览 / 促销接后端聚合数据（真实协议层取数）；商品明细未开通；任务为本地演示看板 */
+export function WorkspacePage({ onOpenChat }: { onOpenChat?: () => void }) {
   const [tab, setTab] = useState<WorkspaceTab>('overview');
+  const [data, setData] = useState<OverviewResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await fetch('/workspace/overview');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setData((await resp.json()) as OverviewResp);
+      setError(null);
+    } catch {
+      setError('无法加载工作台数据，请确认后端已启动');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const summary = data?.summary;
+  const statusLabel = loading
+    ? '加载中…'
+    : error
+      ? '数据加载失败'
+      : summary && summary.connected_channels < summary.total_channels
+        ? `${summary.connected_channels}/${summary.total_channels} 渠道在线 · 部分未接入`
+        : summary
+          ? `${summary.connected_channels}/${summary.total_channels} 渠道在线 · 实时数据`
+          : '';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -40,16 +111,47 @@ export function WorkspacePage() {
             </button>
           ))}
         </div>
-        <span className="rounded-full border border-[#F0D48A] bg-[#FFFBEB] px-2.5 py-1 text-[11px] font-medium text-[#92610A]">
-          演示数据 · 接入真实渠道后自动更新
-        </span>
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+              error || (summary && summary.connected_channels < summary.total_channels)
+                ? 'border-[#F0D48A] bg-[#FFFBEB] text-[#92610A]'
+                : 'border-[#BBE7CDAF] bg-[#ECFDF3] text-ok'
+            }`}
+          >
+            {tab === 'tasks' ? '本地演示看板 · 拖拽交互可用' : statusLabel}
+          </span>
+          <button
+            onClick={() => {
+              setLoading(true);
+              void refresh();
+            }}
+            title="刷新"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         <div key={tab} className="mx-auto max-w-[980px] animate-fade-up px-6 py-5">
-          {tab === 'overview' && <OverviewTab />}
-          {tab === 'products' && <ProductsTab />}
-          {tab === 'promotions' && <PromotionsTab />}
+          {tab === 'overview' &&
+            (error ? (
+              <LoadError message={error} onRetry={refresh} />
+            ) : (
+              <OverviewTab data={data} loading={loading} />
+            ))}
+          {tab === 'products' && <ProductsTab onOpenChat={onOpenChat} />}
+          {tab === 'promotions' &&
+            (error ? (
+              <LoadError message={error} onRetry={refresh} />
+            ) : (
+              <PromotionsTab data={data} loading={loading} />
+            ))}
           {tab === 'tasks' && <TasksTab />}
         </div>
       </div>
@@ -57,205 +159,204 @@ export function WorkspacePage() {
   );
 }
 
-/* ============================== 总览 ============================== */
+function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-elevated px-6 py-14 shadow-card">
+      <svg className="h-8 w-8 text-ink-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+        <circle cx="12" cy="12" r="9" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <p className="text-[13px] text-ink-2">{message}</p>
+      <button
+        onClick={onRetry}
+        className="h-8 rounded-lg bg-accent px-4 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90"
+      >
+        重试
+      </button>
+    </div>
+  );
+}
 
-function OverviewTab() {
-  const totalProducts = CHANNEL_SUMMARIES.reduce((s, c) => s + c.products, 0);
-  const totalAlerts = CHANNEL_SUMMARIES.reduce((s, c) => s + c.alerts, 0);
-  const totalSales = CHANNEL_SUMMARIES.reduce((s, c) => s + c.todaySales, 0);
-  const activePromos = PROMOTIONS.filter((p) => p.status === 'active').length;
+/* ============================== 总览（真实聚合数据） ============================== */
+
+function OverviewTab({ data, loading }: { data: OverviewResp | null; loading: boolean }) {
+  if (loading || !data) {
+    return <div className="py-14 text-center text-[13px] text-ink-3">加载渠道数据中…</div>;
+  }
+  const s = data.summary;
 
   return (
     <div className="space-y-5 animate-fade-up">
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="在售商品" value={totalProducts} />
-        <KpiCard label="库存预警" value={totalAlerts} tone="warn" />
-        <KpiCard label="今日销量" value={totalSales} tone="ok" />
-        <KpiCard label="进行中促销" value={activePromos} />
+        <KpiCard label="近7天订单" value={s.total_orders} />
+        <KpiCard label="近7天 GMV" value={s.total_gmv} money />
+        <KpiCard label="进行中促销" value={s.total_promotions} tone="ok" />
+        <KpiCard label="经营异常" value={s.total_anomalies} tone={s.total_anomalies > 0 ? 'warn' : undefined} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        {CHANNEL_SUMMARIES.map((c) => {
-          const meta = CHANNEL_META[c.id];
-          return (
-            <div key={c.id} className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
-              <div className="flex items-center gap-2.5 border-b border-line px-4 py-3">
-                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: meta.color }} />
-                <span className="text-[13.5px] font-semibold text-ink">{meta.label}</span>
-                <span className="ml-auto text-[11.5px] text-ink-3">{c.products} 件商品</span>
-              </div>
-              <div className="grid grid-cols-3 gap-2 px-4 py-3">
-                <MiniStat label="商品数" value={c.products} />
-                <MiniStat label="库存预警" value={c.alerts} tone={c.alerts > 3 ? 'danger' : 'warn'} />
-                <MiniStat label="今日销量" value={c.todaySales} tone="ok" />
-              </div>
-              <div className="border-t border-line">
-                <div className="px-4 pb-1 pt-2.5 text-[11px] font-medium text-ink-3">TOP 商品</div>
-                {c.top.map((p) => (
-                  <div key={p.id} className="flex items-center justify-between gap-2 px-4 py-2 text-[12px]">
-                    <div className="min-w-0">
-                      <div className="truncate text-ink">{p.name}</div>
-                      <div className="font-mono text-[10.5px] text-ink-3">{p.id}</div>
+      {data.channels.length === 0 ? (
+        <div className="rounded-xl border border-line bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
+          暂无启用渠道，可在「设置 → 渠道连接」中新增
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          {data.channels.map((c) => {
+            const meta = channelMeta(c.name);
+            return (
+              <div key={c.name} className="relative overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
+                {/* 渠道品牌色顶条 */}
+                <span className="absolute left-0 top-0 h-[3px] w-full" style={{ backgroundColor: c.connected ? meta.color : '#CBD5E1' }} />
+                <div className="flex items-center gap-2.5 border-b border-line px-4 pb-3 pt-3.5">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.connected ? meta.color : '#CBD5E1' }} />
+                  <span className="text-[13.5px] font-semibold text-ink">{c.label}</span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10.5px] font-medium ${
+                      c.platform === 'mock' ? 'bg-black/5 text-ink-3' : 'bg-[#FFF4E5] text-[#B45309]'
+                    }`}
+                  >
+                    {c.platform === 'mock' ? 'mock' : c.platform}
+                  </span>
+                  <span className="ml-auto text-[11.5px] text-ink-3">
+                    {c.connected ? '在线' : c.error || '未接入'}
+                  </span>
+                </div>
+
+                {c.connected ? (
+                  <>
+                    <div className="grid grid-cols-3 gap-2 px-4 py-3">
+                      <MiniStat label="订单" value={c.orders} />
+                      <MiniStat label="GMV" value={c.gmv} money tone="ok" />
+                      <MiniStat label="客单价" value={c.avg_order} money />
                     </div>
-                    <div className="flex flex-shrink-0 items-center gap-3 text-ink-2">
-                      <span>¥{p.price}</span>
-                      <span className={p.stock <= 10 ? 'font-medium text-danger' : ''}>库存 {p.stock}</span>
-                      <span>售 {p.sales}</span>
+                    <div className="border-t border-line px-4 py-2.5">
+                      <div className="mb-1.5 text-[11px] font-medium text-ink-3">促销活动</div>
+                      {c.promotions.length === 0 ? (
+                        <div className="pb-1 text-[12px] text-ink-3">暂无进行中促销</div>
+                      ) : (
+                        c.promotions.slice(0, 2).map((p) => (
+                          <div key={p.name} className="flex items-center justify-between py-1 text-[12px]">
+                            <span className="truncate text-ink">{p.name}</span>
+                            <span className="flex-shrink-0 font-medium text-accent">{discountLabel(p.discount)}</span>
+                          </div>
+                        ))
+                      )}
                     </div>
-                  </div>
-                ))}
+                    <div className="border-t border-line px-4 py-2.5">
+                      <div className="mb-1.5 text-[11px] font-medium text-ink-3">经营提示</div>
+                      {c.anomalies.length === 0 ? (
+                        <div className="pb-1 text-[12px] text-ok">运行正常，无异常项</div>
+                      ) : (
+                        c.anomalies.slice(0, 2).map((a) => (
+                          <div key={a} className="flex items-start gap-1.5 py-0.5 text-[12px] text-ink-2">
+                            <span className="mt-[5px] h-1.5 w-1.5 flex-shrink-0 rounded-full bg-warn" />
+                            <span>{a}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    {c.product && (
+                      <div className="flex items-center justify-between border-t border-line px-4 py-2.5 text-[12px]">
+                        <div className="min-w-0">
+                          <div className="truncate text-ink">{c.product.name}</div>
+                          <div className="font-mono text-[10.5px] text-ink-3">{c.product.sku}</div>
+                        </div>
+                        <span className={`flex-shrink-0 font-medium ${c.product.stock <= 100 ? 'text-warn' : 'text-ink-2'}`}>
+                          库存 {c.product.stock.toLocaleString()}
+                        </span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="px-4 py-6 text-center text-[12px] text-ink-3">{c.error || '渠道数据不可用'}</div>
+                )}
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function KpiCard({ label, value, tone }: { label: string; value: number; tone?: 'ok' | 'warn' }) {
+function KpiCard({ label, value, tone, money: isMoney }: { label: string; value: number; tone?: 'ok' | 'warn'; money?: boolean }) {
   return (
     <div className="rounded-xl border border-line bg-elevated p-4 shadow-card">
       <div className="text-[12px] text-ink-3">{label}</div>
       <div
-        className={`mt-1 text-[24px] font-bold leading-none tracking-tight ${
+        className={`tnum mt-1 text-[24px] font-bold leading-none tracking-tight ${
           tone === 'ok' ? 'text-ok' : tone === 'warn' ? 'text-warn' : 'text-ink'
         }`}
       >
-        <CountUp to={value} duration={1.2} />
+        {isMoney ? (
+          money(value)
+        ) : (
+          <CountUp to={value} duration={1.2} />
+        )}
       </div>
     </div>
   );
 }
 
-function MiniStat({ label, value, tone }: { label: string; value: number; tone?: 'ok' | 'warn' | 'danger' }) {
-  const color = tone === 'ok' ? 'text-ok' : tone === 'warn' ? 'text-warn' : tone === 'danger' ? 'text-danger' : 'text-ink';
+function MiniStat({ label, value, tone, money: isMoney }: { label: string; value: number | null; tone?: 'ok'; money?: boolean }) {
   return (
     <div>
       <div className="text-[10.5px] text-ink-3">{label}</div>
-      <div className={`text-[15px] font-semibold ${color}`}>{value}</div>
-    </div>
-  );
-}
-
-/* ============================== 商品 ============================== */
-
-function ProductsTab() {
-  const [query, setQuery] = useState('');
-  const [channel, setChannel] = useState<'all' | string>('all');
-  const [status, setStatus] = useState<'all' | Product['status']>('all');
-
-  const filtered = PRODUCTS.filter((p) => channel === 'all' || p.channel === channel)
-    .filter((p) => status === 'all' || p.status === status)
-    .filter((p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.id.toLowerCase().includes(query.toLowerCase()));
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索商品名称 / SKU"
-            className="h-9 w-56 rounded-lg border border-line bg-elevated pl-8 pr-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-accent/50 focus:outline-none"
-          />
-        </div>
-        <select
-          value={channel}
-          onChange={(e) => setChannel(e.target.value)}
-          className="h-9 rounded-lg border border-line bg-elevated px-3 text-[13px] text-ink focus:border-accent/50 focus:outline-none"
-        >
-          <option value="all">全部渠道</option>
-          {CHANNEL_LIST.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.label}
-            </option>
-          ))}
-        </select>
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value as typeof status)}
-          className="h-9 rounded-lg border border-line bg-elevated px-3 text-[13px] text-ink focus:border-accent/50 focus:outline-none"
-        >
-          <option value="all">全部状态</option>
-          <option value="normal">正常</option>
-          <option value="low_stock">库存偏低</option>
-          <option value="out_of_stock">缺货</option>
-        </select>
-        <span className="ml-auto text-[12px] text-ink-3">{filtered.length} 件商品</span>
-      </div>
-
-      <div className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
-        {filtered.map((p, idx) => (
-          <div
-            key={p.id}
-            className={`flex items-center gap-3 px-4 py-3 ${idx > 0 ? 'border-t border-line' : ''} transition-colors hover:bg-black/[0.015]`}
-          >
-            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-inset text-[18px]">{p.image}</div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13.5px] font-medium text-ink">{p.name}</div>
-              <div className="mt-0.5 flex items-center gap-2">
-                <ChannelTag id={p.channel} />
-                <span className="font-mono text-[11px] text-ink-3">{p.id}</span>
-              </div>
-            </div>
-            <Metric label="价格" value={`¥${p.price}`} />
-            <Metric
-              label="库存"
-              value={String(p.stock)}
-              tone={p.stock === 0 ? 'danger' : p.stock < 50 ? 'warn' : undefined}
-            />
-            <Metric label="销量" value={String(p.sales)} />
-            <StockBadge status={p.status} />
-          </div>
-        ))}
-        {filtered.length === 0 && <div className="px-4 py-12 text-center text-[13px] text-ink-3">没有匹配的商品，调整筛选条件试试</div>}
+      <div className={`tnum text-[14px] font-semibold ${tone === 'ok' ? 'text-ok' : 'text-ink'}`}>
+        {isMoney ? money(value) : (value ?? '—')}
       </div>
     </div>
   );
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'warn' | 'danger' }) {
-  const color = tone === 'warn' ? 'text-warn' : tone === 'danger' ? 'text-danger' : 'text-ink';
+/* ============================== 商品（未开通） ============================== */
+
+function ProductsTab({ onOpenChat }: { onOpenChat?: () => void }) {
   return (
-    <div className="w-16 flex-shrink-0 text-right">
-      <div className="text-[10.5px] text-ink-3">{label}</div>
-      <div className={`text-[13.5px] font-medium ${color}`}>{value}</div>
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-elevated px-6 py-14 shadow-card animate-fade-up">
+      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-inset text-[20px]">🚧</div>
+      <div className="tnum text-[14px] font-semibold text-ink">商品明细管理未开通</div>
+      <p className="max-w-[420px] text-center text-[12.5px] leading-relaxed text-ink-3">
+        SKU 级商品库与批量管理依赖真实平台商品 API（适配层接入中）。
+        当前可通过对话助手查询各渠道库存、价格与订单状态，总览页可查看渠道代表商品。
+      </p>
+      <div className="mt-1 flex items-center gap-2">
+        <button
+          onClick={() => {
+            if (onOpenChat) {
+              onOpenChat();
+            } else {
+              toast('请切换到「对话」页与助手交互');
+            }
+          }}
+          className="h-8 rounded-lg bg-accent px-4 text-[12.5px] font-medium text-white transition-colors hover:bg-accent/90"
+        >
+          去对话查询库存
+        </button>
+        <button
+          onClick={() => toast('商品批量管理规划中，接入真实平台商品 API 后开放', 'warn')}
+          className="h-8 rounded-lg border border-line px-4 text-[12.5px] text-ink-2 transition-colors hover:bg-black/[0.04]"
+        >
+          了解更多
+        </button>
+      </div>
     </div>
   );
 }
 
-function StockBadge({ status }: { status: Product['status'] }) {
-  if (status === 'normal') {
-    return <span className="w-16 flex-shrink-0 text-right text-[11.5px] font-medium text-ok">正常</span>;
-  }
-  if (status === 'low_stock') {
-    return <span className="w-16 flex-shrink-0 text-right text-[11.5px] font-medium text-warn">库存偏低</span>;
-  }
-  return <span className="w-16 flex-shrink-0 text-right text-[11.5px] font-medium text-danger">缺货</span>;
-}
+/* ============================== 促销（真实聚合数据） ============================== */
 
-function ChannelTag({ id }: { id: keyof typeof CHANNEL_META }) {
-  const meta = CHANNEL_META[id];
-  return (
-    <span
-      className="rounded px-1.5 py-px text-[10.5px] font-medium"
-      style={{ backgroundColor: `${meta.color}14`, color: meta.color }}
-    >
-      {meta.label}
-    </span>
-  );
-}
-
-/* ============================== 促销 ============================== */
-
-function PromotionsTab() {
+function PromotionsTab({ data, loading }: { data: OverviewResp | null; loading: boolean }) {
   const [channel, setChannel] = useState<'all' | string>('all');
-  const filtered = PROMOTIONS.filter((p) => channel === 'all' || p.channel === channel);
+
+  if (loading || !data) {
+    return <div className="py-14 text-center text-[13px] text-ink-3">加载促销数据中…</div>;
+  }
+
+  const rows = data.channels
+    .filter((c) => channel === 'all' || c.name === channel)
+    .flatMap((c) => c.promotions.map((p) => ({ ...p, ch: c })));
+  const channelOptions = data.channels;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -266,62 +367,56 @@ function PromotionsTab() {
           className="h-9 rounded-lg border border-line bg-elevated px-3 text-[13px] text-ink focus:border-accent/50 focus:outline-none"
         >
           <option value="all">全部渠道</option>
-          {CHANNEL_LIST.map((c) => (
-            <option key={c.id} value={c.id}>
+          {channelOptions.map((c) => (
+            <option key={c.name} value={c.name}>
               {c.label}
             </option>
           ))}
         </select>
-        <span className="ml-auto text-[12px] text-ink-3">{filtered.length} 个活动</span>
+        <span className="ml-auto text-[12px] text-ink-3">{rows.length} 个活动</span>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {filtered.map((promo) => {
-          const progress = promo.target === 0 ? 0 : Math.min((promo.sales / promo.target) * 100, 100);
-          const barColor = progress >= 80 ? 'var(--success)' : progress >= 40 ? 'var(--warning)' : 'var(--danger)';
-          return (
-            <div key={promo.id} className="rounded-xl border border-line bg-elevated p-4 shadow-card">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-[14px] font-semibold text-ink">{promo.name}</div>
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <ChannelTag id={promo.channel} />
-                    <span className="text-[11.5px] text-ink-3">{promo.type}</span>
-                    <PromoStatus status={promo.status} />
+      {rows.length === 0 ? (
+        <div className="rounded-xl border border-line bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
+          所选渠道暂无进行中促销
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {rows.map((p, idx) => {
+            const meta = channelMeta(p.ch.name);
+            return (
+              <div key={`${p.ch.name}-${p.name}-${idx}`} className="rounded-xl border border-line bg-elevated p-4 shadow-card">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate tnum text-[14px] font-semibold text-ink">{p.name}</div>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <span
+                        className="rounded px-1.5 py-px text-[10.5px] font-medium"
+                        style={{ backgroundColor: `${meta.color}14`, color: meta.color }}
+                      >
+                        {p.ch.label}
+                      </span>
+                      <span className="text-[11.5px] text-ink-3">进行中</span>
+                    </div>
+                  </div>
+                  <div className="flex-shrink-0 rounded-lg bg-accent-soft px-2.5 py-1 text-[13px] font-semibold text-accent">
+                    {discountLabel(p.discount)}
                   </div>
                 </div>
-                <div className="rounded-lg bg-accent-soft px-2.5 py-1 text-[13px] font-semibold text-accent">{promo.discount}</div>
-              </div>
-              <div className="mt-3 text-[12px] text-ink-3">
-                {promo.startDate} ~ {promo.endDate}
-              </div>
-              <div className="mt-3">
-                <div className="mb-1.5 flex items-center justify-between text-[12px]">
-                  <span className="text-ink-3">销售进度</span>
-                  <span className="text-ink-2">
-                    ¥{promo.sales.toLocaleString()} / ¥{promo.target.toLocaleString()}
-                  </span>
+                <div className="mt-3 flex items-center justify-between text-[11.5px] text-ink-3">
+                  <span>数据来源：{p.ch.label}平台促销接口</span>
+                  <span>创建促销可在对话页完成</span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-inset">
-                  <div className="h-full rounded-full transition-all" style={{ width: `${progress}%`, backgroundColor: barColor }} />
-                </div>
-                <div className="mt-1 text-[11px] text-ink-3">{progress.toFixed(0)}% 完成</div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function PromoStatus({ status }: { status: 'active' | 'upcoming' | 'expired' }) {
-  if (status === 'active') return <span className="text-[11.5px] font-medium text-ok">进行中</span>;
-  if (status === 'upcoming') return <span className="text-[11.5px] font-medium text-accent">未开始</span>;
-  return <span className="text-[11.5px] text-ink-3">已结束</span>;
-}
-
-/* ============================== 任务看板 ============================== */
+/* ============================== 任务看板（本地演示） ============================== */
 
 const TASK_COLUMNS: { id: Task['status']; title: string; dot: string }[] = [
   { id: 'todo', title: '待处理', dot: 'bg-ink-3' },
@@ -372,7 +467,7 @@ function TasksTab() {
             </div>
             <div className="space-y-2.5">
               {list.map((task) => {
-                const meta = CHANNEL_META[task.channel];
+                const meta = channelMeta(task.channel);
                 const pr = PRIORITY_META[task.priority];
                 return (
                   <div

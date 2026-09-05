@@ -182,10 +182,13 @@ export class MockEventStream {
   }
 
   abort() {
+    if (!this.running) return;
     this.aborted = true;
     this.pending?.resolve(false);
     this.pending = null;
     this.running = false;
+    // 与真实后端 1:1：中断以 AbortEvent 收尾（前端中断提示统一由事件驱动）
+    this.emit({ type: 'abort', reason: 'user_cancel' });
   }
 
   respondPermission(requestId: string, approved: boolean) {

@@ -9,10 +9,15 @@ export function ToolCallCard({ call }: { call: ToolCallInfo }) {
   const channel = inferChannel(call.input);
 
   return (
-    <div className="animate-fade-up overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
+    <div className="animate-fade-up relative overflow-hidden rounded-lg border border-line bg-elevated shadow-card">
+      {/* 渠道品牌色左条：一眼识别这次操作发生在哪个平台 */}
+      <span
+        className="absolute left-0 top-0 h-full w-[2.5px]"
+        style={{ backgroundColor: channel ? CHANNEL_META[channel].color : 'var(--accent)' }}
+      />
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-black/[0.02]"
+        className="flex w-full items-center gap-2.5 py-2.5 pl-4 pr-3.5 text-left transition-colors hover:bg-black/[0.02]"
       >
         <StatusIcon status={call.status} />
         <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
@@ -30,7 +35,7 @@ export function ToolCallCard({ call }: { call: ToolCallInfo }) {
             {CHANNEL_META[channel].label}
           </span>
         )}
-        <span className="ml-auto flex flex-shrink-0 items-center gap-1 text-[11px] text-ink-3">
+        <span className="ml-auto flex flex-shrink-0 items-center gap-1 font-mono text-[10.5px] text-ink-3 tnum">
           {call.status === 'running' ? '执行中…' : call.status === 'error' ? '失败' : '完成'}
           <svg
             className={`h-3 w-3 transition-transform ${open ? 'rotate-90' : ''}`}

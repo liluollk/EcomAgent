@@ -40,6 +40,8 @@ from transport.router.channels import router as channels_router
 from transport.router.providers import router as providers_router
 from transport.router.workspaces import router as workspaces_router
 from transport.router.skills import router as skills_router
+from transport.router.workspace_data import router as workspace_data_router
+from transport.router.mcp import router as mcp_router
 
 # ---------------------------------------------------------------------------
 # 应用生命周期
@@ -69,10 +71,19 @@ app.include_router(channels_router)
 app.include_router(providers_router)
 app.include_router(workspaces_router)
 app.include_router(skills_router)
+app.include_router(workspace_data_router)
+app.include_router(mcp_router)
 
 # ---------------------------------------------------------------------------
 # 前端静态文件
 # ---------------------------------------------------------------------------
+
+# Windows 注册表可能把 .js 映射为 text/plain，浏览器对 ES module 强制 MIME
+# 校验会拒绝加载；显式修正为标准类型（跨平台无害）。
+import mimetypes as _mimetypes
+
+_mimetypes.add_type("application/javascript", ".js")
+_mimetypes.add_type("text/css", ".css")
 
 _FRONTEND_DIST_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")

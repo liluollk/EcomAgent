@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ChatMessage, PermissionModeType, SessionMeta, ToolCallInfo } from './types';
+import type { AgentEvent, ChatMessage, ModelProvider, PermissionModeType, SessionMeta, ToolCallInfo } from './types';
 import { useWebSocket } from './hooks/useWebSocket';
 import { api } from './lib/api';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, type Page } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { ROLE_LABELS } from './lib/roles';
 import { ChatPage } from './components/ChatPage';
 import { WorkspacePage } from './components/workspace/WorkspacePage';
+import { ComingSoon } from './components/pages/ComingSoon';
 import { SettingsModal } from './components/SettingsModal';
+import { ToastHost } from './components/Toast';
 import { uid } from './lib/format';
 
-type Page = 'chat' | 'workspace';
+const PAGE_TITLES: Record<Page, string> = {
+  chat: '对话',
+  workspace: '工作台',
+  skills: '技能',
+  mcp: 'MCP',
+};
 
 const MODE_LABEL: Record<PermissionModeType, string> = {
   READONLY: '只读模式',
@@ -39,6 +46,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mode, setMode] = useState<PermissionModeType>(loadStoredMode);
   const [activeProvider, setActiveProvider] = useState(() => localStorage.getItem('ob.provider') || 'openai');
+  const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [role, setRole] = useState<string>(() => localStorage.getItem('ob.role') || 'operator');
 
   const activeIdRef = useRef<string | null>(null);
@@ -119,12 +127,13 @@ export default function App() {
     }
   }, []);
 
-  /** 从后端拉取当前激活的模型供应商（设置页切换后据此刷新展示） */
+  /** 从后端拉取供应商列表与当前激活项（输入框模型切换与设置页共用此状态） */
   const fetchProviders = useCallback(async () => {
     try {
       const resp = await api('/providers');
       if (!resp.ok) return;
-      const data = (await resp.json()) as { active?: string };
+      const data = (await resp.json()) as { active?: string; providers?: ModelProvider[] };
+      if (Array.isArray(data.providers)) setProviders(data.providers);
       if (data.active) {
         setActiveProvider(data.active);
         localStorage.setItem('ob.provider', data.active);
@@ -133,6 +142,19 @@ export default function App() {
       /* 加载失败不阻塞 */
     }
   }, []);
+
+  /** 切换激活供应商（输入框模型选择器调用，成功后刷新列表） */
+  const activateProvider = useCallback(
+    async (name: string) => {
+      try {
+        const resp = await api(`/providers/${name}/activate`, { method: 'POST' });
+        if (resp.ok) await fetchProviders();
+      } catch {
+        /* 失败静默：列表刷新时自然回正 */
+      }
+    },
+    [fetchProviders],
+  );
 
   /** 处理后端 AgentEvent 流 */
   const handleEvent = useCallback(
@@ -249,6 +271,20 @@ export default function App() {
               return { ...prev, [sid]: [...list.slice(0, -1), { ...last, isStreaming: false }] };
             }
             return prev;
+          });
+          break;
+
+        case 'abort':
+          // AbortEvent（真实后端与 mock 流一致）：中断提示统一由事件驱动
+          setIsStreaming(false);
+          setStatusText('');
+          pushMessage(sid, {
+            id: uid(),
+            role: 'system',
+            content: event.reason ? `已中断（${event.reason}）` : '已中断',
+            toolCalls: [],
+            isStreaming: false,
+            timestamp: Date.now(),
           });
           break;
 
@@ -401,23 +437,12 @@ export default function App() {
     [isStreaming, pushMessage, sendMessage],
   );
 
-  /** 中断生成 */
+  /** 中断生成：发送 abort，中断提示由 AbortEvent 统一回推展示 */
   const handleAbort = useCallback(() => {
     sendAbort();
     setIsStreaming(false);
     setStatusText('');
-    const sid = activeIdRef.current;
-    if (sid) {
-      pushMessage(sid, {
-        id: uid(),
-        role: 'system',
-        content: '已中断',
-        toolCalls: [],
-        isStreaming: false,
-        timestamp: Date.now(),
-      });
-    }
-  }, [sendAbort, pushMessage]);
+  }, [sendAbort]);
 
   /** 切换权限模式：写入后端（持久化 + 广播 mode_change），本地乐观更新 */
   const handleModeChange = useCallback(
@@ -458,13 +483,13 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen text-ink">
+      <ToastHost />
       <Sidebar
         sessions={sessions}
         activeId={activeId}
         page={page}
         connected={connected}
         reconnecting={reconnecting}
-        model={activeProvider}
         mode={mode}
         role={role}
         onRoleChange={handleRoleChange}
@@ -497,7 +522,7 @@ export default function App() {
         )}
 
         <TopBar
-          title={page === 'chat' ? activeTitle || '对话' : '工作台'}
+          title={page === 'chat' ? activeTitle || PAGE_TITLES.chat : PAGE_TITLES[page]}
           roleLabel={activeRoleLabel}
           userId={activeUserId}
         />
@@ -509,13 +534,26 @@ export default function App() {
             statusText={statusText}
             connected={connected}
             mode={mode}
+            providers={providers}
+            activeProvider={activeProvider}
+            onActivateProvider={(name) => void activateProvider(name)}
             onModeChange={handleModeChange}
             onSend={handleSend}
             onAbort={handleAbort}
             onRespondPermission={respondPermission}
           />
+        ) : page === 'workspace' ? (
+          <WorkspacePage onOpenChat={() => setPage('chat')} />
+        ) : page === 'skills' ? (
+          <ComingSoon
+            title="技能管理"
+            desc="技能机制已在引擎层实现（渐进式加载：load_skill 元工具 + SOP 注入 + 工具门控），管理界面开发中。"
+          />
         ) : (
-          <WorkspacePage />
+          <ComingSoon
+            title="MCP 管理"
+            desc="MCP 工具服务运行中（stdio 子进程，运营工具经 JSON-RPC 真实发现并注入执行链路），管理界面开发中。"
+          />
         )}
       </div>
 
