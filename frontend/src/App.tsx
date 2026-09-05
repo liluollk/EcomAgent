@@ -6,13 +6,17 @@ import { TopBar } from './components/TopBar';
 import { ROLE_LABELS } from './lib/roles';
 import { ChatPage } from './components/ChatPage';
 import { WorkspacePage } from './components/workspace/WorkspacePage';
+import { ApprovalsPage } from './components/pages/ApprovalsPage';
+import { DashboardPage } from './components/pages/DashboardPage';
 import { ComingSoon } from './components/pages/ComingSoon';
 import { SettingsModal } from './components/SettingsModal';
 import { ToastHost } from './components/Toast';
 import { uid } from './lib/format';
 
 const PAGE_TITLES: Record<Page, string> = {
+  dashboard: '运营看板',
   chat: '对话',
+  approvals: '审批中心',
   workspace: '工作台',
   skills: '技能',
   mcp: 'MCP',
@@ -541,6 +545,10 @@ export default function App() {
             onAbort={handleAbort}
             onRespondPermission={respondPermission}
           />
+        ) : page === 'dashboard' ? (
+          <DashboardPage />
+        ) : page === 'approvals' ? (
+          <ApprovalsPage />
         ) : page === 'workspace' ? (
           <WorkspacePage onOpenChat={() => setPage('chat')} />
         ) : page === 'skills' ? (

@@ -7,6 +7,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/sessions': 'http://localhost:8000',
+      '/approvals': 'http://localhost:8000',
+      '/dashboard': 'http://localhost:8000',
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,
