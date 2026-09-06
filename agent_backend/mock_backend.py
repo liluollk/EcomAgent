@@ -5,10 +5,15 @@ Mock Backend — 用于离线演示、联调与测试的脚本化后端。
 无需真实 LLM API Key 即可跑通完整的
 "工具调用 → 权限确认 → 结果回传 → 继续推理" 闭环。
 通过 AGENT_BACKEND=mock 环境变量启用。
+
+收尾回合不是固定话术：按真实模型的行为，读取本轮工具名 / 入参与
+工具结果文本，组织引用关键事实、给出下一步建议的自然语言总结。
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from typing import AsyncGenerator
 
@@ -21,6 +26,107 @@ from events.agent_event import (
     TypedError,
 )
 from .protocol import AgentBackend, BackendConfig, AgentCapabilities, BackendProvider
+
+_CHANNEL_CN = {"taobao": "淘宝", "jd": "京东", "douyin": "抖音", "pdd": "拼多多"}
+
+# 结果前缀 → 视为执行失败（错误文本随成功通道回传，由文案前缀区分）
+_ERROR_PREFIXES = ("[平台错误", "[执行超时", "[上游响应异常", "[已拒绝", "[执行异常")
+
+
+def _last_tool_context(messages: list[dict]) -> tuple[str, dict, str]:
+    """提取本轮（domain）工具的 (工具名, 入参, 结果文本)。"""
+    result = str(messages[-1].get("content", ""))
+    name, args = "", {}
+    for m in reversed(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            fn = (m["tool_calls"][-1].get("function") or {})
+            name = str(fn.get("name", ""))
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            break
+    return name, args, result
+
+
+def _summarize(tool_name: str, args: dict, result: str) -> str:
+    """按工具类型把结果文本组织成收尾总结：复述关键事实 + 下一步建议。"""
+    if result.startswith(_ERROR_PREFIXES):
+        if result.startswith("[已拒绝"):
+            return (
+                "这个操作被拒绝了，我不会继续执行。"
+                "可以调整方案再来一次——比如先查询确认现状，或者换一个商品 / 渠道。"
+            )
+        return (
+            f"这次没有执行成功：{result}。"
+            "为避免在不确定的状态上继续操作，我已停止后续动作。"
+            "建议稍后重试，或告诉我改用其他渠道完成。"
+        )
+
+    ch = _CHANNEL_CN.get(str(args.get("channel", "")), str(args.get("channel", "")))
+    sku = str(args.get("sku", ""))
+
+    if tool_name == "query_inventory":
+        m = re.search(r"库存 (\d+) 件：(.+)$", result)
+        if m:
+            stock, name = int(m.group(1)), m.group(2)
+            advice = "库存偏紧，建议尽快安排补货" if stock < 20 else "库存可以支撑近期销售"
+            return (
+                f"查询完成：{ch}渠道 {sku}「{name}」当前库存 {stock} 件，{advice}。"
+                "需要的话我可以顺手对比一下这款在其他渠道的库存。"
+            )
+
+    if tool_name == "update_price":
+        m = re.search(r"价格已更新为 ([\d.]+) 元", result)
+        if m:
+            cost = args.get("cost_price")
+            cost_note = f"，高于成本价 {cost} 元，可正常生效" if cost else ""
+            replay_note = "本次结果为重试后的幂等回放，平台没有重复执行调价。" if "幂等" in result else ""
+            return (
+                f"调价完成：{ch}渠道 {sku} 价格已更新为 {m.group(1)} 元{cost_note}。{replay_note}"
+                "建议接下来几天关注该商品的转化率变化，确认调价效果。"
+            )
+
+    if tool_name == "create_promotion":
+        discount = args.get("discount")
+        off = f"{discount * 10:g} 折" if isinstance(discount, (int, float)) else "限时"
+        return (
+            f"促销已上线：{ch}渠道 {sku} 的 {off}活动将从 {args.get('start_time', '')} 开始，"
+            f"到 {args.get('end_time', '')} 结束。"
+            "活动期间折扣力度较大，建议同步确认库存深度，避免超卖。"
+        )
+
+    if tool_name == "query_order_status":
+        m = re.search(r"状态: (.+)$", result)
+        status = m.group(1) if m else "未知"
+        return (
+            f"订单 {args.get('order_id', '')} 当前状态：{status}。"
+            "如果后续需要跟踪物流异常或发起售后，随时告诉我。"
+        )
+
+    if tool_name == "product_shelf":
+        action = "上架" if "已上架" in result else "下架"
+        tail = (
+            "商品恢复可见后，建议确认价格与促销信息是否已同步。" if action == "上架"
+            else "下架后前台将不可购买，库存与评价数据会保留。"
+        )
+        return f"操作完成：{ch}渠道 {sku} 已{action}。{tail}"
+
+    if tool_name == "query_order_stats":
+        return (
+            f"统计完成：{result}。"
+            "整体数据已拉齐，建议结合退款率与异常项一起看，判断是否需要调整投放。"
+        )
+
+    if tool_name == "query_anomalies":
+        if "经营状态正常" in result:
+            return f"排查完成：{ch or '各'}渠道目前没有需要处理的异常项，经营状态正常。"
+        return f"排查完成：{result}。建议优先处理影响库存与价格展现的异常项。"
+
+    if tool_name == "save_skill":
+        return f"技能「{args.get('name', '')}」已保存并热加载生效，下次输入 /{args.get('name', '')} 即可直达该流程。"
+
+    return f"已经完成你交办的操作：{result}。还需要处理其他渠道或商品的话，随时告诉我。"
 
 
 def _extract_channel(text: str, default: str = "taobao") -> str:
@@ -130,8 +236,13 @@ class MockAgent:
                     yield TextDeltaEvent(text="好的，我来调用该技能对应的工具。")
                     yield self._domain_tool_start(messages)
                     return
-                # 第三轮：domain 工具已执行，产出总结
-                yield TextDeltaEvent(text="已根据工具返回结果完成本次操作，请查收。")
+                # 第三轮：domain 工具已执行，按结果组织总结并分片流式回放
+                reply = _summarize(*_last_tool_context(messages))
+                chunks = [c + "。" for c in reply.split("。") if c]
+                for i, chunk in enumerate(chunks):
+                    yield TextDeltaEvent(text=chunk)
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.18)
                 return
 
             last_user = next(
@@ -187,6 +298,16 @@ class MockAgent:
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        # 指代继承：「把这个商品调价」这类不带渠道/SKU 的指令，从本轮之前的
+        # 用户消息里继承最近提到的渠道与 SKU（模拟多轮对话的上下文指代）。
+        history_user = " ".join(
+            str(m.get("content", "")) for m in messages[:-1] if m.get("role") == "user"
+        )
+        channel = _extract_channel(last_user, default="")
+        if not channel:
+            channel = _extract_channel(history_user, default="taobao")
+        m_sku = re.search(r"SKU-\d+", last_user) or re.search(r"SKU-\d+", history_user)
+        sku = m_sku.group(0) if m_sku else "SKU-001"
         # /命令只点名技能未带指令时，按技能名补关键词提示，保证分支照常命中
         explicit = _slash_skill(last_user)
         if explicit:
@@ -215,22 +336,22 @@ class MockAgent:
             return ToolStartEvent(
                 tool_name="query_promotions",
                 tool_use_id="call_mock_promo_query",
-                input={"channel": _extract_channel(last_user, default="douyin")},
+                input={"channel": channel or "douyin"},
             )
         if "促销" in last_user or "活动" in last_user:
             return ToolStartEvent(
                 tool_name="create_promotion",
                 tool_use_id="call_mock_promo",
                 input={
-                    "channel": _extract_channel(last_user, default="douyin"),
-                    "sku": "SKU-003",
+                    "channel": channel or "douyin",
+                    "sku": sku,
                     "discount": 0.8,
                     "start_time": "2026-09-01 00:00:00",
                     "end_time": "2026-09-07 23:59:59",
                 },
             )
         if "价格" in last_user or "调价" in last_user or "改价" in last_user:
-            m_price = re.search(r"(?:改为|调到|改成)\s*(\d+(?:\.\d+)?)", last_user)
+            m_price = re.search(r"(?:改为|调到|调整到|调整为|改成)\s*(\d+(?:\.\d+)?)", last_user)
             m_cost = re.search(r"成本\s*(\d+(?:\.\d+)?)", last_user)
             new_price = float(m_price.group(1)) if m_price else 79.0
             cost_price = float(m_cost.group(1)) if m_cost else 59.0
@@ -238,8 +359,8 @@ class MockAgent:
                 tool_name="update_price",
                 tool_use_id="call_mock_price",
                 input={
-                    "channel": _extract_channel(last_user),
-                    "sku": "SKU-001",
+                    "channel": channel,
+                    "sku": sku,
                     "new_price": new_price,
                     "cost_price": cost_price,
                 },
@@ -254,45 +375,41 @@ class MockAgent:
             return ToolStartEvent(
                 tool_name="query_order_stats",
                 tool_use_id="call_mock_stats",
-                input={"channel": _extract_channel(last_user), "period": "近7天"},
+                input={"channel": channel, "period": "近7天"},
             )
         if "售后统计" in last_user or "销售统计" in last_user:
             return ToolStartEvent(
                 tool_name="query_after_sales_stats",
                 tool_use_id="call_mock_after_sales",
-                input={"channel": _extract_channel(last_user), "period": "近7天"},
+                input={"channel": channel, "period": "近7天"},
             )
         if "异常" in last_user or "预警" in last_user:
             return ToolStartEvent(
                 tool_name="query_anomalies",
                 tool_use_id="call_mock_anomaly",
-                input={"channel": _extract_channel(last_user)},
+                input={"channel": channel},
             )
         if "上架" in last_user or "下架" in last_user or "下柜" in last_user:
             action = "off" if ("下架" in last_user or "下柜" in last_user) else "on"
             return ToolStartEvent(
                 tool_name="product_shelf",
                 tool_use_id="call_mock_shelf",
-                input={"channel": _extract_channel(last_user), "sku": "SKU-001", "action": action},
+                input={"channel": channel, "sku": sku, "action": action},
             )
         if "工单" in last_user or "客诉" in last_user:
             return ToolStartEvent(
                 tool_name="service_ticket",
                 tool_use_id="call_mock_ticket",
-                input={"channel": _extract_channel(last_user), "order_id": "TB-10086", "issue": "商品破损，申请退货退款", "priority": "high"},
+                input={"channel": channel, "order_id": "TB-10086", "issue": "商品破损，申请退货退款", "priority": "high"},
             )
         if "订单" in last_user:
             return ToolStartEvent(
                 tool_name="query_order_status",
                 tool_use_id="call_mock_order",
-                input={"channel": _extract_channel(last_user), "order_id": "TB-10086"},
+                input={"channel": channel, "order_id": "TB-10086"},
             )
-        m_sku = re.search(r"SKU-\d+", last_user)
         return ToolStartEvent(
             tool_name="query_inventory",
             tool_use_id="call_mock_inv",
-            input={
-                "channel": _extract_channel(last_user),
-                "sku": m_sku.group(0) if m_sku else "SKU-001",
-            },
+            input={"channel": channel, "sku": sku},
         )
