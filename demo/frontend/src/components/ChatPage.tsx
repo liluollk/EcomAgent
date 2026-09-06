@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import type { ChatMessage, ModelProvider, PermissionModeType } from '../types';
+import type { ChatMessage, ModelProvider, PermissionModeType, Skill } from '../types';
 import { ChatMessageView } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { EmptyState } from './EmptyState';
@@ -17,6 +17,8 @@ interface ChatPageProps {
   onSend: (text: string) => void;
   onAbort: () => void;
   onRespondPermission: (requestId: string, approved: boolean) => void;
+  /** 技能菜单（输入框 / 命令补全） */
+  skills: Skill[];
 }
 
 /** 对话页：消息流 + 底部输入（含模型/权限切换）；空状态展示快捷指令 */
@@ -33,6 +35,7 @@ export function ChatPage({
   onSend,
   onAbort,
   onRespondPermission,
+  skills,
 }: ChatPageProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -79,6 +82,7 @@ export function ChatPage({
         activeProvider={activeProvider}
         onActivateProvider={onActivateProvider}
         onModeChange={onModeChange}
+        skills={skills}
       />
     </div>
   );

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ChatMessage, ModelProvider, PermissionModeType, SessionMeta, ToolCallInfo } from './types';
+import type { AgentEvent, ChatMessage, ModelProvider, PermissionModeType, SessionMeta, ToolCallInfo, Skill } from './types';
 import { useWebSocket } from './hooks/useWebSocket';
 import { api } from './lib/api';
 import { Sidebar, type Page } from './components/Sidebar';
@@ -8,6 +8,7 @@ import { ROLE_LABELS } from './lib/roles';
 import { ChatPage } from './components/ChatPage';
 import { WorkspacePage } from './components/workspace/WorkspacePage';
 import { ApprovalsPage } from './components/pages/ApprovalsPage';
+import { SkillsPage } from './components/pages/SkillsPage';
 import { DashboardPage } from './components/pages/DashboardPage';
 import { ComingSoon } from './components/pages/ComingSoon';
 import { SettingsModal } from './components/SettingsModal';
@@ -51,6 +52,7 @@ export default function App() {
   const [mode, setMode] = useState<PermissionModeType>(loadStoredMode);
   const [activeProvider, setActiveProvider] = useState(() => localStorage.getItem('ob.provider') || 'openai');
   const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [role, setRole] = useState<string>(() => localStorage.getItem('ob.role') || 'operator');
 
   const activeIdRef = useRef<string | null>(null);
@@ -142,6 +144,18 @@ export default function App() {
         setActiveProvider(data.active);
         localStorage.setItem('ob.provider', data.active);
       }
+    } catch {
+      /* 加载失败不阻塞 */
+    }
+  }, []);
+
+  /** 拉取技能菜单（输入框 / 命令补全用） */
+  const fetchSkills = useCallback(async () => {
+    try {
+      const resp = await api('/skills');
+      if (!resp.ok) return;
+      const list = (await resp.json()) as Skill[];
+      if (Array.isArray(list)) setSkills(list);
     } catch {
       /* 加载失败不阻塞 */
     }
@@ -356,6 +370,7 @@ export default function App() {
       }
     })();
     void fetchProviders();
+    void fetchSkills();
     return () => {
       cancelled = true;
     };
@@ -545,6 +560,7 @@ export default function App() {
             onSend={handleSend}
             onAbort={handleAbort}
             onRespondPermission={respondPermission}
+            skills={skills}
           />
         ) : page === 'dashboard' ? (
           <DashboardPage />
@@ -553,10 +569,7 @@ export default function App() {
         ) : page === 'workspace' ? (
           <WorkspacePage onOpenChat={() => setPage('chat')} />
         ) : page === 'skills' ? (
-          <ComingSoon
-            title="技能管理"
-            desc="技能机制已在引擎层实现（渐进式加载：load_skill 元工具 + SOP 注入 + 工具门控），管理界面开发中。"
-          />
+          <SkillsPage />
         ) : (
           <ComingSoon
             title="MCP 管理"

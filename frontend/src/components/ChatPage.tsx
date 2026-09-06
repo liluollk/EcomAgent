@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import type { ChatMessage, ModelProvider, PermissionModeType } from '../types';
+import type { ChatMessage, ModelProvider, PermissionModeType, Skill } from '../types';
 import { ChatMessageView } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { EmptyState } from './EmptyState';
@@ -19,6 +19,8 @@ interface ChatPageProps {
   onRespondPermission: (requestId: string, approved: boolean) => void;
   /** 审批中心等外部入口的决定（requestId → 结果），用于同步对话内权限卡 */
   externalDecisions: Record<string, 'approved' | 'denied'>;
+  /** 技能菜单（输入框 / 命令补全） */
+  skills: Skill[];
   thinkingLevel: string;
   onThinkingLevelChange: (level: string) => void;
 }
@@ -38,6 +40,7 @@ export function ChatPage({
   onAbort,
   onRespondPermission,
   externalDecisions,
+  skills,
   thinkingLevel,
   onThinkingLevelChange,
 }: ChatPageProps) {
@@ -91,6 +94,7 @@ export function ChatPage({
         activeProvider={activeProvider}
         onActivateProvider={onActivateProvider}
         onModeChange={onModeChange}
+        skills={skills}
         thinkingLevel={thinkingLevel}
         onThinkingLevelChange={onThinkingLevelChange}
       />

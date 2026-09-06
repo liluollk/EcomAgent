@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ModelProvider, PermissionModeType } from '../types';
+import type { ModelProvider, PermissionModeType, Skill } from '../types';
 
 /** 权限模式：对应后端 PermissionMode（Codex 风格，放在输入框左下角） */
 const MODES: { id: PermissionModeType; label: string; dot: string; desc: string }[] = [
@@ -28,6 +28,8 @@ interface ChatInputProps {
   onModeChange: (mode: PermissionModeType) => void;
   thinkingLevel: string;
   onThinkingLevelChange: (level: string) => void;
+  /** 技能菜单：输入 "/" 时弹出补全，选中即 "/技能名 " 前缀（引擎侧显式预加载） */
+  skills: Skill[];
 }
 
 /** 底部输入区：Enter 发送 / Shift+Enter 换行 / Esc 中断，自动增高；左下角内嵌模型与权限模式切换 */
@@ -43,15 +45,26 @@ export function ChatInput({
   onModeChange,
   thinkingLevel,
   onThinkingLevelChange,
+  skills,
 }: ChatInputProps) {
   const [value, setValue] = useState('');
   const [modeOpen, setModeOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
+
+  /* / 命令补全：首个 token 形如 "/xxx"（未输入空格）时弹出技能菜单 */
+  const cmdMatch = value.match(/^\/([A-Za-z0-9_]*)$/);
+  const slashQuery = cmdMatch && !slashDismissed ? cmdMatch[1].toLowerCase() : null;
+  const slashMatches = slashQuery === null
+    ? []
+    : skills.filter((s) => s.enabled && s.name.toLowerCase().startsWith(slashQuery));
+  const slashOpen = slashQuery !== null && slashMatches.length > 0;
 
   const resize = useCallback(() => {
     const el = ref.current;
@@ -83,24 +96,80 @@ export function ChatInput({
   const current = MODES.find((m) => m.id === mode) ?? MODES[1];
   const currentProvider = providers.find((p) => p.name === activeProvider);
 
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashQuery]);
+
+  const pickSkill = (name: string) => {
+    setValue(`/${name} `);
+    setSlashDismissed(false);
+    ref.current?.focus();
+  };
+
   const send = () => {
     const t = value.trim();
     if (!t || disabled || isStreaming) return;
     onSend(t);
     setValue('');
+    setSlashDismissed(false);
   };
 
   return (
     <div className="flex-shrink-0 px-6 pb-4">
       <div className="mx-auto max-w-[1060px]">
-        <div className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card transition-all focus-within:border-accent/50 focus-within:shadow-[0_0_0_3px_var(--accent-soft)]">
+        <div className="relative">
+          {/* / 命令技能菜单：输入 / 弹出，↑↓ 选择，Tab/Enter 补全，Esc 关闭 */}
+          {slashOpen && (
+            <div className="animate-fade-up absolute bottom-full left-0 right-0 z-20 mb-2 rounded-xl border border-line bg-elevated p-1 shadow-pop">
+              <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] text-ink-3">
+                / 技能直达 · ↑↓ 选择，Tab 补全后接指令，Esc 关闭
+              </div>
+              {slashMatches.map((s, i) => (
+                <button
+                  key={s.name}
+                  onClick={() => pickSkill(s.name)}
+                  onMouseEnter={() => setSlashIndex(i)}
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                    i === slashIndex ? 'bg-accent-soft' : 'hover:bg-black/[0.04]'
+                  }`}
+                >
+                  <span className="font-mono text-[12px] font-medium text-ink">/{s.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{s.description}</span>
+                  {s.builtin && <span className="rounded bg-inset px-1.5 py-px text-[10px] text-ink-3">内置</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card transition-all focus-within:border-accent/50 focus-within:shadow-[0_0_0_3px_var(--accent-soft)]">
           <textarea
             ref={ref}
             rows={1}
             value={value}
             disabled={disabled || isStreaming}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setSlashDismissed(false);
+            }}
             onKeyDown={(e) => {
+              if (slashOpen) {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setSlashIndex((i) =>
+                    (i + (e.key === 'ArrowDown' ? 1 : slashMatches.length - 1)) % slashMatches.length,
+                  );
+                  return;
+                }
+                if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing)) {
+                  e.preventDefault();
+                  pickSkill(slashMatches[slashIndex].name);
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setSlashDismissed(true);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 send();
@@ -110,7 +179,7 @@ export function ChatInput({
                 onAbort();
               }
             }}
-            placeholder={disabled ? '未连接到服务器，请确认后端已启动…' : '输入运营指令，回车发送…'}
+            placeholder={disabled ? '未连接到服务器，请确认后端已启动…' : '输入运营指令，回车发送；输入 / 直达技能…'}
             className="block max-h-[168px] w-full resize-none bg-transparent text-[14px] leading-relaxed text-ink placeholder:text-ink-3 focus:outline-none disabled:opacity-60"
           />
           <div className="mt-1.5 flex items-center justify-between gap-3">
@@ -301,6 +370,7 @@ export function ChatInput({
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

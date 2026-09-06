@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ChatMessage, ModelProvider, PermissionModeType, SessionMeta, ToolCallInfo } from './types';
+import type { AgentEvent, ChatMessage, ModelProvider, PermissionModeType, SessionMeta, Skill, ToolCallInfo } from './types';
 import { useWebSocket } from './hooks/useWebSocket';
 import { Sidebar, type Page } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -7,6 +7,7 @@ import { ROLE_LABELS } from './lib/roles';
 import { ChatPage } from './components/ChatPage';
 import { WorkspacePage } from './components/workspace/WorkspacePage';
 import { ApprovalsPage } from './components/pages/ApprovalsPage';
+import { SkillsPage } from './components/pages/SkillsPage';
 import { DashboardPage } from './components/pages/DashboardPage';
 import { ComingSoon } from './components/pages/ComingSoon';
 import { SettingsModal } from './components/SettingsModal';
@@ -50,6 +51,7 @@ export default function App() {
   const [mode, setMode] = useState<PermissionModeType>(loadStoredMode);
   const [activeProvider, setActiveProvider] = useState(() => localStorage.getItem('ob.provider') || 'openai');
   const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [role, setRole] = useState<string>(() => localStorage.getItem('ob.role') || 'operator');
   /** 审批中心等外部入口的决定（requestId → 结果）：同步对话内仍挂"等待确认"的权限卡 */
   const [externalDecisions, setExternalDecisions] = useState<Record<string, 'approved' | 'denied'>>({});
@@ -143,6 +145,18 @@ export default function App() {
         setActiveProvider(data.active);
         localStorage.setItem('ob.provider', data.active);
       }
+    } catch {
+      /* 加载失败不阻塞 */
+    }
+  }, []);
+
+  /** 拉取技能菜单（输入框 / 命令补全用；技能由 save_skill 热加载，无需轮询） */
+  const fetchSkills = useCallback(async () => {
+    try {
+      const resp = await fetch('/skills');
+      if (!resp.ok) return;
+      const list = (await resp.json()) as Skill[];
+      if (Array.isArray(list)) setSkills(list);
     } catch {
       /* 加载失败不阻塞 */
     }
@@ -366,10 +380,11 @@ export default function App() {
       }
     })();
     void fetchProviders();
+    void fetchSkills();
     return () => {
       cancelled = true;
     };
-  }, [createSession, loadHistory, fetchProviders]);
+  }, [createSession, loadHistory, fetchProviders, fetchSkills]);
 
   /** 删除会话；若删除的是当前会话则切换到最近一个 */
   const deleteSession = useCallback(
@@ -578,6 +593,7 @@ export default function App() {
             onAbort={handleAbort}
             onRespondPermission={respondPermission}
             externalDecisions={externalDecisions}
+            skills={skills}
             thinkingLevel={thinkingLevel}
             onThinkingLevelChange={handleThinkingLevelChange}
           />
@@ -588,10 +604,7 @@ export default function App() {
         ) : page === 'workspace' ? (
           <WorkspacePage onOpenChat={() => setPage('chat')} />
         ) : page === 'skills' ? (
-          <ComingSoon
-            title="技能管理"
-            desc="技能机制已在引擎层实现（渐进式加载：load_skill 元工具 + SOP 注入 + 工具门控），管理界面开发中。"
-          />
+          <SkillsPage />
         ) : (
           <ComingSoon
             title="MCP 管理"
