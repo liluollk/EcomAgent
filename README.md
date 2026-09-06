@@ -2,7 +2,7 @@
 
 面向多品牌女装电商运营场景的通用 Agent Runtime。它将「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 结果返回」抽象为统一执行闭环，供不同的经营 Agent / Skill 复用同一套执行底座（库存查询、订单分析、促销配置、上下架、售后工单等任务统一在此运行）。
 
-核心链路由 **316 个单元与集成测试**覆盖（全部离线运行，含 E2E 全链路演示脚本），并由**离线评测 Harness**（`harness/`）以行为契约场景 + baseline 指纹做验收对比。
+核心链路由 **327 个单元与集成测试**覆盖（全部离线运行，含 E2E 全链路演示脚本），并由**离线评测 Harness**（`harness/`）以行为契约场景 + baseline 指纹做验收对比。
 
 ## 两份交付物
 
@@ -69,7 +69,7 @@ REST 客户端 (httpx, 真实 HTTP)
 | `harness/` | 离线评测 Harness：行为契约场景集、运行器、轨迹记录、指标与 baseline 验收对比 |
 | `frontend/` | 可交付版 React + TS 控制台（对话流、工具卡、权限卡），接后端真实 API |
 | `demo/` | 展示版：独立可跑的 mock 前端 + 配套说明；无需后端即可完整交互 |
-| `tests/` | 316 个测试，按模块分目录；含 E2E 全链路（`tests/e2e/`）与 harness 自身单测（`tests/harness/`） |
+| `tests/` | 327 个测试，按模块分目录；含 E2E 全链路（`tests/e2e/`）与 harness 自身单测（`tests/harness/`） |
 
 ## 快速开始
 
@@ -77,7 +77,7 @@ REST 客户端 (httpx, 真实 HTTP)
 # 依赖
 pip install -e ".[dev]"
 
-# 测试（316 个，全部离线）
+# 测试（327 个，全部离线）
 python -m pytest tests/ -q
 
 # 离线评测 Harness（行为契约场景 + baseline 验收：通过率退化即非零退出码）
@@ -176,7 +176,7 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 
 ### 验证
 
-- 316 个测试全离线通过（含 E2E 全链路脚本 `tests/e2e/test_e2e_demo.py`）；
+- 327 个测试全离线通过（含 E2E 全链路脚本 `tests/e2e/test_e2e_demo.py`）；
 - E2E 已验证：六步业务演示链路、动态渠道新增 → 对话即时调用、幂等回放、成本拦截、跨会话记忆沉淀、技能创建（save_skill 落盘 + 热加载进菜单）；
 - 离线评测 Harness 验收：`python -m harness` 以行为契约场景驱动完整链路（内置工具 + 真实 MCP 子进程 + 剧本后端），
   事件流 trace 落盘 `.harness-runs/{run_id}/`；与 `baseline.json` 场景指纹 + 通过率对比，
@@ -184,8 +184,8 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 
 ### 评测体系（四层配方）
 
-- **L1 单元契约**：各模块功能正确性（sources 87 / transport 52 / agent_runtime 50 / permission 34 / agent_backend 24 / session 23 / harness 17 / events 14）；
-- **L3 行为契约场景**：评测集为独立数据表（`harness/cases.py`，单一事实源，pytest 与 harness 共用）——输入 → 期望轨迹（工具序列/参数/失败语义）统一按表断言，新增场景 = 加一行数据、不改断言逻辑；当前 5 场景（六步链路 / 成本拦截 / 动态渠道 / 跨会话记忆 / 技能创建）；
+- **L1 单元契约**：各模块功能正确性（sources 87 / agent_runtime 57 / transport 56 / permission 34 / agent_backend 24 / session 23 / harness 17 / events 14）；
+- **L3 行为契约场景**：评测集为独立数据表（`harness/cases.py`，单一事实源，pytest 与 harness 共用）——输入 → 期望轨迹（工具序列/参数/失败语义）统一按表断言，新增场景 = 加一行数据、不改断言逻辑；当前 13 场景：业务链路（六步链路 / 上下架切换 / 促销查询与创建 / 经营盘点 / 异常监控 / 未知 SKU 优雅降级）、权限治理（成本拦截走真实业务规则 / 只读拦写 / 角色拒写）、记忆与技能（跨会话记忆 / 记忆遗忘 / 技能创建）；
 - **L1 对抗场景**：`test_tool_loop_adversarial.py` 覆盖执行循环边界——多工具并发、乱序结果按 ID 匹配、局部失败隔离、缺失参数转 is_error；
 - **L4 回归基线**：全量通过率 + 结果存档，作为每次改动的退化判定基线；
 - **L2 协议契约**（挂起）：平台 API 响应信封/签名/错误码的 MockTransport 契约测试，待真实平台适配器（P0）落地后同步实现。
@@ -201,4 +201,5 @@ cd demo/frontend && npm install && npm run dev   # 打开 http://127.0.0.1:5173
 
 - 前端手动压缩按钮（后端 WS compact 通道已就绪）；
 - 真实渠道接入（先接只读 API + 沙箱）；
+- 运营看板真实数据源（预聚合管道）：官方开放平台只有明细域接口（订单分页查询），分析域（生意参谋 / 商智 / 罗盘）封闭或需行业资质——真实接入不是换 base_url，而是自建「增量拉单 → 清洗对齐 → 按天落库 → 看板查库」预聚合管道；先对齐三渠道 GMV 口径（支付 / 净额 / 退款滞后、日切时区）与限流缓存（QPS 退避 + TTL）；看板聚合层与前端不动，预警规则逻辑直接复用；
 - 记忆检索升级 embedding、摘要接真实 LLM。

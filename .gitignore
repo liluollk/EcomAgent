@@ -44,3 +44,7 @@ data/providers.json
 data/skills/
 data/mcp_servers.json
 data/skills.json
+
+# Electron 桌面端
+desktop/
+gui-test-screenshots/
