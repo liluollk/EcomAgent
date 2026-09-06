@@ -139,8 +139,12 @@ class Runner:
 
     def _run_once(self, scenario: dict[str, Any], timeout: float):
         """单次完整链路运行；返回 (status, failure_detail, trace_path)。"""
+        from harness.faults import activate_scenario_faults, deactivate_scenario_faults
+
         env_dir = self.recorder.case_dir(self.run_id, scenario["name"]) / "_env"
         self._isolate(env_dir)
+        # 场景级确定性故障脚本 + 快执行策略（与 e2e 驱动器共用同一装配）
+        activate_scenario_faults(scenario)
 
         async def _main() -> list[dict]:
             from transport.state import mcp_pool, _build_agent, _build_tools
@@ -167,12 +171,23 @@ class Runner:
                 )
                 agent = _build_agent(session)
 
+                # ASK 场景的权限决定由 step.permission 驱动（approve/reject），
+                # 缺省放行——模拟真实前端「批准」按钮
+                current_step: dict[str, Any] = {}
+
+                async def _resolve_permission(request) -> bool:
+                    return current_step.get("permission", "approve") != "reject"
+
+                agent.set_permission_resolver(_resolve_permission)
+
                 hook = get_setup_hook(scenario.get("setup"))
                 if hook:
                     hook()
 
                 raw_events: list[Any] = []
                 for step in scenario["steps"]:
+                    current_step.clear()
+                    current_step.update(step)
                     tools = _build_tools()
                     events = [ev async for ev in agent.chat(session, step["message"], tools)]
                     raw_events.extend(events)
@@ -195,6 +210,8 @@ class Runner:
             return "timeout", {"kind": "timeout", "detail": f"超过 {timeout:.0f}s 未完成"}, None
         except AssertionError as exc:
             return "failed", {"kind": "assertion", "detail": str(exc)}, None
+        finally:
+            deactivate_scenario_faults()
 
         path = self.recorder.write_trace(self.run_id, scenario["name"], trace)
         self.recorder.write_outcome(

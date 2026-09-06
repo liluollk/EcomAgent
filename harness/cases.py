@@ -11,13 +11,16 @@ step 字段约定：
     input            期望工具参数的子集（逐项匹配）
     expect_tool      False 时跳过工具断言（纯文本/记忆类轮次）
     result_is_error  True 时断言 tool_result 为失败（BLOCK/异常语义）
-    result_contains  失败/成功结果文本中必须出现的词
+    result_contains  结果文本中必须出现的词（成功/失败一视同仁）
+    attempts         期望 Execution Policy 实际尝试次数（重试契约）
+    permission       "approve"/"reject"：断言 ASK 权限流程（需 mode=ASK）
 scenario 字段约定：
     name      场景名
     setup     预先准备钩子名（见 harness/hooks.py）
     after     收尾验证钩子名（见 harness/hooks.py）
     mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
     role      会话角色（manager/operator/customer_service/finance，缺省 manager）
+    fault     Mock Commerce API 确定性故障脚本名（见 mock_commerce/fault_injection.py）
 """
 
 from __future__ import annotations
@@ -148,6 +151,96 @@ SCENARIOS: list[dict[str, Any]] = [
         "steps": [
             {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
             {"message": "忘记 双11", "expect_tool": False},
+        ],
+    },
+    # ------------------------------------------------------------------
+    # 外部故障与执行可靠性（Evaluation 2.0）：确定性故障脚本 + 策略层契约
+    # ------------------------------------------------------------------
+    {
+        # E14 上游限流一次：分类 TRANSIENT → 同幂等键重试成功
+        "name": "upstream_429_retry_success",
+        "fault": "rate_limit_once_then_success",
+        "steps": [
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 2, "result_contains": ["已更新"]},
+        ],
+    },
+    {
+        # E15 上游超时一次（读操作）：客户端短超时 → TRANSIENT 重试成功
+        "name": "upstream_timeout_retry_success",
+        "fault": "timeout_once_then_success",
+        "steps": [
+            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 2, "result_contains": ["库存"]},
+        ],
+    },
+    {
+        # E16 上游持续 500：FATAL 不重试，优雅返回平台错误文本
+        "name": "upstream_permanent_failure",
+        "fault": "permanent_500",
+        "steps": [
+            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 1, "result_contains": ["平台错误"]},
+        ],
+    },
+    {
+        # E17 超时重试 + 幂等：服务端先落副作用再挂起（真实危险场景），
+        # 重试同幂等键回放首次结果，写副作用只落一次（after 钩子断言）
+        "name": "idempotent_repeated_write",
+        "fault": "timeout_once_then_success",
+        "after": "assert_single_price_write",
+        "steps": [
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 2, "result_contains": ["已更新"]},
+        ],
+    },
+    {
+        # E18 上游畸形响应（HTTP 200 + code=0 但 data 缺字段/类型错）：
+        # 结果校验层以 UPSTREAM_INVALID_RESPONSE 拦截，不重试、优雅降级
+        "name": "malformed_upstream_response",
+        "fault": "malformed_once_then_success",
+        "steps": [
+            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 1, "result_contains": ["上游响应异常"]},
+        ],
+    },
+    {
+        # E19 部分工具失败不拖垮会话：第一步 500 优雅报错，第二步恢复正常
+        "name": "partial_tool_failure",
+        "fault": "internal_error_once_then_success",
+        "steps": [
+            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "attempts": 1, "result_contains": ["平台错误"]},
+            {"message": "查一下京东 SKU-001 的库存", "tool": "query_inventory",
+             "input": {"channel": "jd", "sku": "SKU-001"},
+             "result_contains": ["库存"]},
+        ],
+    },
+    {
+        # E20 ASK 模式 + 批准：permission_request 后人工放行，工具真实执行
+        "name": "permission_approve_then_execute",
+        "mode": "ASK",
+        "steps": [
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "permission": "approve", "result_contains": ["已更新"]},
+        ],
+    },
+    {
+        # E21 ASK 模式 + 拒绝：拒绝后不执行，turn 仍以 complete 完整收尾
+        "name": "permission_reject_then_stop",
+        "mode": "ASK",
+        "steps": [
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "permission": "reject", "result_is_error": True,
+             "result_contains": ["已拒绝"]},
         ],
     },
 ]

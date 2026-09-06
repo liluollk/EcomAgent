@@ -45,11 +45,23 @@ def _after_memory_forgotten() -> None:
     )
 
 
+def _after_single_price_write() -> None:
+    """幂等写场景收尾：断言重试链路里写副作用只真实落库一次。"""
+    from mock_commerce.store import writes_of
+
+    writes = writes_of("update_price")
+    assert len(writes) == 1, (
+        f"update_price 副作用应只落库一次（重试走幂等回放），实际 {len(writes)} 次: {writes}"
+    )
+    assert writes[0]["data"]["new_price"] == 89.0, f"落库价格应为 89.0: {writes[0]}"
+
+
 SETUP_HOOKS: dict[str, Callable[[], None]] = {"add_pdd_channel": _setup_add_pdd_channel}
 AFTER_HOOKS: dict[str, Callable[[], None]] = {
     "assert_memory_landed": _after_memory_landed,
     "assert_skill_created": _after_skill_created,
     "assert_memory_forgotten": _after_memory_forgotten,
+    "assert_single_price_write": _after_single_price_write,
 }
 
 

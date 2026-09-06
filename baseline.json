@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "saved_at": "2026-09-06T03:16:15+00:00",
-  "total": 13,
-  "passed": 13,
+  "saved_at": "2026-09-06T11:31:44+00:00",
+  "total": 21,
+  "passed": 21,
   "cases": {
     "six_step_business_chain": "9643c3d0ea3438a5",
     "cost_interception": "d30b8870a1cea75b",
@@ -16,6 +16,14 @@
     "unknown_sku_graceful": "c28cb3732d3b5a41",
     "readonly_blocks_write": "c067fe203e2a0f78",
     "rbac_denial": "eb639d35638a8fd5",
-    "memory_forget": "515570b5642916e5"
+    "memory_forget": "515570b5642916e5",
+    "upstream_429_retry_success": "b540c3ddf9fe985e",
+    "upstream_timeout_retry_success": "21e8153cbcd9bfce",
+    "upstream_permanent_failure": "6b14698b6c7d5733",
+    "idempotent_repeated_write": "0233d62e7123fc76",
+    "malformed_upstream_response": "6e06c81c8d4ea3af",
+    "partial_tool_failure": "45bc34536b25e675",
+    "permission_approve_then_execute": "a0aed9d2ee37859b",
+    "permission_reject_then_stop": "413dafb893b3be80"
   }
 }

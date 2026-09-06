@@ -101,13 +101,20 @@ def _make_workspace() -> Workspace:
     )
 
 
-def _run_e2e(driver, scenario):
+def _run_e2e(driver, scenario, permission_state=None):
     """在单次 asyncio.run 中执行完整 MCP 联动场景。
 
     MCP 的 stdio_client/ClientSession 绑定创建时的事件循环，跨 asyncio.run
     复用会触发 anyio 的 cancel-scope 错误；因此连接 → 建 agent → 全部对话轮
     → 关闭 必须在同一次 run 内完成。
+
+    permission_state: 可选的共享状态 dict（{"step": 当前step}），供 ASK 场景
+    的权限解析器按 step.permission 决定批准/拒绝。
     """
+    from harness.faults import activate_scenario_faults, deactivate_scenario_faults
+
+    # 场景级确定性故障脚本 + 快执行策略（与 harness runner 共用同一装配）
+    activate_scenario_faults(scenario)
 
     async def _main():
         from transport.state import mcp_pool, _build_agent, _build_tools
@@ -123,6 +130,12 @@ def _run_e2e(driver, scenario):
             )
             agent = _build_agent(session)
 
+            if permission_state is not None:
+                async def _resolve_permission(request) -> bool:
+                    return (permission_state.get("step") or {}).get("permission", "approve") != "reject"
+
+                agent.set_permission_resolver(_resolve_permission)
+
             async def chat(text: str) -> list:
                 tools = _build_tools()
                 return [ev async for ev in agent.chat(session, text, tools)]
@@ -131,7 +144,10 @@ def _run_e2e(driver, scenario):
         finally:
             await mcp_pool.close()
 
-    return asyncio.run(_main())
+    try:
+        return asyncio.run(_main())
+    finally:
+        deactivate_scenario_faults()
 
 
 # ---------------------------------------------------------------------------
@@ -141,13 +157,19 @@ def _run_e2e(driver, scenario):
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s["name"])
 def test_e2e_behavior_contract_scenarios(scenario):
-    """按评测集数据表驱动：协议一致的执行 + 断言，覆盖六步链路/成本拦截/动态渠道/跨会话记忆。"""
+    """按评测集数据表驱动：协议一致的执行 + 断言。
+
+    覆盖六步链路/成本拦截/动态渠道/跨会话记忆/外部故障重试/幂等/HITL。
+    """
+
+    permission_state: dict = {"step": None}
 
     async def run(chat):
         hook = get_setup_hook(scenario.get("setup"))
         if hook:
             hook()
         for step in scenario["steps"]:
+            permission_state["step"] = step
             events = await chat(step["message"])
             assert_step(scenario["name"], step, events)
         after = get_after_hook(scenario.get("after"))
@@ -155,7 +177,7 @@ def test_e2e_behavior_contract_scenarios(scenario):
             after()
         return "ok"
 
-    assert _run_e2e(run, scenario) == "ok"
+    assert _run_e2e(run, scenario, permission_state) == "ok"
 
 
 # ---------------------------------------------------------------------------

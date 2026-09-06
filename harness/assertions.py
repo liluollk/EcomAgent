@@ -4,7 +4,9 @@
   1. 渐进式加载第一步：load_skill 元调用必须出现；
   2. 业务工具：tool_start 的工具名与参数子集逐项匹配；
   3. 结果：tool_result 的 is_error 与文本 token 匹配；
-  4. 收尾：以 complete 事件结束。
+  4. 重试契约：step.attempts 断言 Execution Policy 的实际尝试次数；
+  5. 权限契约：step.permission 断言 ASK 流程（请求事件 + 批准/拒绝）；
+  6. 收尾：以 complete 事件结束。
 """
 
 from __future__ import annotations
@@ -15,7 +17,10 @@ _STEP_MISSING_MSG = "[{name}] step「{msg}」期望工具 {tool}，实际 {actua
 _STEP_INPUT_MSG = "[{name}] step「{msg}」参数 {k}={actual} 期望 {v}"
 _STEP_ERROR_MSG = "[{name}] step「{msg}」期望失败结果，实际成功"
 _STEP_OK_MSG = "[{name}] step「{msg}」工具执行失败: {result}"
+_STEP_TOKEN_MSG = "[{name}] step「{msg}」结果文本缺「{token}」: {result}"
 _STEP_COMPLETE_MSG = "[{name}] step「{msg}」未以 complete 收尾"
+_STEP_ATTEMPTS_MSG = "[{name}] step「{msg}」重试次数 期望 {want}，实际 {actual}"
+_STEP_PERM_MSG = "[{name}] step「{msg}」未发起权限请求（ASK 流程缺失）"
 
 
 def has_load_skill(events: list) -> bool:
@@ -62,13 +67,26 @@ def assert_step(scenario_name: str, step: dict, events: list) -> None:
     assert len(results) >= 1, f"[{scenario_name}] step「{step['message']}」未产生 tool_result"
     if step.get("result_is_error"):
         assert results[0].is_error, _STEP_ERROR_MSG.format(name=scenario_name, msg=step["message"])
-        for token in step.get("result_contains", []):
-            assert token in results[0].result, (
-                f"[{scenario_name}] step「{step['message']}」失败文本缺「{token}」: {results[0].result}"
-            )
     else:
         assert not results[0].is_error, _STEP_OK_MSG.format(
             name=scenario_name, msg=step["message"], result=results[0].result
+        )
+    # 文本 token 匹配对成功/失败结果一视同仁（平台错误文本走成功结果通道）
+    for token in step.get("result_contains", []):
+        assert token in results[0].result, _STEP_TOKEN_MSG.format(
+            name=scenario_name, msg=step["message"], token=token, result=results[0].result
+        )
+
+    attempts = step.get("attempts")
+    if attempts is not None:
+        actual = getattr(results[0], "attempt", 1)
+        assert actual == attempts, _STEP_ATTEMPTS_MSG.format(
+            name=scenario_name, msg=step["message"], want=attempts, actual=actual
+        )
+
+    if step.get("permission"):
+        assert any(e.type == "permission_request" for e in events), _STEP_PERM_MSG.format(
+            name=scenario_name, msg=step["message"]
         )
 
     assert any(e.type == "complete" for e in events), _STEP_COMPLETE_MSG.format(
