@@ -19,6 +19,7 @@ import json as _json
 import asyncio
 import inspect
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Awaitable, Callable, Optional
 
@@ -34,6 +35,7 @@ from events.agent_event import (
     ToolStartEvent,
     ToolResultEvent,
 )
+from execution.policy import get_last_outcome, set_call_context
 from session.session import Session, ExecutionState
 from session.workspace import Workspace
 from permission.pre_tool_use import PreToolUsePipeline, PreToolUseAction, PreToolUseResult
@@ -93,9 +95,11 @@ class BaseAgent:
         self._compressor = ContextCompressor(threshold_chars=context_threshold(window))
         self._pipeline: Optional[PreToolUsePipeline] = None
         self._tool_handlers: dict[str, Callable] = {}
+        self._tool_sources: dict[str, str] = {}  # 工具名 → 来源通道（commerce/mcp）
         self._permission_resolver: Optional[PermissionResolver] = None
         self._permission_canceller: Optional[Callable[[], None]] = None
         self._pending_tool_tasks: set[asyncio.Task] = set()
+        self._trace_id: str = ""  # 当前 turn 的执行轨迹 ID（Trace 从事件流生长）
         # 渐进式技能加载状态
         self._loaded_skills: set[str] = set()  # 当前 turn 已加载的技能名
         self._load_skill_def: Optional[dict] = None  # load_skill 工具定义（含菜单）
@@ -142,14 +146,16 @@ class BaseAgent:
         if self._permission_canceller is not None:
             self._permission_canceller()
 
-    def set_tool_handlers(self, handlers: dict[str, Callable]) -> None:
+    def set_tool_handlers(self, handlers: dict[str, Callable], sources: Optional[dict[str, str]] = None) -> None:
         """设置工具执行处理器映射。
 
         Args:
             handlers: 工具名 → 处理函数 的映射字典。
                       处理函数签名: (channel, sku, ...) -> str | dict。
+            sources: 工具名 → 来源通道（"commerce"/"mcp"），回填事件 source 字段。
         """
         self._tool_handlers = handlers
+        self._tool_sources = dict(sources or {})
 
     def capabilities(self) -> AgentCapabilities:
         """获取后端能力声明。
@@ -226,6 +232,7 @@ class BaseAgent:
         )
         session.execution_state = ExecutionState.RUNNING
         self._lifecycle = lifecycle
+        self._trace_id = uuid.uuid4().hex[:12]
 
         # 渐进式技能加载：重置本 turn 加载状态，构建 load_skill 菜单工具
         self._loaded_skills = set()
@@ -434,6 +441,8 @@ class BaseAgent:
                 session.execution_state = ExecutionState.ABORTED
                 break
             round_count += 1
+            # 幂等键上下文（session/turn）：后续工具任务经 contextvars 继承
+            set_call_context(session.session_id, round_count)
 
             visible_tools = self._visible_tools()
             # 系统提示词注入为 messages 首条（每轮携带最新技能上下文）。
@@ -502,6 +511,9 @@ class BaseAgent:
         round_results: dict[str, ToolResultEvent],
     ) -> AsyncGenerator[AgentEvent, None]:
         """权限三路分发：BLOCK/ASK/ALLOW，流式 yield 事件。"""
+        # Trace 从事件流上自然生长：工具事件统一携带轨迹 ID 与来源通道
+        event.trace_id = self._trace_id
+        event.source = self._tool_sources.get(event.tool_name, "")
         perm_result = self._check_permission(event)
 
         if perm_result.action == PreToolUseAction.BLOCK:
@@ -512,6 +524,8 @@ class BaseAgent:
                 tool_name=event.tool_name,
                 result=f"[拦截] {perm_result.reason}" if perm_result.reason else "[拦截] 该操作被安全规则阻止",
                 is_error=True,
+                trace_id=event.trace_id,
+                source=event.source,
             )
             round_results[event.tool_use_id] = denied
             yield denied
@@ -563,6 +577,8 @@ class BaseAgent:
                 tool_name=event.tool_name,
                 result="[已中断] 执行被中断",
                 is_error=True,
+                trace_id=event.trace_id,
+                source=event.source,
             )
             round_results[event.tool_use_id] = refused
             yield refused
@@ -577,6 +593,8 @@ class BaseAgent:
                 tool_name=event.tool_name,
                 result="[已拒绝] 用户拒绝了该操作的执行",
                 is_error=True,
+                trace_id=event.trace_id,
+                source=event.source,
             )
             round_results[event.tool_use_id] = refused
             yield refused
@@ -725,13 +743,22 @@ class BaseAgent:
         return event, result
 
     async def _execute_tool(self, event: ToolStartEvent) -> ToolResultEvent:
-        """执行单个工具调用，返回结果事件。
+        """执行单个工具调用，返回结果事件（统一回填 Trace/策略元数据）。
 
-        load_skill 是元工具，由 agent 内部处理；
-        其余工具委托给 tool_handlers 映射。
+        Execution Policy 的执行元数据（尝试次数/耗时/幂等回放）经
+        contextvar 从共享执行通道带出，回填到结果事件——Trace 可还原
+        重试链路，评测可断言「429 重试 2 次后成功」这类异常路径契约。
         """
         if event.tool_name == "load_skill":
-            return await self._handle_load_skill(event)
+            result = await self._handle_load_skill(event)
+        else:
+            result = await self._execute_tool_inner(event)
+        result.trace_id = event.trace_id
+        result.source = event.source
+        return result
+
+    async def _execute_tool_inner(self, event: ToolStartEvent) -> ToolResultEvent:
+        """执行单个工具调用的本体（handler 分发 + 异常归一）。"""
         handler = self._tool_handlers.get(event.tool_name)
         if handler is None:
             return ToolResultEvent(
@@ -745,12 +772,18 @@ class BaseAgent:
                 result = await handler(**event.input)
             else:
                 result = handler(**event.input)
-            return ToolResultEvent(
+            result_event = ToolResultEvent(
                 tool_use_id=event.tool_use_id,
                 tool_name=event.tool_name,
                 result=str(result),
                 is_error=False,
             )
+            outcome = get_last_outcome()
+            if outcome is not None:
+                result_event.attempt = outcome.attempts
+                result_event.duration_ms = outcome.duration_ms
+                result_event.idempotent_replay = outcome.idempotent_replay
+            return result_event
         except Exception as e:
             return ToolResultEvent(
                 tool_use_id=event.tool_use_id,

@@ -10,8 +10,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from starlette.responses import JSONResponse
 
-from sources.mcp_client_pool import McpClientPool
-from sources.mcp_server_config import DEFAULT_MCP_SERVER_REGISTRY, to_params
+from integrations.mcp.client_pool import McpClientPool
+from integrations.mcp.server_config import DEFAULT_MCP_SERVER_REGISTRY, to_params
 from transport.state import mcp_pool
 
 router = APIRouter()

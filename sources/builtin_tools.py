@@ -2,8 +2,11 @@
 
 定位（工具三通道）：
   1. 内置平台 API 工具（本模块）：电商运营语义操作，handler 经
-     ChannelRestClient → PlatformAdapter 打到渠道平台（当前 mock 网关，
+     Execution Policy（超时/错误分类重试/幂等键/结果校验）→
+     PlatformAdapter → ChannelRestClient 打到渠道平台（当前 mock 网关，
      真实平台资质到位后换 adapter 实现，工具名与文本模板不变）；
+     关键工具（查库存/改价/上下架）已迁 CommerceProvider 领域接口，
+     返回领域结果而非 HTTP Response；
   2. MCP 外部工具：用户经 mcp_servers.json 配置接入的第三方工具服务；
   3. 专用工具（如 save_skill）：见 builtin_tools 扩展。
 
@@ -13,37 +16,50 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Callable, Optional
 
-from sources.rest_client import RestApiError, get_rest_client
+from execution.policy.timeout import TimeoutError as ToolTimeoutError
+from execution.policy.validation import ValidationError
+from integrations.commerce.client import RestApiError
+from integrations.commerce.provider import get_commerce_provider, invoke_operation
 
 _ACTION_CN = {"on": "上架", "off": "下架"}
 
 
-async def _exec(channel, operation: str, params: dict) -> dict:
-    """执行一次语义操作：走平台适配器翻译请求 + 归一化响应。
+def _format_exec_error(exc: Exception) -> str:
+    """执行期异常 → LLM 可理解的错误文本（平台错误/超时/上游畸形）。"""
+    if isinstance(exc, RestApiError):
+        return f"[平台错误 {exc.code}] {exc.message}"
+    if isinstance(exc, ToolTimeoutError):
+        return f"[执行超时] {exc}"
+    if isinstance(exc, ValidationError):
+        return f"[上游响应异常] {exc.message}"
+    return f"[执行异常] {exc}"
 
-    PlatformAdapter（按渠道 platform 字段选择）负责：
-      - build_request(operation, channel, params) -> (method, path, http_kwargs)
-      - parse_response(data) -> 归一化 dict（字段名与 mock 约定一致）
-    channel 为 None 时（平台级操作）使用 mock 适配器与默认客户端。
+
+async def _exec(channel, operation: str, params: dict) -> dict:
+    """执行一次语义操作：Execution Policy 管控的共享执行通道。
+
+    链路：Permission（引擎层已过）→ Execution Policy（超时/重试/幂等/校验）
+    → PlatformAdapter（协议翻译）→ REST Client（单次 HTTP）→ 归一化 dict。
+    平台错误/超时/畸形响应统一归一为 _platform_error 文本（不抛出），
+    让上层 LLM 可理解可解释；尝试次数与耗时由策略层记入事件元数据。
+    channel 为 None 时（平台级操作）使用默认客户端。
     """
     from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
 
-    adapter = DEFAULT_CHANNEL_REGISTRY.executor_for(channel)
-    if channel is not None:
-        client = DEFAULT_CHANNEL_REGISTRY.client_for(channel)
-        if client is None:
-            return {"_platform_error": f"[平台错误 10002] 渠道不存在: {channel}"}
-    else:
-        client = get_rest_client()
+    if channel is not None and DEFAULT_CHANNEL_REGISTRY.client_for(channel) is None:
+        return {"_platform_error": f"[平台错误 10002] 渠道不存在: {channel}"}
     try:
-        method, path, http_kwargs = adapter.build_request(operation, channel, params)
-        data = await client.call(method, path, **http_kwargs)
-        return adapter.parse_response(data)
-    except RestApiError as e:
-        # 返回平台错误文本（而非抛异常），让上层 LLM 可理解可解释
-        return {"_platform_error": f"[平台错误 {e.code}] {e.message}"}
+        return await invoke_operation(channel, operation, params)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return {"_platform_error": _format_exec_error(e)}
+
+
+def _dec(value: float) -> Decimal:
+    """float → Decimal（领域接口入参），经 str 规避二进制浮点尾差。"""
+    return Decimal(str(value))
 
 
 # ----------------------------------------------------------------------
@@ -51,17 +67,24 @@ async def _exec(channel, operation: str, params: dict) -> dict:
 # ----------------------------------------------------------------------
 
 async def query_inventory(channel: str, sku: str) -> str:
-    data = await _exec(channel, "query_inventory", {"sku": sku})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return f"渠道 {channel} 商品 {sku} 库存 {data.get('stock', 0)} 件：{data.get('name', '')}"
+    """走 CommerceProvider 领域接口：响应经校验后映射为 InventoryResult。"""
+    try:
+        r = await get_commerce_provider(channel).query_inventory(sku)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}"
 
 
 async def update_price(channel: str, sku: str, new_price: float, cost_price: float = 0) -> str:
-    data = await _exec(channel, "update_price", {"sku": sku, "new_price": new_price, "cost_price": cost_price})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return f"渠道 {channel} 商品 {sku} 价格已更新为 {new_price} 元"
+    """走 CommerceProvider 领域接口；写操作由策略层自动携带幂等键。"""
+    try:
+        r = await get_commerce_provider(channel).update_price(
+            sku, _dec(new_price), channel=channel, cost_price=_dec(cost_price)
+        )
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    replay = "（幂等：重复请求，未重复执行）" if r.idempotent_replay else ""
+    return f"渠道 {channel} 商品 {sku} 价格已更新为 {new_price} 元{replay}"
 
 
 async def create_promotion(channel: str, sku: str, discount: float, start_time: str, end_time: str) -> str:
@@ -80,10 +103,13 @@ async def query_order_status(channel: str, order_id: str) -> str:
 
 
 async def product_shelf(channel: str, sku: str, action: str) -> str:
-    data = await _exec(channel, "product_shelf", {"sku": sku, "action": action})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return f"渠道 {channel} 商品 {sku} 已{_ACTION_CN.get(action, action)}"
+    """走 CommerceProvider 领域接口；写操作由策略层自动携带幂等键。"""
+    try:
+        r = await get_commerce_provider(channel).product_shelf(sku, action)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    replay = "（幂等：重复请求，未重复执行）" if r.extra.get("idempotent_replay") else ""
+    return f"渠道 {channel} 商品 {sku} 已{_ACTION_CN.get(r.action.value, r.action.value)}{replay}"
 
 
 async def service_ticket(channel: str, order_id: str, issue: str, priority: str = "normal") -> str:

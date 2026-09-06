@@ -22,8 +22,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from sources.rest_client import ChannelRestClient, DEFAULT_PLATFORM_URL
-from sources.platform_adapter import (
+from integrations.commerce.client import ChannelRestClient, DEFAULT_PLATFORM_URL
+from integrations.commerce.adapter import (
     PLATFORM_KINDS,
     get_adapter,
     platform_is_real,
@@ -215,7 +215,7 @@ class ChannelRegistry:
             # 只有 mock 平台才能走离线 ASGI 兜底；真实平台缺 base_url 时也试真实 TCP
             if is_mock and not environ.get("CHANNEL_API_URL"):
                 from httpx import ASGITransport
-                from mocks.channel_api_mock import app as _api_app
+                from mock_commerce.routes import app as _api_app
 
                 transport = ASGITransport(_api_app)
             client = ChannelRestClient(

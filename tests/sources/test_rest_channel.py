@@ -1,11 +1,6 @@
-"""REST 渠道层测试 — RestClient 单测、mock 平台端点、MCP→REST 全链路。"""
+"""REST 渠道层测试 — RestClient 单测、mock 平台端点、内置工具全链路。"""
 
 import asyncio
-import os
-import socket
-import subprocess
-import sys
-import time
 
 import httpx
 import pytest
@@ -111,20 +106,18 @@ class RetryCapture:
 
 
 @pytest.mark.asyncio
-async def test_rest_client_retry_reuses_idempotency_key():
-    """限流重试：3 次请求带同一 X-Idempotency-Key（防止重试重复创建）。"""
+async def test_rest_client_single_attempt_no_retry():
+    """客户端单次请求语义：限流直接抛错、不重试——重试职责上收 Execution Policy
+    （「重试复用同一幂等键」的契约在 tests/execution/test_execution_policy.py 验证）。"""
     capture = RetryCapture()
     client = ChannelRestClient(
         base_url="http://t",
-        retries=2,
-        retry_delay=0.01,
         transport=httpx.MockTransport(capture.handler),
     )
-    data = await client.call("POST", "/v1/taobao/promotions", json_body={"sku": "SKU-1"})
-    assert data["sku"] == "SKU-1"
-    assert capture.count == 3
-    keys = {h.get("x-idempotency-key") for h in capture.headers}
-    assert len(keys) == 1 and list(keys)[0]
+    with pytest.raises(RestApiError) as ei:
+        await client.call("POST", "/v1/taobao/promotions", json_body={"sku": "SKU-1"})
+    assert ei.value.code == 10005
+    assert capture.count == 1, "客户端应保持单次请求语义，重试由策略层负责"
     await client.aclose()
 
 
@@ -150,65 +143,25 @@ async def test_channel_api_all_endpoints():
     await client.aclose()
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _wait_ready(port: int, timeout: float = 6.0) -> None:
-    import urllib.request
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/docs", timeout=0.5):
-                return
-        except Exception:
-            time.sleep(0.15)
-    raise RuntimeError(f"channel api mock not ready on {port}")
-
-
 def test_builtin_tools_over_rest_full_chain():
-    """全链路：内置平台 API 工具 → RestClient → mock 平台服务（子进程），真实 HTTP。
+    """全链路：内置平台 API 工具 → 渠道注册表 → RestClient → mock 平台服务。
 
-    电商工具已从 MCP 服务迁至内置通道（sources/builtin_tools.py），
-    本用例验证「进程内 handler → 真实 TCP → 平台服务」的完整链路。
+    电商工具在内置通道（sources/builtin_tools.py）执行，走运行时默认路径：
+    渠道注册表解析 client（进程内服务），验证完整 REST 语义（鉴权 / 信封 / 错误码）。
     """
     from sources import builtin_tools
 
-    port = _free_port()
-    platform_proc = subprocess.Popen(
-        [sys.executable, "-m", "mocks.channel_api_mock", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    old_url = os.environ.get("CHANNEL_API_URL")
-    os.environ["CHANNEL_API_URL"] = f"http://127.0.0.1:{port}"
-    try:
-        _wait_ready(port)
+    async def scenario():
+        assert len(builtin_tools.tool_names()) == 12  # 11 电商操作 + save_skill
+        # 内置 handler → 平台数据
+        r = await builtin_tools.query_inventory("taobao", "SKU-001")
+        assert "库存" in r and "海洋" in r
+        r2 = await builtin_tools.update_price("jd", "SKU-002", 89.0)
+        assert "已更新为" in r2
+        r3 = await builtin_tools.query_knowledge_base("退款政策")
+        assert "知识库" in r3 and "退款" in r3
+        # 平台错误码链路：未知渠道 → 10002 错误文本透传
+        r4 = await builtin_tools.query_anomalies("no-such")
+        assert "[平台错误 10002]" in r4
 
-        async def scenario():
-            assert len(builtin_tools.tool_names()) == 12  # 11 电商操作 + save_skill
-            # 真实调用：内置 handler → HTTP → 平台数据
-            r = await builtin_tools.query_inventory("taobao", "SKU-001")
-            assert "库存" in r and "海洋" in r
-            r2 = await builtin_tools.update_price("jd", "SKU-1", 89.0)
-            assert "已更新为" in r2
-            r3 = await builtin_tools.query_knowledge_base("退款政策")
-            assert "知识库" in r3 and "退款" in r3
-            # 平台错误码链路：未知渠道 → 10002 错误文本透传
-            r4 = await builtin_tools.query_anomalies("no-such")
-            assert "[平台错误 10002]" in r4
-
-        asyncio.run(scenario())
-    finally:
-        platform_proc.terminate()
-        try:
-            platform_proc.wait(timeout=5)
-        except Exception:
-            platform_proc.kill()
-        if old_url is None:
-            os.environ.pop("CHANNEL_API_URL", None)
-        else:
-            os.environ["CHANNEL_API_URL"] = old_url
+    asyncio.run(scenario())

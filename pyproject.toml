@@ -33,7 +33,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["agent_backend*", "agent_runtime*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*"]
+include = ["agent_backend*", "agent_runtime*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*", "execution*", "integrations*", "mock_commerce*", "harness*"]
 exclude = ["tests*"]
 
 [tool.ruff]

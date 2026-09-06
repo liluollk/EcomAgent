@@ -21,7 +21,7 @@ from agent_backend.factory import create_backend
 from agent_backend.provider_registry import DEFAULT_PROVIDER_REGISTRY
 from agent_runtime.base_agent import BaseAgent
 from sources import builtin_tools
-from sources.mcp_client_pool import McpClientPool
+from integrations.mcp.client_pool import McpClientPool
 from permission.pre_tool_use import PreToolUsePipeline
 from permission.rule_engine import mode_gate_rule, workspace_rules_rule
 from permission.rbac import role_gate_rule
@@ -67,7 +67,7 @@ def _start_channel_api() -> Optional[subprocess.Popen]:
     port = int(os.environ.get("CHANNEL_API_PORT", "18080"))
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "mocks.channel_api_mock", "--port", str(port)],
+            [sys.executable, "-m", "mock_commerce.routes", "--port", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -284,7 +284,10 @@ def _build_agent(session: Session) -> BaseAgent:
     pipeline.add_checker(mode_gate_rule(lambda: session.permission_mode.name))
     agent.set_permission_pipeline(pipeline)
 
-    # handler 合并：内置平台 API 工具优先，MCP 外部工具补充
-    handlers = {**mcp_pool.get_all_handlers(), **builtin_tools.get_handlers()}
-    agent.set_tool_handlers(handlers)
+    # handler 合并：内置平台 API 工具优先，MCP 外部工具补充；
+    # 来源通道映射随 handler 一并注入（事件 source 字段 = commerce/mcp）
+    mcp_handlers = mcp_pool.get_all_handlers()
+    handlers = {**mcp_handlers, **builtin_tools.get_handlers()}
+    sources = {**{n: "mcp" for n in mcp_handlers}, **{n: "commerce" for n in builtin_tools.get_handlers()}}
+    agent.set_tool_handlers(handlers, sources)
     return agent

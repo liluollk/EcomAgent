@@ -1,0 +1,1 @@
+"""Integrations 层 — 外部系统接入（Commerce / MCP 等）。"""
