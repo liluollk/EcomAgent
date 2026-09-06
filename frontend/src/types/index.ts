@@ -12,6 +12,10 @@ export interface ToolStartEvent {
   tool_name: string;
   tool_use_id: string;
   input: Record<string, unknown>;
+  /** 本次执行链路 ID（Execution Policy 注入，与配对 tool_result 同值） */
+  trace_id?: string;
+  /** 工具来源：commerce / mcp / skill */
+  source?: string;
 }
 
 /** 工具调用结果：工具执行完毕的返回值 */
@@ -21,6 +25,14 @@ export interface ToolResultEvent {
   tool_name: string;
   result: string;
   is_error: boolean;
+  /** 实际执行尝试次数（重试后 > 1） */
+  attempt?: number;
+  /** 执行总耗时（含重试与退避等待），毫秒 */
+  duration_ms?: number;
+  /** 命中幂等回放：同键重复请求未重复产生副作用 */
+  idempotent_replay?: boolean;
+  trace_id?: string;
+  source?: string;
 }
 
 /** 权限请求：需要用户确认的工具调用 */
@@ -91,6 +103,12 @@ export interface ToolCallInfo {
   result: string | null;
   isError: boolean;
   status: 'pending' | 'running' | 'done' | 'error';
+  /** 执行元数据（Execution Policy 回填，历史会话无此字段） */
+  attempt?: number;
+  durationMs?: number;
+  idempotentReplay?: boolean;
+  traceId?: string;
+  source?: string;
 }
 
 /** 权限请求在消息流中的展示信息 */

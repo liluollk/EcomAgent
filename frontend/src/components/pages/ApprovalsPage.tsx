@@ -75,14 +75,14 @@ export function ApprovalsPage() {
 
       <div className="flex flex-col gap-2.5 px-5 py-4">
         {pending.length === 0 && (
-          <div className="rounded-xl border border-line bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
+          <div className="rounded-xl bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
             当前没有待审批的权限请求
           </div>
         )}
         {pending.map((item) => (
           <div
             key={item.request_id}
-            className="flex flex-col gap-2 rounded-xl border border-line bg-elevated px-4 py-3 shadow-card"
+            className="flex flex-col gap-2 rounded-xl bg-elevated px-4 py-3 shadow-card"
           >
             <div className="flex items-center gap-2">
               <span className="rounded-md bg-inset px-2 py-0.5 font-mono text-[12px] text-ink">
@@ -126,7 +126,7 @@ export function ApprovalsPage() {
         {history.map((rec) => (
           <div
             key={rec.request_id}
-            className="flex items-center gap-2.5 rounded-lg border border-line bg-elevated px-3.5 py-2 shadow-card"
+            className="flex items-center gap-2.5 rounded-lg bg-elevated px-3.5 py-2 shadow-card"
           >
             <span
               className={`text-[13px] font-semibold ${rec.approved ? 'text-[#1a7f5a]' : 'text-[#c2403a]'}`}

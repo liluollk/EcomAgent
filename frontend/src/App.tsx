@@ -243,6 +243,12 @@ export default function App() {
                         result: event.result,
                         isError: event.is_error,
                         status: event.is_error ? ('error' as const) : ('done' as const),
+                        // Execution Policy 可观测性字段：重试次数 / 耗时 / 幂等回放 / Trace
+                        attempt: event.attempt,
+                        durationMs: event.duration_ms,
+                        idempotentReplay: event.idempotent_replay,
+                        traceId: event.trace_id,
+                        source: event.source,
                       }
                     : tc,
                 ),

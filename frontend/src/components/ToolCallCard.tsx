@@ -1,42 +1,60 @@
 import { useState } from 'react';
 import type { ToolCallInfo } from '../types';
-import { CHANNEL_META, TOOL_META, inferChannel, prettyJSON } from '../lib/format';
+import { CHANNEL_META, TOOL_META, durationText, inferChannel, paramSummary, prettyJSON } from '../lib/format';
 
-/** 工具调用卡片：状态图标 + 中文工具名 + 渠道标签，可展开查看输入/输出 */
-export function ToolCallCard({ call }: { call: ToolCallInfo }) {
+/**
+ * 工具调用组（craft 式 activity rows）：一次回复的全部工具调用折叠进一个
+ * ring 容器，行间 hairline 分隔。每行 = 状态图标 + 中文工具名 + 内联参数摘要
+ * + 执行徽章（渠道 / 重试 / 幂等回放 / 耗时），点击展开输入输出与 Trace 元数据。
+ * 对话是叙事，工具活动是折叠的行——不再一张一张浮卡打断阅读。
+ */
+export function ToolCallGroup({ calls }: { calls: ToolCallInfo[] }) {
+  return (
+    <div className="animate-fade-up overflow-hidden rounded-xl bg-elevated shadow-card">
+      {calls.map((tc, i) => (
+        <ToolCallRow key={tc.toolUseId} call={tc} separated={i > 0} />
+      ))}
+    </div>
+  );
+}
+
+function ToolCallRow({ call, separated }: { call: ToolCallInfo; separated: boolean }) {
   const [open, setOpen] = useState(false);
   const meta = TOOL_META[call.toolName];
   const channel = inferChannel(call.input);
+  const summary = paramSummary(call.toolName, call.input);
+  const dur = durationText(call.durationMs);
+  const retried = (call.attempt ?? 1) > 1;
 
   return (
-    <div className="animate-fade-up relative overflow-hidden rounded-lg border border-line bg-elevated shadow-card">
-      {/* 渠道品牌色左条：一眼识别这次操作发生在哪个平台 */}
-      <span
-        className="absolute left-0 top-0 h-full w-[2.5px]"
-        style={{ backgroundColor: channel ? CHANNEL_META[channel].color : 'var(--accent)' }}
-      />
+    <div className={separated ? 'border-t border-line' : ''}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2.5 py-2.5 pl-4 pr-3.5 text-left transition-colors hover:bg-black/[0.02]"
+        className="flex w-full items-center gap-2 py-[7px] pl-3.5 pr-3 text-left transition-colors hover:bg-black/[0.02]"
       >
         <StatusIcon status={call.status} />
-        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
-          <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d={meta?.icon ?? 'M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z'} />
-          </svg>
-        </span>
-        <span className="whitespace-nowrap text-[13px] font-medium text-ink">{meta?.label ?? call.toolName}</span>
-        <span className="hidden font-mono text-[11px] text-ink-3 sm:inline">{call.toolName}</span>
+        <span className="whitespace-nowrap text-[12.5px] font-medium text-ink">{meta?.label ?? call.toolName}</span>
+        {summary ? (
+          <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-3">{summary}</span>
+        ) : (
+          <span className="min-w-0 flex-1" />
+        )}
         {channel && (
           <span
-            className="rounded px-1.5 py-px text-[10.5px] font-medium"
-            style={{ backgroundColor: `${CHANNEL_META[channel].color}14`, color: CHANNEL_META[channel].color }}
+            className="badge"
+            style={{
+              backgroundColor: `${CHANNEL_META[channel].color}14`,
+              color: CHANNEL_META[channel].color,
+            }}
           >
             {CHANNEL_META[channel].label}
           </span>
         )}
-        <span className="ml-auto flex flex-shrink-0 items-center gap-1 font-mono text-[10.5px] text-ink-3 tnum">
-          {call.status === 'running' ? '执行中…' : call.status === 'error' ? '失败' : '完成'}
+        {retried && <span className="badge badge-warn">重试 {call.attempt} 次</span>}
+        {call.idempotentReplay && <span className="badge badge-ok">幂等回放</span>}
+        {dur && <span className="badge badge-neutral tnum">{dur}</span>}
+        <span className="ml-1 flex flex-shrink-0 items-center gap-1 text-ink-3">
+          {call.status === 'running' && <span className="text-[10.5px]">执行中…</span>}
           <svg
             className={`h-3 w-3 transition-transform ${open ? 'rotate-90' : ''}`}
             viewBox="0 0 24 24"
@@ -51,7 +69,7 @@ export function ToolCallCard({ call }: { call: ToolCallInfo }) {
       </button>
 
       {open && (
-        <div className="border-t border-line px-3.5 py-2.5">
+        <div className="border-t border-line bg-black/[0.015] px-3.5 py-2.5">
           <div className="mb-1 text-[11px] font-medium text-ink-3">输入参数</div>
           <pre className="overflow-x-auto rounded-lg bg-inset px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-2">
             {prettyJSON(call.input)}
@@ -68,6 +86,13 @@ export function ToolCallCard({ call }: { call: ToolCallInfo }) {
               </pre>
             </>
           )}
+          {(call.traceId || call.source || retried) && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-ink-3">
+              {call.traceId && <span>trace {call.traceId}</span>}
+              {call.source && <span>source {call.source}</span>}
+              {retried && <span>attempt {call.attempt}</span>}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -76,7 +101,7 @@ export function ToolCallCard({ call }: { call: ToolCallInfo }) {
 
 function StatusIcon({ status }: { status: ToolCallInfo['status'] }) {
   if (status === 'running') {
-    return <span className="h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border-2 border-accent/25 border-t-accent" />;
+    return <span className="h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-accent" />;
   }
   if (status === 'error') {
     return (

@@ -104,7 +104,7 @@ export function DashboardPage() {
   if (error) {
     return (
       <div className="flex flex-1 items-center justify-center">
-        <div className="rounded-xl border border-line bg-elevated px-6 py-10 text-center text-[12.5px] text-ink-3 shadow-card">
+        <div className="rounded-xl bg-elevated px-6 py-10 text-center text-[12.5px] text-ink-3 shadow-card">
           {error}
         </div>
       </div>
@@ -129,7 +129,7 @@ export function DashboardPage() {
           { label: '库存总量', value: summary.total_stock, prefix: '' },
           { label: '经营预警', value: summary.alert_count, prefix: '' },
         ].map((card) => (
-          <div key={card.label} className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card">
+          <div key={card.label} className="rounded-xl bg-elevated px-4 py-3 shadow-card">
             <div className="text-[11.5px] text-ink-3">{card.label}</div>
             <div className="mt-1 text-[20px] font-semibold tabular-nums text-ink">
               {card.prefix}
@@ -140,14 +140,14 @@ export function DashboardPage() {
       </div>
 
       {/* 销售趋势 */}
-      <div className="mt-4 rounded-xl border border-line bg-elevated px-4 py-3 shadow-card">
+      <div className="mt-4 rounded-xl bg-elevated px-4 py-3 shadow-card">
         <div className="text-[12.5px] font-medium text-ink">近 7 天全渠道 GMV 趋势</div>
         <TrendLine trend={trend} />
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3">
         {/* 渠道 GMV 占比 */}
-        <div className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card">
+        <div className="rounded-xl bg-elevated px-4 py-3 shadow-card">
           <div className="text-[12.5px] font-medium text-ink">渠道 GMV 构成</div>
           <div className="mt-2.5 flex flex-col gap-2.5">
             {channels
@@ -173,7 +173,7 @@ export function DashboardPage() {
         </div>
 
         {/* 经营预警 */}
-        <div className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card">
+        <div className="rounded-xl bg-elevated px-4 py-3 shadow-card">
           <div className="text-[12.5px] font-medium text-ink">经营预警</div>
           <div className="mt-2.5 flex flex-col gap-1.5">
             {alerts.length === 0 && <div className="text-[12px] text-ink-3">暂无预警，经营平稳</div>}
@@ -191,7 +191,7 @@ export function DashboardPage() {
       </div>
 
       {/* 库存水位 */}
-      <div className="mt-4 rounded-xl border border-line bg-elevated px-4 py-3 shadow-card">
+      <div className="mt-4 rounded-xl bg-elevated px-4 py-3 shadow-card">
         <div className="text-[12.5px] font-medium text-ink">渠道库存水位</div>
         <div className="mt-2.5 grid grid-cols-3 gap-3">
           {channels.map((c) => (

@@ -140,7 +140,7 @@ export function ChatInput({
               ))}
             </div>
           )}
-          <div className="rounded-xl border border-line bg-elevated px-4 py-3 shadow-card transition-all focus-within:border-accent/50 focus-within:shadow-[0_0_0_3px_var(--accent-soft)]">
+          <div className="rounded-xl bg-elevated px-4 py-3 shadow-card transition-all focus-within:[box-shadow:var(--shadow-input-focus)]">
           <textarea
             ref={ref}
             rows={1}

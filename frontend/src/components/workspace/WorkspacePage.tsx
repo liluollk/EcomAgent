@@ -161,7 +161,7 @@ export function WorkspacePage({ onOpenChat }: { onOpenChat?: () => void }) {
 
 function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-elevated px-6 py-14 shadow-card">
+    <div className="flex flex-col items-center gap-3 rounded-xl bg-elevated px-6 py-14 shadow-card">
       <svg className="h-8 w-8 text-ink-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
         <circle cx="12" cy="12" r="9" />
         <line x1="12" y1="8" x2="12" y2="12" />
@@ -196,7 +196,7 @@ function OverviewTab({ data, loading }: { data: OverviewResp | null; loading: bo
       </div>
 
       {data.channels.length === 0 ? (
-        <div className="rounded-xl border border-line bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
+        <div className="rounded-xl bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
           暂无启用渠道，可在「设置 → 渠道连接」中新增
         </div>
       ) : (
@@ -204,7 +204,7 @@ function OverviewTab({ data, loading }: { data: OverviewResp | null; loading: bo
           {data.channels.map((c) => {
             const meta = channelMeta(c.name);
             return (
-              <div key={c.name} className="relative overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
+              <div key={c.name} className="relative overflow-hidden rounded-xl bg-elevated shadow-card">
                 {/* 渠道品牌色顶条 */}
                 <span className="absolute left-0 top-0 h-[3px] w-full" style={{ backgroundColor: c.connected ? meta.color : '#CBD5E1' }} />
                 <div className="flex items-center gap-2.5 border-b border-line px-4 pb-3 pt-3.5">
@@ -281,7 +281,7 @@ function OverviewTab({ data, loading }: { data: OverviewResp | null; loading: bo
 
 function KpiCard({ label, value, tone, money: isMoney }: { label: string; value: number; tone?: 'ok' | 'warn'; money?: boolean }) {
   return (
-    <div className="rounded-xl border border-line bg-elevated p-4 shadow-card">
+    <div className="rounded-xl bg-elevated p-4 shadow-card">
       <div className="text-[12px] text-ink-3">{label}</div>
       <div
         className={`tnum mt-1 text-[24px] font-bold leading-none tracking-tight ${
@@ -313,7 +313,7 @@ function MiniStat({ label, value, tone, money: isMoney }: { label: string; value
 
 function ProductsTab({ onOpenChat }: { onOpenChat?: () => void }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-elevated px-6 py-14 shadow-card animate-fade-up">
+    <div className="flex flex-col items-center gap-3 rounded-xl bg-elevated px-6 py-14 shadow-card animate-fade-up">
       <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-inset text-[20px]">🚧</div>
       <div className="tnum text-[14px] font-semibold text-ink">商品明细管理未开通</div>
       <p className="max-w-[420px] text-center text-[12.5px] leading-relaxed text-ink-3">
@@ -377,7 +377,7 @@ function PromotionsTab({ data, loading }: { data: OverviewResp | null; loading: 
       </div>
 
       {rows.length === 0 ? (
-        <div className="rounded-xl border border-line bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
+        <div className="rounded-xl bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
           所选渠道暂无进行中促销
         </div>
       ) : (
@@ -385,7 +385,7 @@ function PromotionsTab({ data, loading }: { data: OverviewResp | null; loading: 
           {rows.map((p, idx) => {
             const meta = channelMeta(p.ch.name);
             return (
-              <div key={`${p.ch.name}-${p.name}-${idx}`} className="rounded-xl border border-line bg-elevated p-4 shadow-card">
+              <div key={`${p.ch.name}-${p.name}-${idx}`} className="rounded-xl bg-elevated p-4 shadow-card">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="truncate tnum text-[14px] font-semibold text-ink">{p.name}</div>
@@ -475,7 +475,7 @@ function TasksTab() {
                     draggable
                     onDragStart={() => setDragId(task.id)}
                     onDragEnd={() => setDragId(null)}
-                    className={`cursor-grab rounded-lg border border-line bg-elevated p-3 shadow-card transition-all hover:border-line-strong active:cursor-grabbing ${
+                    className={`cursor-grab rounded-lg bg-elevated p-3 shadow-card transition-all hover:shadow-pop active:cursor-grabbing ${
                       dragId === task.id ? 'opacity-50' : ''
                     }`}
                   >

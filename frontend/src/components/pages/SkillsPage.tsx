@@ -42,12 +42,12 @@ export function SkillsPage() {
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[860px] animate-fade-up space-y-2.5 px-6 py-5">
           {failed && (
-            <div className="rounded-xl border border-line bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
+            <div className="rounded-xl bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
               无法加载技能列表，请确认后端已启动
             </div>
           )}
           {!failed && skills.length === 0 && (
-            <div className="rounded-xl border border-line bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
+            <div className="rounded-xl bg-elevated px-5 py-8 text-center text-[12.5px] text-ink-3 shadow-card">
               暂无技能——在对话中让 Agent 沉淀第一个技能
             </div>
           )}
@@ -56,7 +56,7 @@ export function SkillsPage() {
             return (
               <div
                 key={s.name}
-                className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card"
+                className="overflow-hidden rounded-xl bg-elevated shadow-card"
               >
                 <button
                   onClick={() => setOpenName(open ? null : s.name)}

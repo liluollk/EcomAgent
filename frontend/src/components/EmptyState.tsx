@@ -50,7 +50,7 @@ export function EmptyState({ onPrompt }: { onPrompt: (text: string) => void }) {
               key={p.tool}
               onClick={() => onPrompt(p.prompt)}
               style={{ animationDelay: `${120 + i * 60}ms` }}
-              className="stagger-item group rounded-xl border border-line bg-elevated p-3.5 text-left shadow-card transition-all hover:border-accent/50"
+              className="stagger-item group rounded-xl bg-elevated p-3.5 text-left shadow-card transition-all hover:shadow-pop"
             >
               <div className="flex items-center gap-2">
                 <span className="flex h-6 w-6 items-center justify-center rounded-md bg-accent-soft text-accent">

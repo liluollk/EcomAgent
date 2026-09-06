@@ -22,10 +22,8 @@ export function PermissionCard({ permission, onRespond, externalDecision }: Perm
 
   return (
       <div
-        className={`animate-fade-up rounded-xl border p-3.5 ${
-          effective === 'denied'
-            ? 'border-line bg-inset'
-            : 'border-[#F0D48A] bg-[#FFFBEB]'
+        className={`animate-fade-up rounded-xl p-3.5 shadow-card ${
+          effective === 'denied' ? 'bg-inset' : 'bg-elevated'
         }`}
       >
         <div className="flex flex-wrap items-center gap-2">
@@ -42,26 +40,20 @@ export function PermissionCard({ permission, onRespond, externalDecision }: Perm
             <line x1="12" y1="9" x2="12" y2="13" />
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
-          <span className="text-[13px] font-semibold text-[#92610A]">权限确认</span>
+          <span className={`text-[13px] font-semibold ${effective ? 'text-ink-2' : 'text-warn'}`}>权限确认</span>
           <span className="text-[12.5px] text-ink-2">
             Agent 请求执行 <span className="font-medium text-ink">{toolLabel(permission.toolName)}</span>
           </span>
           {effective ? (
-            <span
-              className={`ml-auto rounded-md px-2 py-0.5 text-[11px] font-medium ${
-                effective === 'approved' ? 'bg-[#ECFDF3] text-ok' : 'bg-black/[0.06] text-ink-2'
-              }`}
-            >
+            <span className={`badge ml-auto ${effective === 'approved' ? 'badge-ok' : 'badge-neutral'}`}>
               {effective === 'approved' ? '已批准' : '已拒绝'}
             </span>
           ) : (
-            <span className="ml-auto rounded-md bg-[#F7E8B8] px-2 py-0.5 text-[11px] font-medium text-[#92610A]">
-              等待确认
-            </span>
+            <span className="badge badge-warn ml-auto">等待确认</span>
           )}
         </div>
         {permission.reason && <p className="mt-2 text-[12.5px] leading-relaxed text-ink-2">{permission.reason}</p>}
-        <pre className="mt-2 overflow-x-auto rounded-lg bg-white/70 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-2">
+        <pre className="mt-2 overflow-x-auto rounded-lg bg-inset px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-2">
           {prettyJSON(permission.toolInput)}
         </pre>
 

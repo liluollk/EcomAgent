@@ -50,6 +50,54 @@ export function inferChannel(input: Record<string, unknown> | undefined): Channe
   return null;
 }
 
+/** 毫秒 → 紧凑耗时文本（<1s 显示毫秒，否则一位小数秒） */
+export function durationText(ms?: number): string | null {
+  if (!ms || ms <= 0) return null;
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** 工具关键参数摘要：一行内联展示（craft 式 muted input summary），无关键参数返回 null */
+export function paramSummary(toolName: string, input: Record<string, unknown> | undefined): string | null {
+  if (!input) return null;
+  const s = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
+  const parts: string[] = [];
+  const sku = s(input.sku);
+  const ch = s(input.channel);
+  if (sku) parts.push(sku);
+  switch (toolName) {
+    case 'query_inventory':
+    case 'update_price':
+    case 'product_shelf':
+      if (toolName === 'update_price' && input.new_price != null) parts.push(`→ ¥${input.new_price}`);
+      if (toolName === 'product_shelf') parts.push(s(input.action) === 'off' ? '下架' : '上架');
+      break;
+    case 'create_promotion': {
+      const title = s(input.title);
+      if (title) parts.push(title);
+      else if (input.discount != null) parts.push(`${input.discount} 折`);
+      break;
+    }
+    case 'query_order_status': {
+      const order = s(input.order_id);
+      if (order) parts.unshift(order);
+      break;
+    }
+    case 'query_sales':
+    case 'query_statistics': {
+      const metric = s(input.metric);
+      if (metric) parts.push(metric);
+      break;
+    }
+    default:
+      if (parts.length === 0) {
+        const first = Object.values(input).find((v) => typeof v === 'string' && (v as string).length <= 24);
+        if (first) parts.push(first as string);
+      }
+  }
+  if (ch) parts.push(CHANNEL_META[ch as ChannelId]?.label ?? ch);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 /** 尽量把结果格式化成可读 JSON */
 export function prettyJSON(v: unknown): string {
   if (typeof v === 'string') {

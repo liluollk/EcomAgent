@@ -270,7 +270,7 @@ export function McpPage() {
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[860px] animate-fade-up space-y-4 px-6 py-5">
           {error ? (
-            <div className="rounded-xl border border-line bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
+            <div className="rounded-xl bg-elevated px-6 py-12 text-center text-[13px] text-ink-3 shadow-card">
               {error}
             </div>
           ) : loading || !status ? (
@@ -284,7 +284,7 @@ export function McpPage() {
               </div>
 
               {/* server 配置管理 */}
-              <div className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
+              <div className="overflow-hidden rounded-xl bg-elevated shadow-card">
                 <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
                   <span className="text-[12.5px] font-medium text-ink">MCP Server 配置（粘贴 JSON 即可接入外部 MCP 服务）</span>
                   <div className="flex gap-0.5 rounded-lg bg-black/[0.04] p-0.5">
@@ -388,7 +388,7 @@ export function McpPage() {
 
               {notice && <p className="text-[12px] text-ink-2">{notice}</p>}
 
-              <div className="overflow-hidden rounded-xl border border-line bg-elevated shadow-card">
+              <div className="overflow-hidden rounded-xl bg-elevated shadow-card">
                 <div className="border-b border-line px-4 py-2.5 text-[12.5px] font-medium text-ink">
                   工具清单（tools/list 真实发现）
                 </div>
@@ -423,7 +423,7 @@ export function McpPage() {
 
 function InfoCard({ label, value, tone, mono }: { label: string; value: string; tone?: 'ok' | 'warn'; mono?: boolean }) {
   return (
-    <div className="rounded-xl border border-line bg-elevated p-4 shadow-card">
+    <div className="rounded-xl bg-elevated p-4 shadow-card">
       <div className="text-[12px] text-ink-3">{label}</div>
       <div
         className={`mt-1 text-[15px] font-semibold ${
