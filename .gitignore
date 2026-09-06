@@ -48,3 +48,7 @@ data/skills.json
 # Electron 桌面端
 desktop/
 gui-test-screenshots/
+
+# 内部过程文档（不公开）
+/docs/superpowers/
+/1. 最终架构.md
