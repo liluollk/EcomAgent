@@ -35,10 +35,21 @@ def _after_skill_created() -> None:
     assert "stock_check_pro" in DEFAULT_SKILL_REGISTRY.list_menu_names()
 
 
+def _after_memory_forgotten() -> None:
+    """记忆遗忘场景收尾：断言显式记忆已删除、不再被检索注入。"""
+    from agent_runtime import memory_store as _ms
+
+    store = _ms.DEFAULT_MEMORY_STORE
+    assert "3 万件" not in store.recall_section("default", query="双11"), (
+        "「忘记」后记忆不应再被检索注入"
+    )
+
+
 SETUP_HOOKS: dict[str, Callable[[], None]] = {"add_pdd_channel": _setup_add_pdd_channel}
 AFTER_HOOKS: dict[str, Callable[[], None]] = {
     "assert_memory_landed": _after_memory_landed,
     "assert_skill_created": _after_skill_created,
+    "assert_memory_forgotten": _after_memory_forgotten,
 }
 
 

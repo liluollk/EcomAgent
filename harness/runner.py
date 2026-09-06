@@ -159,10 +159,11 @@ class Runner:
                 session = Session(
                     session_id="harness",
                     workspace=ws,
-                    permission_mode=PermissionMode.EXECUTE,
+                    permission_mode=getattr(PermissionMode, scenario.get("mode", "EXECUTE")),
                     active_sources=["taobao", "jd", "douyin"],
-                    # 六步链路含改价/促销/上下架/工单，用 manager（店长）保证 ACL 全覆盖
-                    user={"user_id": "harness_user", "role": "manager"},
+                    # 缺省 manager（店长）保证写操作 ACL 全放行；场景可用 mode/role 覆盖
+                    # （如 readonly_blocks_write / rbac_denial）
+                    user={"user_id": "harness_user", "role": scenario.get("role", "manager")},
                 )
                 agent = _build_agent(session)
 

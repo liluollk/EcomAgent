@@ -75,14 +75,20 @@ def e2e_isolate(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_session(workspace: Workspace, sid: str, mode: PermissionMode = PermissionMode.EXECUTE) -> Session:
+def _make_session(
+    workspace: Workspace,
+    sid: str,
+    mode: PermissionMode = PermissionMode.EXECUTE,
+    role: str = "manager",
+) -> Session:
     return Session(
         session_id=sid,
         workspace=workspace,
         permission_mode=mode,
         active_sources=["taobao", "jd", "douyin"],
-        # 六步链路含改价/促销/上下架/工单，用 manager（店长）保证 ACL 全覆盖
-        user={"user_id": "e2e_user", "role": "manager"},
+        # 缺省 manager（店长）保证写操作 ACL 全放行；场景可用 mode/role 覆盖
+        # （如 readonly_blocks_write / rbac_denial）
+        user={"user_id": "e2e_user", "role": role},
     )
 
 
@@ -95,7 +101,7 @@ def _make_workspace() -> Workspace:
     )
 
 
-def _run_e2e(scenario):
+def _run_e2e(driver, scenario):
     """在单次 asyncio.run 中执行完整 MCP 联动场景。
 
     MCP 的 stdio_client/ClientSession 绑定创建时的事件循环，跨 asyncio.run
@@ -109,14 +115,19 @@ def _run_e2e(scenario):
         await mcp_pool.connect()
         try:
             ws = _make_workspace()
-            session = _make_session(ws, "e2e")
+            session = _make_session(
+                ws,
+                "e2e",
+                mode=getattr(PermissionMode, scenario.get("mode", "EXECUTE")),
+                role=scenario.get("role", "manager"),
+            )
             agent = _build_agent(session)
 
             async def chat(text: str) -> list:
                 tools = _build_tools()
                 return [ev async for ev in agent.chat(session, text, tools)]
 
-            return await scenario(chat)
+            return await driver(chat)
         finally:
             await mcp_pool.close()
 
@@ -144,7 +155,7 @@ def test_e2e_behavior_contract_scenarios(scenario):
             after()
         return "ok"
 
-    assert _run_e2e(run) == "ok"
+    assert _run_e2e(run, scenario) == "ok"
 
 
 # ---------------------------------------------------------------------------

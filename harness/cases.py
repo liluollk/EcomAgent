@@ -16,6 +16,8 @@ scenario 字段约定：
     name      场景名
     setup     预先准备钩子名（见 harness/hooks.py）
     after     收尾验证钩子名（见 harness/hooks.py）
+    mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
+    role      会话角色（manager/operator/customer_service/finance，缺省 manager）
 """
 
 from __future__ import annotations
@@ -45,11 +47,12 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         "name": "cost_interception",
         "steps": [
-            {"message": "把淘宝 SKU-001 价格调到 20",  # 20 < 成本 59
-             # mock 剧本模拟「底层规则拒绝」：直接产出失败结果，无业务 tool_start；
-             # 真实 PreToolUse BLOCK 路径（有 tool_start）由 permission 单元测试覆盖
-             "expect_tool": False, "result_is_error": True,
-             "result_contains": ["成本", "低于"]},
+            # 20 < 成本 59：真实 PreToolUse 业务规则拦截（管线：身份门→业务规则→模式门），
+            # 事件形状 = tool_start 可见尝试 + tool_result(is_error) 展示拦截原因
+            {"message": "把淘宝 SKU-001 价格调到 20", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "result_is_error": True,
+             "result_contains": ["拦截", "成本", "低于"]},
         ],
     },
     {
@@ -73,6 +76,78 @@ SCENARIOS: list[dict[str, Any]] = [
         "steps": [
             {"message": "把查库存的流程做成一个叫 stock_check_pro 的技能", "tool": "save_skill",
              "input": {"name": "stock_check_pro"}},
+        ],
+    },
+    {
+        "name": "shelf_toggle",
+        "steps": [
+            {"message": "把淘宝 SKU-001 下架", "tool": "product_shelf",
+             "input": {"channel": "taobao", "sku": "SKU-001", "action": "off"}},
+            {"message": "把淘宝 SKU-001 重新上架", "tool": "product_shelf",
+             "input": {"channel": "taobao", "sku": "SKU-001", "action": "on"}},
+        ],
+    },
+    {
+        "name": "promotion_query_and_create",
+        "steps": [
+            {"message": "看下抖音进行中的促销", "tool": "query_promotions",
+             "input": {"channel": "douyin"}},
+            {"message": "给抖音 SKU-003 建个促销活动", "tool": "create_promotion",
+             "input": {"channel": "douyin", "sku": "SKU-003"}},
+        ],
+    },
+    {
+        "name": "business_review",
+        "steps": [
+            {"message": "看下淘宝近7天的销售分析", "tool": "query_order_stats",
+             "input": {"channel": "taobao", "period": "近7天"}},
+            {"message": "看下淘宝的售后统计", "tool": "query_after_sales_stats",
+             "input": {"channel": "taobao"}},
+        ],
+    },
+    {
+        "name": "anomaly_watch",
+        "steps": [
+            {"message": "看下抖音有什么异常预警", "tool": "query_anomalies",
+             "input": {"channel": "douyin"}},
+        ],
+    },
+    {
+        "name": "unknown_sku_graceful",
+        "steps": [
+            # 平台对未知 SKU 返回空库存行：工具优雅返回（库存 0），不报错不崩溃
+            {"message": "查一下淘宝 SKU-999 的库存", "tool": "query_inventory",
+             "input": {"channel": "taobao", "sku": "SKU-999"}},
+        ],
+    },
+    {
+        "name": "readonly_blocks_write",
+        "mode": "READONLY",
+        "steps": [
+            # 模式门拦截：只读模式下写操作被 BLOCK（reason 含「只读」）
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "result_is_error": True,
+             "result_contains": ["拦截", "只读"]},
+        ],
+    },
+    {
+        "name": "rbac_denial",
+        "role": "finance",
+        "steps": [
+            # 身份门拦截：finance 角色无 update_price 写权限，管线第一位即 BLOCK
+            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
+             "input": {"channel": "taobao", "sku": "SKU-001"},
+             "result_is_error": True,
+             "result_contains": ["拦截", "财务"]},
+        ],
+    },
+    {
+        "name": "memory_forget",
+        "after": "assert_memory_forgotten",
+        "steps": [
+            {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
+            {"message": "忘记 双11", "expect_tool": False},
         ],
     },
 ]

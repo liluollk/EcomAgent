@@ -1,13 +1,21 @@
 {
   "schema": 1,
-  "saved_at": "2026-09-05T10:03:38+00:00",
-  "total": 5,
-  "passed": 5,
+  "saved_at": "2026-09-06T03:16:15+00:00",
+  "total": 13,
+  "passed": 13,
   "cases": {
     "six_step_business_chain": "9643c3d0ea3438a5",
-    "cost_interception": "92ee20d75a5c8018",
+    "cost_interception": "d30b8870a1cea75b",
     "dynamic_channel_add": "15c761cab8828142",
     "cross_session_memory": "d797040e0eb07be6",
-    "skill_creation": "ee7ed8c490259529"
+    "skill_creation": "ee7ed8c490259529",
+    "shelf_toggle": "213b4bcb17be3b96",
+    "promotion_query_and_create": "f548094ee34bfa38",
+    "business_review": "1d1aa9b597384c74",
+    "anomaly_watch": "fc375cf2e138ffea",
+    "unknown_sku_graceful": "c28cb3732d3b5a41",
+    "readonly_blocks_write": "c067fe203e2a0f78",
+    "rbac_denial": "eb639d35638a8fd5",
+    "memory_forget": "515570b5642916e5"
   }
 }
