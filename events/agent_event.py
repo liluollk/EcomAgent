@@ -43,12 +43,18 @@ class ToolStartEvent:
 
     包含工具名称、调用 ID（用于匹配 tool_result）和参数。
     调用方收到此事件后应执行对应工具，然后发送 ToolResultEvent。
+
+    可观测性字段（引擎回填，缺省不破坏既有消费方）：
+    trace_id  一次 turn 的执行轨迹 ID（Trace 从事件流上自然生长）
+    source    工具来源通道：commerce（内置电商工具）/ mcp / ""（内部）
     """
 
     type: Literal["tool_start"] = "tool_start"
     tool_name: str = ""
     tool_use_id: str = ""
     input: dict[str, Any] = None
+    trace_id: str = ""
+    source: str = ""
 
     def __post_init__(self):
         if self.input is None:
@@ -61,6 +67,12 @@ class ToolResultEvent:
 
     tool_use_id 必须与对应的 ToolStartEvent 一致，以便调用方匹配。
     is_error 为 True 时表示工具执行失败。
+
+    可观测性字段（Execution Policy 回填，缺省不破坏既有消费方）：
+    attempt            实际执行尝试次数（重试后 > 1，Trace 可还原重试链）
+    duration_ms        工具执行总耗时（含重试与退避等待）
+    idempotent_replay  命中幂等回放（同键重复请求未重复产生副作用）
+    trace_id / source  与配对 ToolStartEvent 同值
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -68,6 +80,11 @@ class ToolResultEvent:
     tool_name: str = ""
     result: str = ""
     is_error: bool = False
+    attempt: int = 1
+    duration_ms: int = 0
+    idempotent_replay: bool = False
+    trace_id: str = ""
+    source: str = ""
 
 
 @dataclass
