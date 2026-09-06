@@ -237,13 +237,15 @@ def _run_chat(agent, session, text):
 def test_chat_writes_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
     from agent_runtime import memory_store as ms_mod
-    monkeypatch.setattr("agent_runtime.base_agent.DEFAULT_MEMORY_STORE",
-                        ms_mod.MemoryStore(root=str(tmp_path / "memory")))
+    # 断言必须读被 patch 的同一实例：模块级单例指向项目真实 data/memory，
+    # 读单例会把运行环境里的历史记忆混入（隔离假绿）
+    store = ms_mod.MemoryStore(root=str(tmp_path / "memory"))
+    monkeypatch.setattr("agent_runtime.base_agent.DEFAULT_MEMORY_STORE", store)
 
     agent, ws = _make_agent()
     session = _make_session(ws)
     _run_chat(agent, session, "查一下库存")
-    section = ms_mod.DEFAULT_MEMORY_STORE.recall_section("default")
+    section = store.recall_section("default")
     assert "query_inventory" in section
     assert os.path.exists(os.path.join(str(tmp_path / "memory"), "default", "MEMORY.md"))
 
