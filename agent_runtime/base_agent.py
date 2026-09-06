@@ -18,6 +18,7 @@ from __future__ import annotations
 import json as _json
 import asyncio
 import inspect
+import re
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Awaitable, Callable, Optional
 
@@ -237,6 +238,19 @@ class BaseAgent:
         config.system_prompt = self._current_system_prompt
         self._backend.update_runtime_config(config)
 
+        # /命令显式指定技能（"/price_management 调价"）：跳过模型"看菜单点菜"，
+        # 直接预加载 SOP——显式指定优先于模型自主选择，加载失败不阻塞（回落菜单流程）
+        preload = self._parse_slash_skill(user_message)
+        if preload:
+            self._loaded_skills.add(preload)
+            self._current_system_prompt = self._build_system_prompt_text(
+                lifecycle, session, user_message
+            )
+            config = self._backend.get_config()
+            config.system_prompt = self._current_system_prompt
+            self._backend.update_runtime_config(config)
+            yield StatusEvent(message=f"已按 /{preload} 预加载技能")
+
         yield StatusEvent(message=f"可用技能: {self._skill_registry.list_menu_names()}")
 
         session.add_message("user", user_message)
@@ -269,6 +283,23 @@ class BaseAgent:
     # ------------------------------------------------------------------
     # 渐进式技能加载（Progressive Skill Loading）
     # ------------------------------------------------------------------
+
+    def _parse_slash_skill(self, user_message: str) -> Optional[str]:
+        """解析 "/技能名 ..." 前缀：命中已启用且前置条件满足的技能则返回名称。
+
+        / 命令是渐进式加载的显式入口（用户点名 > 模型猜）；名称无效、
+        技能停用或前置条件不满足时返回 None，回落到模型菜单选择流程。
+        """
+        m = re.match(r"^/([A-Za-z_][A-Za-z0-9_]*)", (user_message or "").strip())
+        if not m:
+            return None
+        skill = self._skill_registry.get(m.group(1))
+        if skill is None or not skill.enabled:
+            return None
+        lifecycle = getattr(self, "_lifecycle", None)
+        if lifecycle is not None and lifecycle.unmet_prerequisites([skill.name]):
+            return None
+        return skill.name
 
     def _build_load_skill_def(self) -> Optional[dict]:
         """构造 load_skill 元工具定义（唯一始终可见的工具）。

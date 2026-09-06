@@ -52,6 +52,27 @@ def _extract_channel(text: str, default: str = "taobao") -> str:
     return default
 
 
+def _slash_skill(user_message: str) -> str | None:
+    """提取 "/技能名 ..." 前缀显式指定的技能名（非 / 开头返回 None）。"""
+    m = re.match(r"^/([A-Za-z_][A-Za-z0-9_]*)", (user_message or "").strip())
+    return m.group(1) if m else None
+
+
+# 技能名 → 剧本关键词提示：/命令只点名技能时，让 domain 工具分支照常命中
+_SKILL_KEYWORD_HINTS = {
+    "skill_creator": "创建技能",
+    "promotion_management": "促销",
+    "price_management": "价格",
+    "knowledge_inquiry": "知识",
+    "order_analytics": "分析",
+    "anomaly_detection": "异常",
+    "product_listing": "下架",
+    "after_sales": "工单",
+    "order_management": "订单",
+    "inventory_query": "库存",
+}
+
+
 class MockAgent:
     """脚本化 Mock 后端，事件语义与真实后端保持一致。"""
 
@@ -136,7 +157,10 @@ class MockAgent:
 
     @staticmethod
     def _skill_for(user_message: str) -> str:
-        """按关键词映射技能名（与内置技能 keywords 对齐）。"""
+        """按关键词映射技能名（与内置技能 keywords 对齐）；/命令显式点名优先。"""
+        explicit = _slash_skill(user_message)
+        if explicit:
+            return explicit
         if any(w in user_message for w in ("创建技能", "做成", "生成技能", "写个技能", "沉淀")):
             return "skill_creator"
         if any(w in user_message for w in ("促销", "优惠", "折扣", "满减")):
@@ -145,7 +169,7 @@ class MockAgent:
             return "price_management"
         if any(w in user_message for w in ("知识", "规范", "话术", "政策")):
             return "knowledge_inquiry"
-        if any(w in user_message for w in ("分析", "销售额", "GMV", "成交")):
+        if any(w in user_message for w in ("分析", "销售额", "GMV", "成交", "统计", "盘点")):
             return "order_analytics"
         if any(w in user_message for w in ("异常", "预警", "风控")):
             return "anomaly_detection"
@@ -163,6 +187,12 @@ class MockAgent:
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        # /命令只点名技能未带指令时，按技能名补关键词提示，保证分支照常命中
+        explicit = _slash_skill(last_user)
+        if explicit:
+            hint = _SKILL_KEYWORD_HINTS.get(explicit)
+            if hint and hint not in last_user:
+                last_user = f"{last_user} {hint}"
         if any(w in last_user for w in ("做成", "创建技能", "生成技能", "沉淀")):
             m_name = re.search(r"叫\s*([a-z][a-z0-9_]*)", last_user)
             skill_name = m_name.group(1) if m_name else "created_skill"
@@ -180,6 +210,12 @@ class MockAgent:
                         "3) 汇总并向用户汇报。"
                     ),
                 },
+            )
+        if "促销" in last_user and any(w in last_user for w in ("查看", "查询", "进行中", "有哪些", "看下")):
+            return ToolStartEvent(
+                tool_name="query_promotions",
+                tool_use_id="call_mock_promo_query",
+                input={"channel": _extract_channel(last_user, default="douyin")},
             )
         if "促销" in last_user or "活动" in last_user:
             return ToolStartEvent(
@@ -220,6 +256,12 @@ class MockAgent:
                 tool_use_id="call_mock_stats",
                 input={"channel": _extract_channel(last_user), "period": "近7天"},
             )
+        if "售后统计" in last_user or "销售统计" in last_user:
+            return ToolStartEvent(
+                tool_name="query_after_sales_stats",
+                tool_use_id="call_mock_after_sales",
+                input={"channel": _extract_channel(last_user), "period": "近7天"},
+            )
         if "异常" in last_user or "预警" in last_user:
             return ToolStartEvent(
                 tool_name="query_anomalies",
@@ -227,10 +269,11 @@ class MockAgent:
                 input={"channel": _extract_channel(last_user)},
             )
         if "上架" in last_user or "下架" in last_user or "下柜" in last_user:
+            action = "off" if ("下架" in last_user or "下柜" in last_user) else "on"
             return ToolStartEvent(
                 tool_name="product_shelf",
                 tool_use_id="call_mock_shelf",
-                input={"channel": _extract_channel(last_user), "sku": "SKU-001", "action": "off"},
+                input={"channel": _extract_channel(last_user), "sku": "SKU-001", "action": action},
             )
         if "工单" in last_user or "客诉" in last_user:
             return ToolStartEvent(
@@ -244,8 +287,12 @@ class MockAgent:
                 tool_use_id="call_mock_order",
                 input={"channel": _extract_channel(last_user), "order_id": "TB-10086"},
             )
+        m_sku = re.search(r"SKU-\d+", last_user)
         return ToolStartEvent(
             tool_name="query_inventory",
             tool_use_id="call_mock_inv",
-            input={"channel": _extract_channel(last_user), "sku": "SKU-001"},
+            input={
+                "channel": _extract_channel(last_user),
+                "sku": m_sku.group(0) if m_sku else "SKU-001",
+            },
         )

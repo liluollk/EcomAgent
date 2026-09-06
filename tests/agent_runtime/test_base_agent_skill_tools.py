@@ -173,3 +173,53 @@ def test_unmet_prerequisite_blocks_skill_load():
     results = [e for e in events if e.type == "tool_result" and e.tool_name == "load_skill"]
     assert results and results[0].is_error, "前置条件不满足应拒绝加载"
     assert "需要激活渠道 douyin" in results[0].result
+
+
+def test_slash_command_preloads_skill():
+    """/技能名 前缀：第一轮起 SOP 即注入系统提示词（显式指定优先于模型点菜）。"""
+    backend = RecordingBackend()
+    session = make_session()
+    events = collect(backend, session, "/inventory_query 查一下淘宝 SKU-001")
+
+    statuses = [e.message for e in events if e.type == "status"]
+    assert any("已按 /inventory_query 预加载技能" in s for s in statuses)
+    system_prompt = backend.last_messages[0]["content"]
+    assert "执行库存查询 SOP" in system_prompt
+    # 全程无需模型再调 load_skill（对比 test_load_skill_injects_sop_into_system_prompt）
+    assert not session.tool_calls
+
+
+def test_slash_command_unknown_skill_falls_back_to_menu():
+    """/后接不存在的名称：不预加载、不报错，回落模型菜单选择流程。"""
+    backend = RecordingBackend()
+    session = make_session()
+    events = collect(backend, session, "/no_such_skill 查库存")
+
+    statuses = [e.message for e in events if e.type == "status"]
+    assert not any("预加载技能" in s for s in statuses)
+    assert "执行库存查询 SOP" not in backend.last_messages[0]["content"]
+
+
+def test_slash_command_prerequisite_blocked_silently():
+    """/点名带未满足前置条件的技能：不预加载也不阻塞，回落菜单流程。"""
+    from sources.skill_registry import Skill, SkillRegistry
+
+    registry = SkillRegistry(load_persisted=False)
+    registry.register(Skill(
+        name="douyin_live",
+        description="抖音直播带货",
+        keywords=["直播"],
+        prerequisites=["source:douyin"],
+        body="执行直播 SOP。",
+    ))
+    backend = RecordingBackend()
+    session = make_session(active_sources=["jd"])  # 无 douyin
+    agent = BaseAgent(backend, session.workspace, skill_registry=registry)
+    agent.set_tool_handlers({"query_inventory": lambda **kwargs: "ok"})
+
+    async def run() -> list:
+        return [event async for event in agent.chat(session, "/douyin_live 开播", FULL_TOOLS)]
+
+    events = asyncio.run(run())
+    statuses = [e.message for e in events if e.type == "status"]
+    assert not any("预加载技能" in s for s in statuses)
