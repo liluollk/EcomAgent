@@ -122,27 +122,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 ## 🏗️ 架构
 
-```
-前端 (React/TS)
-  │  WebSocket 事件流 + 权限/中断控制
-  ▼
-transport/server.py ── FastAPI REST + WS 双通道
-  ▼  一次 turn
-Workspace / Session ── 隔离上下文 / 权限模式 / 模型状态 / 审计
-Skill 注入 / Source 装配 ── SKILL.md 渐进式披露（菜单常驻，load_skill 才注入正文）
-AgentBackend ── OpenAI / Anthropic / Mock 统一事件流契约
-多轮 Tool Call 循环 ── 单轮多工具并发执行，结果按 Tool Call ID 归位
-PreToolUse ── RBAC 身份门 → 业务规则 → 模式门 → Human-in-the-Loop
-Execution Policy ── 分级超时 → 错误分类重试（仅瞬态）→ 幂等键（写操作）→ 结果校验
-AgentEvent ── 八类事件驱动 UI / 评测 / Trace（含 trace_id / attempt / duration_ms）
-  ▼  工具执行
-内置平台工具（11 个电商语义操作 + save_skill）
-  │  MCP 外部工具（子进程 stdio / JSON-RPC，配置化接入）
-  ▼
-Commerce Adapter（协议翻译）+ REST 客户端（httpx 真实 HTTP）
-  ▼
-Mock Commerce API（认证 / 错误码信封 / 限流 / 幂等 / 确定性故障注入）
-```
+<img src="docs/images/architecture.svg" width="100%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent Runtime 执行核心 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
 
 **第一原则：Runtime 不知道「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，Runtime 一行不改。
 
