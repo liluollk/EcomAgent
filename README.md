@@ -11,13 +11,9 @@
 ![pytest](https://img.shields.io/badge/pytest-379%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
-<img src="docs/images/agent-chat.png" width="100%" alt="会话演示"/>
+<img src="docs/images/agent-chat.png" width="72%" alt="会话演示"/>
 
 *一次真实会话：用户指令 → 技能加载与工具调用（渠道徽章 + 执行耗时）→ 敏感写操作人工批准（HITL）→ 基于真实工具结果的收尾汇报*
-
-<img src="docs/images/architecture.svg" width="100%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent Runtime 执行核心 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
-
-*总体架构：执行链自上而下，AgentEvent 事件流贯穿全链驱动 UI / 评测 / Trace*
 
 </div>
 
@@ -126,13 +122,9 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 ## 🏗️ 架构
 
-> 整体架构图见页首。分层职责：
-
-- **Agent Runtime 执行核心**：Workspace / Session、Skill 注入、AgentBackend 抽象、多轮 Tool Call 循环
-- **PreToolUse 权限管线**：RBAC 身份门 → 业务规则 → 模式门 → Human-in-the-Loop
-- **Execution Policy**：分级超时 → 错误分类重试（仅瞬态）→ 幂等键（写操作）→ 结果校验
-- **工具源**：内置平台工具（11 个电商语义操作）+ MCP 外部工具（子进程 stdio / JSON-RPC）
-- **Commerce Adapter**：协议翻译 + httpx REST 客户端
+<p align="center">
+  <img src="docs/images/architecture.svg" width="58%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent Runtime 执行核心 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
+</p>
 
 **第一原则：Runtime 不知道「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，Runtime 一行不改。
 
