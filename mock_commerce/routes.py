@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 
-from fastapi import FastAPI, Header, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from mock_commerce.auth import verify_api_key
@@ -67,6 +67,16 @@ async def update_price(
         # （string 型 stock 触发 Schema 校验；对必填字段操作则缺字段触发）
         return ok_response({"unexpected_field": True, "stock": "N/A"})
     check_channel(channel)
+
+    # 平台真相：成本价以平台数据为准，不信任调用方传入的 cost_price——
+    # 绕过 PreToolUse 早闸（如真实模型未传 cost_price）的直接写请求，在这里被拒。
+    # 仅对已知 SKU 生效：未知 SKU 无成本数据，交由业务层处理
+    platform_cost = (INVENTORY.get(channel) or {}).get("cost_price") if body.sku in KNOWN_SKUS else None
+    if platform_cost is not None and body.new_price < platform_cost:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": 10004, "message": f"价格低于成本价 {platform_cost}，不允许调整"},
+        )
 
     def _data() -> dict:
         # 副作用在构造时发生（写审计日志），之后才可能被 post 阶段的 timeout 挂起

@@ -3,9 +3,9 @@
 import time as _time
 
 INVENTORY = {
-    "taobao": {"name": "海洋之风法式泡泡袖连衣裙", "stock": 1523, "channel_cn": "淘宝"},
-    "jd": {"name": "海洋之风高腰 A 字半身裙", "stock": 890, "channel_cn": "京东", "warehouse": "北京仓"},
-    "douyin": {"name": "海洋之风复古针织开衫", "stock": 2340, "channel_cn": "抖音"},
+    "taobao": {"name": "海洋之风法式泡泡袖连衣裙", "stock": 1523, "cost_price": 59.0, "channel_cn": "淘宝"},
+    "jd": {"name": "海洋之风高腰 A 字半身裙", "stock": 890, "cost_price": 120.0, "channel_cn": "京东", "warehouse": "北京仓"},
+    "douyin": {"name": "海洋之风复古针织开衫", "stock": 2340, "cost_price": 45.0, "channel_cn": "抖音"},
 }
 
 ORDER_STATUS = {

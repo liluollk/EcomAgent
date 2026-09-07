@@ -36,15 +36,34 @@ _ENV_KEYS = (
     "AGENT_BACKEND",
     "SKILLS_DIR",
     "MCP_SERVERS_CONFIG_FILE",
+    "HARNESS_PROVIDER",
 )
 
 
 class Runner:
-    """评测运行器：env 隔离 + 生产装配驱动 + trace 记录。"""
+    """评测运行器：env 隔离 + 生产装配驱动 + trace 记录。
 
-    def __init__(self, recorder: Recorder, run_id: str) -> None:
+    backend="mock"（缺省）：剧本后端，回归验收模式——两类契约全查，
+      结果与 baseline.json 指纹对比，退化即非零退出。
+    backend="openai"/"anthropic" + provider=<providers.json 中的名字>：
+      真实模型模式——只跑运行时契约场景（relaxed 断言），独立报告，
+      不读写回归基线（真实模型有 run 间方差，二值基线语义不适用）。
+    """
+
+    def __init__(
+        self,
+        recorder: Recorder,
+        run_id: str,
+        backend: str = "mock",
+        provider: Optional[str] = None,
+        relaxed: bool = False,
+    ) -> None:
         self.recorder = recorder
         self.run_id = run_id
+        self.backend = backend
+        self.provider = provider
+        self.relaxed = relaxed or backend != "mock"
+        self.last_usage: Optional[dict] = None  # 真实模型模式：最近 case 的 token 用量
         self._snapshot: dict[str, Optional[str]] = {}
 
     # -- 环境隔离 ----------------------------------------------------------
@@ -64,10 +83,18 @@ class Runner:
         os.environ["AGENT_STORAGE_DIR"] = str(env_dir / "sessions")
         os.environ["CHANNEL_CONFIG_FILE"] = str(env_dir / "channels.json")
         os.environ["MEMORY_DIR"] = str(env_dir / "memory")
-        os.environ["PROVIDER_CONFIG_FILE"] = str(env_dir / "providers.json")
         os.environ["CHANNEL_API_AUTO"] = "0"  # 关闭平台子进程自动拉起：离线 ASGI 兜底足够
-        os.environ["AGENT_BACKEND"] = "mock"  # 剧本后端：确定性输出
+        os.environ["AGENT_BACKEND"] = self.backend
         os.environ["SKILLS_DIR"] = str(env_dir / "skills")  # 用户技能隔离（save_skill 落盘处）
+        if self.provider:
+            os.environ["HARNESS_PROVIDER"] = self.provider
+        else:
+            os.environ.pop("HARNESS_PROVIDER", None)
+        # 真实模型模式不隔离 provider 配置：使用用户真实 providers.json（API key 所在处）
+        if self.backend == "mock":
+            os.environ["PROVIDER_CONFIG_FILE"] = str(env_dir / "providers.json")
+        else:
+            os.environ.pop("PROVIDER_CONFIG_FILE", None)
 
         # 技能注册表单例在 import 时构造，显式重定向用户目录并强制重载
         import sources.skill_registry as _sr
@@ -92,7 +119,8 @@ class Runner:
 
         _pr._store._mtime = -1
         _pr._store._providers = None
-        _pr._store._active = "openai"
+        if self.backend == "mock":
+            _pr._store._active = "openai"
 
     # -- 单 case 执行 ------------------------------------------------------
 
@@ -191,12 +219,14 @@ class Runner:
                     tools = _build_tools()
                     events = [ev async for ev in agent.chat(session, step["message"], tools)]
                     raw_events.extend(events)
-                    assert_step(scenario["name"], step, events)
+                    assert_step(scenario["name"], step, events, relaxed=self.relaxed)
 
                 after = get_after_hook(scenario.get("after"))
                 if after:
                     after()
 
+                # 真实模型成本维度：读取本 case 累计 token 用量
+                self.last_usage = getattr(agent.backend, "usage", None)
                 return [_serialize_event(ev) for ev in raw_events]
             finally:
                 await mcp_pool.close()

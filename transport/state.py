@@ -266,7 +266,14 @@ def _backend_model_name() -> str:
 
 
 def _build_backend_config() -> BackendConfig:
-    """构建后端配置：由全局注册表当前激活供应商决定，回退环境变量/内置默认。"""
+    """构建后端配置：由全局注册表当前激活供应商决定，回退环境变量/内置默认。
+
+    HARNESS_PROVIDER 覆盖：评测 Harness 真实模型模式按指定供应商构建
+    （不改动用户 providers.json 的激活状态）。
+    """
+    override = os.environ.get("HARNESS_PROVIDER", "").strip()
+    if override:
+        return DEFAULT_PROVIDER_REGISTRY.build_config(override)
     return DEFAULT_PROVIDER_REGISTRY.build_config()
 
 

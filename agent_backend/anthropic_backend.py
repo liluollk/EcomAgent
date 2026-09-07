@@ -115,10 +115,21 @@ class AnthropicAgent:
         """
         self._config = config
         self._aborted = False
+        # token 用量累计（真实模型评测成本维度；reset_usage 按回合清零）
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self._client = AsyncAnthropic(
             api_key=config.api_key,
             base_url=config.api_base,
         )
+
+    @property
+    def usage(self) -> dict:
+        """本回合累计 token 用量（prompt/completion）。"""
+        return dict(self._usage)
+
+    def reset_usage(self) -> None:
+        """清零用量累计（BaseAgent 每回合开始时调用）。"""
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     def capabilities(self) -> AgentCapabilities:
         """返回 Anthropic 后端能力声明。
@@ -255,6 +266,15 @@ class AnthropicAgent:
                                 tool_use_id=tid,
                                 input=parsed,
                             )
+
+                # 流结束后取最终 usage（input/output tokens），供成本维度统计
+                try:
+                    final_usage = stream.get_final_usage()
+                    if final_usage is not None:
+                        self._usage["prompt_tokens"] += getattr(final_usage, "input_tokens", 0) or 0
+                        self._usage["completion_tokens"] += getattr(final_usage, "output_tokens", 0) or 0
+                except Exception:
+                    pass
 
         except Exception as e:
             yield TypedErrorEvent(

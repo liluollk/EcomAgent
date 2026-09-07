@@ -43,10 +43,21 @@ class OpenAIAgent:
         """
         self._config = config
         self._aborted = False
+        # token 用量累计（真实模型评测成本维度；reset_usage 按回合清零）
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self._client = AsyncOpenAI(
             api_key=config.api_key,
             base_url=config.api_base,
         )
+
+    @property
+    def usage(self) -> dict:
+        """本回合累计 token 用量（prompt/completion）。"""
+        return dict(self._usage)
+
+    def reset_usage(self) -> None:
+        """清零用量累计（BaseAgent 每回合开始时调用）。"""
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     # 支持 reasoning_effort 参数的 OpenAI 推理模型前缀（o 系列 / gpt-5 系列）
     _THINKING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
@@ -133,13 +144,18 @@ class OpenAIAgent:
                 tools=openai_tools,
                 temperature=self._config.temperature,
                 stream=True,
-                stream_options={"include_usage": False},
+                stream_options={"include_usage": True},
                 **create_kwargs,
             )
             pending_calls: dict[int, dict] = {}
             async for chunk in stream:
                 if self._aborted:
                     break
+                # include_usage=True：末个 chunk choices 为空、携带 usage（须在下方 continue 前捕获）
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    self._usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+                    self._usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]

@@ -8,7 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?style=flat&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Vite-3178C6?style=flat&logo=typescript&logoColor=white)
-![pytest](https://img.shields.io/badge/pytest-366%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-374%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
 <img src="docs/images/agent-chat.png" width="100%" alt="会话演示"/>
@@ -63,7 +63,7 @@ Mock Commerce API（认证 / 错误码信封 / 限流 / 幂等 / 确定性故障
 <details>
 <summary>展开细节</summary>
 
-PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角色，工具级 ACL）→ **业务规则**（如成本保护：调价不得低于成本价）→ **模式门**（READONLY 只读 / ASK 询问 / EXECUTE 自动执行）。三类判定全部由规则引擎产出，模型无法绕过。ASK 模式下写操作会发 `permission_request` 事件并**挂起整个 turn**（异步 resolver 等待），批准后从挂起点恢复执行，拒绝则把拒绝原因作为工具结果回传给模型重新规划；对话内权限卡与跨会话「审批中心」双入口可响应同一挂起请求，全程留审计（谁批准的、批了什么）。
+PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角色，工具级 ACL）→ **业务规则**（如成本保护：调价不得低于成本价）→ **模式门**（READONLY 只读 / ASK 询问 / EXECUTE 自动执行）。三类判定全部由规则引擎产出，模型无法绕过——成本保护还是双闸：PreToolUse 早闸拦截后，平台侧再以**自身成本数据**硬拒低于成本的写请求（不信任调用方传入的 cost_price），真实模型漏报或谎报成本也越不过去。ASK 模式下写操作会发 `permission_request` 事件并**挂起整个 turn**（异步 resolver 等待），批准后从挂起点恢复执行，拒绝则把拒绝原因作为工具结果回传给模型重新规划；对话内权限卡与跨会话「审批中心」双入口可响应同一挂起请求，全程留审计（谁批准的、批了什么）。
 
 </details>
 
@@ -100,7 +100,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
-**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。
+**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具/传什么参数，剧本专属）与**运行时契约**（守门/重试/幂等/收尾，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑运行时契约子集、重复 N 次统计通过率与 token，独立报告不读写回归基线。
 
 <details>
 <summary>展开细节</summary>
@@ -142,15 +142,16 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | `events/` | 八类 AgentEvent 事件模型 |
 | `harness/` | 行为验证 Harness：场景数据表、运行器、断言、指纹基线 |
 | `frontend/` | React + TS 控制台（对话流、工具活动行、权限卡、看板） |
-| `tests/` | 366 个测试，按模块分目录，全部离线运行 |
+| `tests/` | 374 个测试，按模块分目录，全部离线运行 |
 
 </details>
 
 ## ✅ 质量与验证
 
 ```bash
-python -m pytest tests/ -q     # 366 个单元 / 集成 / E2E 测试，全离线
+python -m pytest tests/ -q     # 374 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条行为契约场景 + 基线验收，退化即非零退出
+python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（运行时契约子集 + token 统计）
 ```
 
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。

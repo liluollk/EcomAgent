@@ -40,28 +40,33 @@ def tool_results(events: list) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent) and e.tool_name != "load_skill"]
 
 
-def assert_step(scenario_name: str, step: dict, events: list) -> None:
+def assert_step(scenario_name: str, step: dict, events: list, relaxed: bool = False) -> None:
     """对单步对话事件流做契约断言（期望轨迹匹配）。
 
     Args:
         scenario_name: 场景名（错误消息定位用）。
         step: 场景表中的一个 step 字典（字段约定见 harness/cases.py）。
         events: 单轮对话收集到的 AgentEvent 流。
+        relaxed: 真实模型模式——只断言运行时契约（工具名/结果语义/重试/
+            权限/收尾），跳过决策契约（load_skill 前置、入参子集精确匹配）。
+            剧本回归模式 relaxed=False，两类契约全查。
 
     Raises:
         AssertionError: 任一契约点不满足。
     """
-    assert has_load_skill(events), f"[{scenario_name}] step「{step['message']}」未出现 load_skill（渐进式加载第一步）"
+    if not relaxed:
+        assert has_load_skill(events), f"[{scenario_name}] step「{step['message']}」未出现 load_skill（渐进式加载第一步）"
 
     if step.get("expect_tool", True):
         ts = first_tool_start(events)
         assert ts.tool_name == step["tool"], _STEP_MISSING_MSG.format(
             name=scenario_name, msg=step["message"], tool=step["tool"], actual=ts.tool_name
         )
-        for k, v in step.get("input", {}).items():
-            assert ts.input.get(k) == v, _STEP_INPUT_MSG.format(
-                name=scenario_name, msg=step["message"], k=k, actual=ts.input.get(k), v=v
-            )
+        if not relaxed:
+            for k, v in step.get("input", {}).items():
+                assert ts.input.get(k) == v, _STEP_INPUT_MSG.format(
+                    name=scenario_name, msg=step["message"], k=k, actual=ts.input.get(k), v=v
+                )
 
     results = tool_results(events)
     assert len(results) >= 1, f"[{scenario_name}] step「{step['message']}」未产生 tool_result"

@@ -24,13 +24,13 @@ async def _client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def test_list_providers_has_three_builtin():
+async def test_list_providers_has_builtin_defaults():
     async with await _client() as client:
         resp = await client.get("/providers")
         assert resp.status_code == 200
         body = resp.json()
         names = {p["name"] for p in body["providers"]}
-        assert names == {"openai", "anthropic", "mock"}
+        assert names == {"openai", "anthropic", "deepseek", "mock"}
         assert body["active"] == "openai"
 
 

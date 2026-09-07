@@ -21,6 +21,8 @@ scenario 字段约定：
     mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
     role      会话角色（manager/operator/customer_service/finance，缺省 manager）
     fault     Mock Commerce API 确定性故障脚本名（见 mock_commerce/fault_injection.py）
+    real      True = 运行时契约场景（真实模型模式可跑：断言的是运行时对任意
+              决策的守门/重试/幂等/收尾行为，与模型选了哪个工具的具体参数无关）
 """
 
 from __future__ import annotations
@@ -49,13 +51,14 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "cost_interception",
+        "real": True,
         "steps": [
-            # 20 < 成本 59：真实 PreToolUse 业务规则拦截（管线：身份门→业务规则→模式门），
-            # 事件形状 = tool_start 可见尝试 + tool_result(is_error) 展示拦截原因
+            # 20 < 成本 59：早道 PreToolUse 业务规则拦截（剧本后端传 cost_price 走规则路径；
+            # 真实模型漏传则由平台侧 409 硬闸兜底），两条路径文本公共 token 为「成本」「低于」
             {"message": "把淘宝 SKU-001 价格调到 20", "tool": "update_price",
              "input": {"channel": "taobao", "sku": "SKU-001"},
              "result_is_error": True,
-             "result_contains": ["拦截", "成本", "低于"]},
+             "result_contains": ["成本", "低于"]},
         ],
     },
     {
@@ -68,6 +71,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "cross_session_memory",
+    "real": True,
         "after": "assert_memory_landed",
         "steps": [
             {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
@@ -83,6 +87,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "shelf_toggle",
+    "real": True,
         "steps": [
             {"message": "把淘宝 SKU-001 下架", "tool": "product_shelf",
              "input": {"channel": "taobao", "sku": "SKU-001", "action": "off"}},
@@ -92,6 +97,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "promotion_query_and_create",
+    "real": True,
         "steps": [
             {"message": "看下抖音进行中的促销", "tool": "query_promotions",
              "input": {"channel": "douyin"}},
@@ -101,6 +107,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "business_review",
+    "real": True,
         "steps": [
             {"message": "看下淘宝近7天的销售分析", "tool": "query_order_stats",
              "input": {"channel": "taobao", "period": "近7天"}},
@@ -110,6 +117,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "anomaly_watch",
+    "real": True,
         "steps": [
             {"message": "看下抖音有什么异常预警", "tool": "query_anomalies",
              "input": {"channel": "douyin"}},
@@ -117,6 +125,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "unknown_sku_graceful",
+    "real": True,
         "steps": [
             # 平台对未知 SKU 返回空库存行：工具优雅返回（库存 0），不报错不崩溃
             {"message": "查一下淘宝 SKU-999 的库存", "tool": "query_inventory",
@@ -125,6 +134,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "readonly_blocks_write",
+    "real": True,
         "mode": "READONLY",
         "steps": [
             # 模式门拦截：只读模式下写操作被 BLOCK（reason 含「只读」）
@@ -136,6 +146,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "rbac_denial",
+    "real": True,
         "role": "finance",
         "steps": [
             # 身份门拦截：finance 角色无 update_price 写权限，管线第一位即 BLOCK
@@ -147,6 +158,7 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "memory_forget",
+    "real": True,
         "after": "assert_memory_forgotten",
         "steps": [
             {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
@@ -159,6 +171,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E14 上游限流一次：分类 TRANSIENT → 同幂等键重试成功
         "name": "upstream_429_retry_success",
+    "real": True,
         "fault": "rate_limit_once_then_success",
         "steps": [
             {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
@@ -169,6 +182,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E15 上游超时一次（读操作）：客户端短超时 → TRANSIENT 重试成功
         "name": "upstream_timeout_retry_success",
+    "real": True,
         "fault": "timeout_once_then_success",
         "steps": [
             {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
@@ -179,6 +193,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E16 上游持续 500：FATAL 不重试，优雅返回平台错误文本
         "name": "upstream_permanent_failure",
+    "real": True,
         "fault": "permanent_500",
         "steps": [
             {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
@@ -190,6 +205,7 @@ SCENARIOS: list[dict[str, Any]] = [
         # E17 超时重试 + 幂等：服务端先落副作用再挂起（真实危险场景），
         # 重试同幂等键回放首次结果，写副作用只落一次（after 钩子断言）
         "name": "idempotent_repeated_write",
+    "real": True,
         "fault": "timeout_once_then_success",
         "after": "assert_single_price_write",
         "steps": [
@@ -202,6 +218,7 @@ SCENARIOS: list[dict[str, Any]] = [
         # E18 上游畸形响应（HTTP 200 + code=0 但 data 缺字段/类型错）：
         # 结果校验层以 UPSTREAM_INVALID_RESPONSE 拦截，不重试、优雅降级
         "name": "malformed_upstream_response",
+    "real": True,
         "fault": "malformed_once_then_success",
         "steps": [
             {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
@@ -212,6 +229,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E19 部分工具失败不拖垮会话：第一步 500 优雅报错，第二步恢复正常
         "name": "partial_tool_failure",
+    "real": True,
         "fault": "internal_error_once_then_success",
         "steps": [
             {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
@@ -225,6 +243,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E20 ASK 模式 + 批准：permission_request 后人工放行，工具真实执行
         "name": "permission_approve_then_execute",
+    "real": True,
         "mode": "ASK",
         "steps": [
             {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
@@ -235,6 +254,7 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E21 ASK 模式 + 拒绝：拒绝后不执行，turn 仍以 complete 完整收尾
         "name": "permission_reject_then_stop",
+    "real": True,
         "mode": "ASK",
         "steps": [
             {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
@@ -255,3 +275,8 @@ def case_fingerprint(scenario: dict[str, Any]) -> str:
     canon = {"name": scenario["name"], "steps": scenario["steps"]}
     blob = json.dumps(canon, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def real_model_scenarios() -> list[dict[str, Any]]:
+    """运行时契约场景子集（真实模型模式默认只跑这些）。"""
+    return [s for s in SCENARIOS if s.get("real")]

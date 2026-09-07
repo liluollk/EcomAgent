@@ -72,7 +72,9 @@ async def query_inventory(channel: str, sku: str) -> str:
         r = await get_commerce_provider(channel).query_inventory(sku)
     except (RestApiError, ToolTimeoutError, ValidationError) as e:
         return _format_exec_error(e)
-    return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}"
+    cost = r.extra.get("cost_price")
+    cost_note = f"，成本价 {cost} 元" if cost is not None else ""
+    return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}{cost_note}"
 
 
 async def update_price(channel: str, sku: str, new_price: float, cost_price: float = 0) -> str:

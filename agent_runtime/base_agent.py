@@ -233,6 +233,9 @@ class BaseAgent:
         session.execution_state = ExecutionState.RUNNING
         self._lifecycle = lifecycle
         self._trace_id = uuid.uuid4().hex[:12]
+        # 真实模型成本维度：每回合清零后端 token 累计
+        if hasattr(self._backend, "reset_usage"):
+            self._backend.reset_usage()
 
         # 渐进式技能加载：重置本 turn 加载状态，构建 load_skill 菜单工具
         self._loaded_skills = set()

@@ -1,10 +1,12 @@
 """harness CLI — python -m harness [选项]
 
 示例：
-    python -m harness                     # 跑全部场景，对照已有基线（无基线则提示保存）
+    python -m harness                     # 回归验收：剧本后端跑全部场景，对照基线
     python -m harness --save-baseline     # 跑全部并保存/更新基线
     python -m harness --case six_step_business_chain --case cost_interception
     python -m harness --timeout 180 --retries 1 --runs-dir .harness-runs
+    python -m harness --backend openai --provider deepseek --repeat 3
+                                          # 真实模型评测：运行时契约场景 ×3，独立报告
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from harness.cases import SCENARIOS
+from harness.cases import SCENARIOS, real_model_scenarios
 from harness.metrics import summarize
 from harness.recorder import Recorder
 from harness.report import compare_baseline, load_baseline, render_report, save_baseline
@@ -35,7 +37,58 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline", default="baseline.json", help="基线文件路径（默认 baseline.json）")
     p.add_argument("--save-baseline", action="store_true", help="运行通过后保存/更新基线")
     p.add_argument("--list", action="store_true", help="列出评测集场景，不运行")
+    p.add_argument("--backend", choices=["mock", "openai", "anthropic"], default="mock",
+                   help="决策源后端：mock=剧本回归验收（缺省）；openai/anthropic=真实模型评测")
+    p.add_argument("--provider", default=None, metavar="NAME",
+                   help="真实模型模式使用 providers.json 中的指定供应商（如 deepseek）")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="真实模型模式每场景重复次数（吸收 run 间方差，默认 1）")
+    p.add_argument("--real-only", action="store_true",
+                   help="只跑运行时契约场景（真实模型模式自动启用）")
     return p
+
+
+def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, run_id: str) -> int:
+    """真实模型评测模式：逐场景重复 N 次统计通过率，独立报告，不读写回归基线。"""
+    n = max(1, args.repeat)
+    rows: list[dict] = []
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    print(f"真实模型评测  backend={args.backend}  provider={args.provider or '(激活供应商)'}  repeat={n}")
+    all_ok = True
+    for idx, scenario in enumerate(scenarios, start=1):
+        passes = 0
+        durations: list[float] = []
+        last_fail = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        for _ in range(n):
+            rec = runner.run_case(scenario, timeout=args.timeout, retries=args.retries)
+            if rec.passed:
+                passes += 1
+            durations.append(rec.duration)
+            if rec.failures:
+                last_fail = str(rec.failures[-1].get("detail", ""))[:120]
+            u = runner.last_usage or {}
+            usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+            usage["completion_tokens"] += u.get("completion_tokens", 0)
+        ok = passes == n
+        all_ok = all_ok and ok
+        mean_dur = sum(durations) / len(durations)
+        for k in total_usage:
+            total_usage[k] += usage[k]
+        rows.append({"name": scenario["name"], "passes": passes, "total": n,
+                     "mean_duration_s": round(mean_dur, 2), "usage": usage, "last_fail": last_fail})
+        print(f"  [{idx}/{len(scenarios)}] {scenario['name']:34s} {passes}/{n} "
+              f"{'PASS' if ok else 'FLAKY/FAIL'}  avg {mean_dur:.1f}s  "
+              f"tok {usage['prompt_tokens']}+{usage['completion_tokens']}"
+              + (f"  <- {last_fail}" if not ok and last_fail else ""))
+
+    report = {"mode": "real_model", "backend": args.backend, "provider": args.provider,
+              "repeat": n, "scenarios": rows, "total_usage": total_usage, "all_stable": all_ok}
+    recorder.write_report(run_id, "\n".join(f"{r['name']}: {r['passes']}/{r['total']}" for r in rows), report)
+    print(f"\n真实模型评测完成：{'全部场景稳定通过' if all_ok else '存在未稳定通过场景（见 FLAKY/FAIL）'}"
+          f"  总 token {total_usage['prompt_tokens']}+{total_usage['completion_tokens']}")
+    print("（真实模型模式不读写回归基线——方差下二值基线语义不适用）")
+    return 0 if all_ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,16 +96,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         for s in SCENARIOS:
-            print(f"  {s['name']:32s} steps={len(s['steps'])}")
+            print(f"  {s['name']:32s} steps={len(s['steps'])}{'  [real]' if s.get('real') else ''}")
         return 0
 
-    scenarios = [s for s in SCENARIOS if s["name"] in args.case] if args.case else list(SCENARIOS)
+    real_mode = args.backend != "mock"
+    pool = real_model_scenarios() if (real_mode or args.real_only) else SCENARIOS
+    scenarios = [s for s in pool if s["name"] in args.case] if args.case else list(pool)
 
     recorder = Recorder(Path(args.runs_dir))
     run_id = recorder.new_run()
     recorder.save_cases(run_id, scenarios)
 
-    runner = Runner(recorder, run_id)
+    runner = Runner(recorder, run_id, backend=args.backend, provider=args.provider)
+
+    if real_mode:
+        return _run_real_mode(args, runner, scenarios, recorder, run_id)
 
     def _progress(idx: int, total: int, name: str) -> None:
         print(f"  [{idx}/{total}] {name} ...", flush=True)

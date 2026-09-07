@@ -46,6 +46,18 @@ _DEFAULT_PROVIDERS: list[dict[str, Any]] = [
         "enabled": True,
     },
     {
+        # DeepSeek：OpenAI 兼容协议，复用 OpenAIAgent 后端，仅换 base_url/model。
+        # api_key 留空：在设置页或 providers.json 填入真实 key 后即可用于真实模型评测。
+        "name": "deepseek",
+        "label": "DeepSeek（OpenAI 兼容）",
+        "provider": "openai",
+        "default_model": "deepseek-chat",
+        "api_key": "",
+        "api_base": "https://api.deepseek.com",
+        "model_list": ["deepseek-chat", "deepseek-reasoner"],
+        "enabled": True,
+    },
+    {
         "name": "mock",
         "label": "Mock（离线演示）",
         "provider": "mock",
@@ -58,7 +70,7 @@ _DEFAULT_PROVIDERS: list[dict[str, Any]] = [
 ]
 
 # 内置供应商名（不可删除，保留演示基线）
-_BUILTIN = {"openai", "anthropic", "mock"}
+_BUILTIN = {"openai", "anthropic", "deepseek", "mock"}
 
 # 各 provider 对应的环境变量回退（注册表未配置时回退到 env，再到内置默认）
 _ENV_KEY: dict[str, str] = {
