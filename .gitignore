@@ -58,7 +58,3 @@ gui-test-screenshots/
 frontend/.shots/
 frontend/current-ui.png
 /static/
-
-# WorkBuddy 项目数据 / 个人求职资料（不上传）
-/.workbuddy/
-/简历-项目描述.md
