@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import argparse
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from mock_commerce.auth import verify_api_key
 from mock_commerce.domain import check_channel, idempotent_call, ok_response
-from mock_commerce.fault_injection import FaultOutcome, apply_fault_pre, apply_fault_post
+from mock_commerce.fault_injection import (
+    FaultOutcome,
+    apply_fault_post,
+    apply_fault_pre,
+    request_method_var,
+)
 from mock_commerce.store import (
     AFTER_SALES_STATS,
     ANOMALIES,
@@ -30,6 +35,16 @@ from mock_commerce.store import (
 )
 
 app = FastAPI(title="Mock Commerce API", version="2.0.0")
+
+
+@app.middleware("http")
+async def _capture_request_method(request: Request, call_next):
+    """把当前请求的 HTTP 方法写入 contextvar，供故障脚本定向消费判定。"""
+    token = request_method_var.set(request.method)
+    try:
+        return await call_next(request)
+    finally:
+        request_method_var.reset(token)
 
 
 @app.get("/v1/{channel}/inventory")

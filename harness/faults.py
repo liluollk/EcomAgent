@@ -36,6 +36,22 @@ def _fast_policy() -> ExecutionPolicy:
     )
 
 
+def _fault_target_methods(scenario: dict[str, Any]) -> set[str] | None:
+    """由场景的故障目标工具推导定向消费方法集合。
+
+    故障脚本服务于场景首个期望业务工具（如 update_price / query_inventory）。
+    真实模型可能先做只读预检——若故障不限方法，预检 GET 会消耗写故障步，
+    导致重试契约假阴性。读到 query_* → 只认 GET；写工具 → 只认写方法。
+    """
+    for step in scenario.get("steps", []):
+        tool = step.get("tool")
+        if tool and step.get("expect_tool", True):
+            if tool.startswith("query_"):
+                return {"GET"}
+            return {"POST", "PUT", "PATCH", "DELETE"}
+    return None
+
+
 def activate_scenario_faults(scenario: dict[str, Any]) -> None:
     """按场景表装载故障脚本并切换快执行策略（幂等：重复调用安全）。
 
@@ -47,7 +63,11 @@ def activate_scenario_faults(scenario: dict[str, Any]) -> None:
     fault_injection.reset_fault()
     fault = scenario.get("fault")
     if fault:
-        fault_injection.load_script(fault, timeout_seconds=FAULT_SLEEP_SECONDS)
+        fault_injection.load_script(
+            fault,
+            timeout_seconds=FAULT_SLEEP_SECONDS,
+            methods=_fault_target_methods(scenario),
+        )
     configure_default_policy(_fast_policy())
 
 

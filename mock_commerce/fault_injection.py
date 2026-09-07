@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextvars import ContextVar
 from enum import Enum
 
 from fastapi import HTTPException
@@ -51,38 +52,56 @@ _FAULT_SCRIPTS: dict[str, list[FaultScenario]] = {
 _script_steps: list[FaultScenario] = []
 _script_pos = 0
 _script_timeout_seconds = 60.0
+_script_methods: frozenset[str] | None = None  # 定向消费：仅匹配的 HTTP 方法消费故障步
 _pending_timeout = False
 
+# 当前请求的 HTTP 方法（FastAPI 中间件写入，供定向消费判定）
+request_method_var: ContextVar[str] = ContextVar("mock_fault_request_method", default="")
 
-def load_script(name: str, *, timeout_seconds: float | None = None) -> None:
+
+def load_script(name: str, *, timeout_seconds: float | None = None,
+                methods: set[str] | None = None) -> None:
     """装载确定性故障脚本（重置进度从头消费）。
 
     Args:
         name: 脚本名（见 _FAULT_SCRIPTS）。
         timeout_seconds: 脚本内 TIMEOUT 步的睡眠时长（harness 用短睡眠配合
             策略层短超时；独立进程演练缺省 60s）。
+        methods: 定向消费的 HTTP 方法集合（如 {"PUT"}）；为 None 时不限方法
+            （保持旧语义：任意请求消费一步）。
     """
-    global _script_steps, _script_pos, _script_timeout_seconds, _pending_timeout
+    global _script_steps, _script_pos, _script_timeout_seconds, _script_methods, _pending_timeout
     if name not in _FAULT_SCRIPTS:
         raise ValueError(f"未知故障脚本: {name}（可选: {sorted(_FAULT_SCRIPTS)}）")
     _script_steps = list(_FAULT_SCRIPTS[name])
     _script_pos = 0
     _script_timeout_seconds = float(timeout_seconds) if timeout_seconds is not None else 60.0
+    _script_methods = frozenset(methods) if methods else None
     _pending_timeout = False
 
 
 def reset_fault() -> None:
     """清除脚本与挂起状态，恢复正常响应。"""
-    global _script_steps, _script_pos, _pending_timeout
+    global _script_steps, _script_pos, _script_methods, _pending_timeout
     _script_steps = []
     _script_pos = 0
+    _script_methods = None
     _pending_timeout = False
 
 
 def _next_fault() -> FaultScenario | None:
-    """取下一个生效故障：脚本步 > 环境变量静态故障 > None。"""
+    """取下一个生效故障：脚本步 > 环境变量静态故障 > None。
+
+    脚本步定向消费：装载时声明 methods 后，仅匹配方法的请求消费故障步——
+    真实模型的只读预检（如 SKILL 建议先 query_inventory）不消耗写故障
+    （PUT/POST），避免唯一故障步被预检吃掉、重试契约假阴性。
+    """
     global _script_pos
     if _script_steps:
+        if _script_methods is not None:
+            method = request_method_var.get().upper()
+            if method not in _script_methods:
+                return None  # 非目标语义请求：不消费，正常放行
         if _script_pos >= len(_script_steps):
             return None
         step = _script_steps[_script_pos]
