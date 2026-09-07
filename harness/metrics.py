@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-Status = Literal["passed", "failed", "timeout", "error"]
+Status = Literal["passed", "failed", "timeout", "error", "not_exercised"]
 
 
 @dataclass
@@ -22,6 +22,11 @@ class CaseRecord:
     @property
     def passed(self) -> bool:
         return self.status == "passed"
+
+    @property
+    def exercised(self) -> bool:
+        """契约是否被触发（not_exercised 不计入失败也不计入通过率分母）。"""
+        return self.status != "not_exercised"
 
 
 @dataclass

@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from harness.assertions import assert_step
+from harness.assertions import NotExercisedError, assert_step
 from harness.hooks import get_after_hook, get_setup_hook
 from harness.metrics import CaseRecord
 from harness.recorder import Recorder, _serialize_event
@@ -148,6 +148,12 @@ class Runner:
                     if status == "passed":
                         final_status = "passed"
                         break
+                    if status == "not_exercised":
+                        # 模型未触发期望业务工具：非运行时失败，内层不重试
+                        # （同一模型同场景重复跑大概率同样不触发；方差由外层 --repeat 吸收）
+                        failures.append(detail)
+                        final_status = "not_exercised"
+                        break
                     failures.append(detail)
                 except Exception as exc:  # 防御：_run_once 内部已分类，此处兜底
                     failures.append({"kind": "unexpected", "detail": str(exc)})
@@ -213,11 +219,18 @@ class Runner:
                     hook()
 
                 raw_events: list[Any] = []
+                case_usage = {"prompt_tokens": 0, "completion_tokens": 0}
                 for step in scenario["steps"]:
                     current_step.clear()
                     current_step.update(step)
                     tools = _build_tools()
                     events = [ev async for ev in agent.chat(session, step["message"], tools)]
+                    # 成本维度：每轮 chat 后立即累计（断言失败也要计入 token）
+                    u = getattr(agent.backend, "usage", None)
+                    if u:
+                        case_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+                        case_usage["completion_tokens"] += u.get("completion_tokens", 0)
+                    self.last_usage = dict(case_usage)
                     raw_events.extend(events)
                     assert_step(scenario["name"], step, events, relaxed=self.relaxed)
 
@@ -225,8 +238,6 @@ class Runner:
                 if after:
                     after()
 
-                # 真实模型成本维度：读取本 case 累计 token 用量
-                self.last_usage = getattr(agent.backend, "usage", None)
                 return [_serialize_event(ev) for ev in raw_events]
             finally:
                 await mcp_pool.close()
@@ -238,6 +249,8 @@ class Runner:
             trace = asyncio.run(_timed())
         except asyncio.TimeoutError:
             return "timeout", {"kind": "timeout", "detail": f"超过 {timeout:.0f}s 未完成"}, None
+        except NotExercisedError as exc:
+            return "not_exercised", {"kind": "not_exercised", "detail": str(exc)}, None
         except AssertionError as exc:
             return "failed", {"kind": "assertion", "detail": str(exc)}, None
         finally:

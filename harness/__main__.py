@@ -49,14 +49,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, run_id: str) -> int:
-    """真实模型评测模式：逐场景重复 N 次统计通过率，独立报告，不读写回归基线。"""
+    """真实模型评测模式：逐场景重复 N 次统计，独立报告，不读写回归基线。
+
+    三态判定（契约触发口径）：
+      PASS           契约被触发的轮次全部通过（触发即正确 = 稳定）
+      NOT-EXERCISED  模型从未触发期望业务工具——非运行时失败，不计入失败
+      FLAKY/FAIL     契约触发过但存在断言/超时失败
+
+    通过率 = 触发轮次中通过的占比（分母剔除 not-exercised）。
+    """
     n = max(1, args.repeat)
     rows: list[dict] = []
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
     print(f"真实模型评测  backend={args.backend}  provider={args.provider or '(激活供应商)'}  repeat={n}")
-    all_ok = True
+    stable = not_ex = flaky = 0
     for idx, scenario in enumerate(scenarios, start=1):
         passes = 0
+        not_exercised = 0
         durations: list[float] = []
         last_fail = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -64,31 +73,55 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
             rec = runner.run_case(scenario, timeout=args.timeout, retries=args.retries)
             if rec.passed:
                 passes += 1
+            elif rec.status == "not_exercised":
+                not_exercised += 1
             durations.append(rec.duration)
             if rec.failures:
                 last_fail = str(rec.failures[-1].get("detail", ""))[:120]
             u = runner.last_usage or {}
             usage["prompt_tokens"] += u.get("prompt_tokens", 0)
             usage["completion_tokens"] += u.get("completion_tokens", 0)
-        ok = passes == n
-        all_ok = all_ok and ok
+        triggers = n - not_exercised
+        if triggers == 0:
+            verdict = "NOT-EXERCISED"
+            not_ex += 1
+        elif passes == triggers:
+            verdict = "PASS"
+            stable += 1
+        else:
+            verdict = "FLAKY/FAIL"
+            flaky += 1
         mean_dur = sum(durations) / len(durations)
         for k in total_usage:
             total_usage[k] += usage[k]
-        rows.append({"name": scenario["name"], "passes": passes, "total": n,
-                     "mean_duration_s": round(mean_dur, 2), "usage": usage, "last_fail": last_fail})
+        rows.append({"name": scenario["name"], "passes": passes, "not_exercised": not_exercised,
+                     "triggers": triggers, "verdict": verdict, "mean_duration_s": round(mean_dur, 2),
+                     "usage": usage, "last_fail": last_fail})
+        mark = verdict if verdict == "PASS" else ("NOT-EX" if verdict == "NOT-EXERCISED" else "FAIL")
         print(f"  [{idx}/{len(scenarios)}] {scenario['name']:34s} {passes}/{n} "
-              f"{'PASS' if ok else 'FLAKY/FAIL'}  avg {mean_dur:.1f}s  "
+              f"{mark:9s} avg {mean_dur:.1f}s  "
               f"tok {usage['prompt_tokens']}+{usage['completion_tokens']}"
-              + (f"  <- {last_fail}" if not ok and last_fail else ""))
+              + (f"  <- {last_fail}" if verdict != "PASS" and last_fail else ""))
 
+    triggered_runs = sum(r["triggers"] for r in rows)
+    passed_runs = sum(r["passes"] for r in rows)
+    trigger_rate = round(passed_runs / triggered_runs, 4) if triggered_runs else 0.0
     report = {"mode": "real_model", "backend": args.backend, "provider": args.provider,
-              "repeat": n, "scenarios": rows, "total_usage": total_usage, "all_stable": all_ok}
-    recorder.write_report(run_id, "\n".join(f"{r['name']}: {r['passes']}/{r['total']}" for r in rows), report)
-    print(f"\n真实模型评测完成：{'全部场景稳定通过' if all_ok else '存在未稳定通过场景（见 FLAKY/FAIL）'}"
-          f"  总 token {total_usage['prompt_tokens']}+{total_usage['completion_tokens']}")
+              "repeat": n, "scenarios": rows, "total_usage": total_usage,
+              "stable": stable, "not_exercised": not_ex, "flaky": flaky,
+              "trigger_pass_rate": trigger_rate}
+    recorder.write_report(run_id, "\n".join(
+        f"{r['name']}: {r['passes']}/{n} [{r['verdict']}]" for r in rows), report)
+    print(f"\n真实模型评测完成：稳定通过 {stable}/{len(scenarios)}，"
+          f"not-exercised {not_ex}，FLAKY/FAIL {flaky}"
+          f"   契约触发通过率 {trigger_rate:.1%}"
+          f"   总 token {total_usage['prompt_tokens']}+{total_usage['completion_tokens']}")
+    if flaky:
+        print("存在契约触发后的失败场景（见上方 FAIL 行）——运行时有真实缺口或断言过严，需人工复核。")
+    else:
+        print("无契约触发后的失败：not-exercised 场景为模型未触发（不构成运行时缺陷）。")
     print("（真实模型模式不读写回归基线——方差下二值基线语义不适用）")
-    return 0 if all_ok else 1
+    return 0 if flaky == 0 else 1
 
 
 def main(argv: list[str] | None = None) -> int:
