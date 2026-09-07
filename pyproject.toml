@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ecommerce-agent-runtime"
+name = "ecomagent"
 version = "0.1.0"
 description = "电商运营 Agent Runtime — 多后端可扩展 Agent 执行引擎"
 readme = "README.md"
