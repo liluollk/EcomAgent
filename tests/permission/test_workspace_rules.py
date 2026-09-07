@@ -39,3 +39,35 @@ def test_first_block_short_circuits():
     gate = workspace_rules_rule([{"type": "price_above_cost"}, {"type": "price_above_cost"}])
     result = gate("update_price", {"new_price": 10, "cost_price": 20})
     assert result.action == PreToolUseAction.BLOCK
+
+
+def test_cost_lookup_overrides_model_input():
+    """平台真相覆盖模型传入的 cost_price：模型谎报成本也越不过规则。"""
+    # 模型谎报 cost_price=1（想让 20 通过），但平台真相是 59 → 仍拦截
+    gate = workspace_rules_rule(
+        [{"type": "price_above_cost"}],
+        cost_lookup=lambda ch, sku: 59.0,
+    )
+    result = gate("update_price", {"channel": "taobao", "sku": "SKU-001", "new_price": 20, "cost_price": 1})
+    assert result.action == PreToolUseAction.BLOCK
+    assert "59.0" in result.reason  # 用的是平台真相，不是模型谎报的 1
+
+
+def test_cost_lookup_allows_above_platform_cost():
+    gate = workspace_rules_rule(
+        [{"type": "price_above_cost"}],
+        cost_lookup=lambda ch, sku: 59.0,
+    )
+    assert gate("update_price", {"channel": "taobao", "sku": "SKU-001", "new_price": 89}).action == PreToolUseAction.ALLOW
+
+
+def test_cost_lookup_none_falls_back_to_model_input():
+    """lookup 返回 None（未知 SKU/渠道）→ 回退 tool_input 自带 cost_price。"""
+    gate = workspace_rules_rule(
+        [{"type": "price_above_cost"}],
+        cost_lookup=lambda ch, sku: None,
+    )
+    # 无平台真相，回退模型传的 50 → 30<50 拦截
+    assert gate("update_price", {"new_price": 30, "cost_price": 50}).action == PreToolUseAction.BLOCK
+    # 回退且模型也没传 → cost 0 → 放行
+    assert gate("update_price", {"new_price": 30}).action == PreToolUseAction.ALLOW

@@ -277,6 +277,17 @@ def _build_backend_config() -> BackendConfig:
     return DEFAULT_PROVIDER_REGISTRY.build_config()
 
 
+def _platform_cost_lookup(channel, sku):
+    """平台成本真相访问器：成本保护由平台数据决定，不由模型决定。
+
+    mock 平台进程内同步读；真实平台对应一次异步查询/缓存（回调接口不变，
+    由装配层按渠道 platform 字段接线）。未知渠道/SKU 返回 None → 规则回退。
+    """
+    from mock_commerce.store import get_cost_price
+
+    return get_cost_price(channel, sku)
+
+
 def _build_agent(session: Session) -> BaseAgent:
     """构建默认的 Agent 实例，包含预置的淘宝、京东、抖音渠道 Source。"""
     backend = create_backend(_build_backend_config())
@@ -287,7 +298,7 @@ def _build_agent(session: Session) -> BaseAgent:
     # 使同一条 WS 连接上的模式切换即时生效（不需要重建 agent / 管线）。
     pipeline = PreToolUsePipeline()
     pipeline.add_checker(role_gate_rule(session.user["role"]))
-    pipeline.add_checker(workspace_rules_rule(session.workspace.rules))
+    pipeline.add_checker(workspace_rules_rule(session.workspace.rules, cost_lookup=_platform_cost_lookup))
     pipeline.add_checker(mode_gate_rule(lambda: session.permission_mode.name))
     agent.set_permission_pipeline(pipeline)
 

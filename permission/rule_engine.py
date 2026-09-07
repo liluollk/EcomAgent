@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Optional
 
 from .pre_tool_use import PreToolUseResult, PreToolUseAction
 
@@ -18,7 +18,9 @@ def price_above_cost_rule(
     """价格不低于成本价规则。
 
     拦截 update_price 工具调用中 new_price 低于 cost_price 的情况。
-    确保运营人员不会将价格设为低于成本价。
+    成本价来源：生产装配经 workspace_rules_rule 注入平台真相 cost_lookup，
+    覆盖 tool_input["cost_price"]（成本保护由平台数据决定，不由模型决定）；
+    无注入时回退 tool_input 自带 cost_price（直接调用方 / 单测语义）。
 
     Args:
         tool_name: 工具名称。
@@ -86,15 +88,20 @@ _RULE_DISPATCH: dict[str, Callable] = {
 }
 
 
-def workspace_rules_rule(rules: list[dict]):
+def workspace_rules_rule(rules: list[dict], cost_lookup: Optional[Callable[[Any, Any], Any]] = None):
     """工作区业务规则工厂 — 将 Workspace.rules 声明注册为 PreToolUse 检查器。
 
     每项声明 {"type": "price_above_cost", ...} 分派到实现函数；
     任一规则返回非 ALLOW 即短路（与管线整体短路语义一致）；
     未知规则类型与空规则列表视为全放行。
 
+    cost_lookup（可选）：平台成本真相访问器 (channel, sku) -> cost_price | None。
+    提供时，price_above_cost 规则以平台数据覆盖调用方传入的 cost_price——
+    成本保护由平台真相决定，不由模型决定；返回 None 则回退 tool_input 自带值。
+
     Args:
         rules: Workspace.rules 列表（业务规则声明）。
+        cost_lookup: 平台成本真相查询回调（装配层注入，规则层不感知数据来源）。
 
     Returns:
         Callable: 检查器函数 (tool_name, tool_input) -> PreToolUseResult。
@@ -102,10 +109,16 @@ def workspace_rules_rule(rules: list[dict]):
 
     def _gate(tool_name: str, tool_input: dict[str, Any]) -> PreToolUseResult:
         for rule in rules or []:
-            impl = _RULE_DISPATCH.get(rule.get("type", ""))
+            rtype = rule.get("type", "")
+            impl = _RULE_DISPATCH.get(rtype)
             if impl is None:
                 continue
-            result = impl(tool_name, tool_input)
+            effective = tool_input
+            if rtype == "price_above_cost" and cost_lookup is not None and tool_name == "update_price":
+                platform_cost = cost_lookup(tool_input.get("channel"), tool_input.get("sku"))
+                if platform_cost is not None:
+                    effective = {**tool_input, "cost_price": platform_cost}
+            result = impl(tool_name, effective)
             if result.action != PreToolUseAction.ALLOW:
                 return result
         return PreToolUseResult(action=PreToolUseAction.ALLOW)

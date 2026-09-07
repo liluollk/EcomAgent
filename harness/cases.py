@@ -53,8 +53,9 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "cost_interception",
         "real": True,
         "steps": [
-            # 20 < 成本 59：早道 PreToolUse 业务规则拦截（剧本后端传 cost_price 走规则路径；
-            # 真实模型漏传则由平台侧 409 硬闸兜底），两条路径文本公共 token 为「成本」「低于」
+            # 20 < 成本 59：早道 PreToolUse 业务规则拦截（成本价由平台真相 lookup 提供，
+            # 模型不传 cost_price；真实模型漏报/谎报成本也由规则 + 平台 409 双闸兜底），
+            # 两条路径文本公共 token 为「成本」「低于」
             {"message": "把淘宝 SKU-001 价格调到 20", "tool": "update_price",
              "input": {"channel": "taobao", "sku": "SKU-001"},
              "result_is_error": True,

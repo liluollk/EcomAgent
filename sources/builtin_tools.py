@@ -77,12 +77,14 @@ async def query_inventory(channel: str, sku: str) -> str:
     return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}{cost_note}"
 
 
-async def update_price(channel: str, sku: str, new_price: float, cost_price: float = 0) -> str:
-    """走 CommerceProvider 领域接口；写操作由策略层自动携带幂等键。"""
+async def update_price(channel: str, sku: str, new_price: float) -> str:
+    """走 CommerceProvider 领域接口；写操作由策略层自动携带幂等键。
+
+    成本价不由模型提供——成本保护是平台真相 + 规则引擎的不变量，
+    模型只声明目标价（schema 已移除 cost_price）。
+    """
     try:
-        r = await get_commerce_provider(channel).update_price(
-            sku, _dec(new_price), channel=channel, cost_price=_dec(cost_price)
-        )
+        r = await get_commerce_provider(channel).update_price(sku, _dec(new_price), channel=channel)
     except (RestApiError, ToolTimeoutError, ValidationError) as e:
         return _format_exec_error(e)
     replay = "（幂等：重复请求，未重复执行）" if r.idempotent_replay else ""
@@ -221,14 +223,13 @@ _DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "update_price",
-        "description": "更新指定渠道商品价格。",
+        "description": "更新指定渠道商品价格。成本保护由系统强制（低于成本价会被自动拦截），无需提供成本价。",
         "parameters": {
             "type": "object",
             "properties": {
                 "channel": _CHANNEL,
                 "sku": _SKU,
                 "new_price": {"type": "number", "description": "新价格。"},
-                "cost_price": {"type": "number", "description": "成本价，用于规则校验。", "default": 0},
             },
             "required": ["channel", "sku", "new_price"],
         },

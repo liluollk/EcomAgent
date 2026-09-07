@@ -352,9 +352,8 @@ class MockAgent:
             )
         if "价格" in last_user or "调价" in last_user or "改价" in last_user:
             m_price = re.search(r"(?:改为|调到|调整到|调整为|改成)\s*(\d+(?:\.\d+)?)", last_user)
-            m_cost = re.search(r"成本\s*(\d+(?:\.\d+)?)", last_user)
             new_price = float(m_price.group(1)) if m_price else 79.0
-            cost_price = float(m_cost.group(1)) if m_cost else 59.0
+            # 成本价不由模型提供——成本保护是平台真相 + 规则引擎的不变量
             return ToolStartEvent(
                 tool_name="update_price",
                 tool_use_id="call_mock_price",
@@ -362,7 +361,6 @@ class MockAgent:
                     "channel": channel,
                     "sku": sku,
                     "new_price": new_price,
-                    "cost_price": cost_price,
                 },
             )
         if "知识" in last_user or "话术" in last_user or "政策" in last_user or "规范" in last_user:

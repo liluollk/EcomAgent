@@ -100,3 +100,14 @@ def match_knowledge(topic: str) -> tuple[str, str] | None:
         if key in topic:
             return key, text
     return None
+
+
+def get_cost_price(channel: str, sku: str) -> float | None:
+    """平台成本真相访问器：规则引擎据此判定成本保护，不信任调用方传入值。
+
+    这是「平台持有的数据」的窄接口——真实平台下它对应一次异步查询/缓存，
+    mock 在进程内同步返回。未知 SKU 无成本数据返回 None（交由业务层处理）。
+    """
+    if sku not in KNOWN_SKUS:
+        return None
+    return (INVENTORY.get(channel) or {}).get("cost_price")
