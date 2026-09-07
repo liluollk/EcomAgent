@@ -2,7 +2,7 @@
 
 import pytest
 
-from sources.platform_adapter import (
+from integrations.commerce.adapter import (
     ADAPTER_REGISTRY,
     PLATFORM_KINDS,
     MockAdapter,

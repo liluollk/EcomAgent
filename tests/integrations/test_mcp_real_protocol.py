@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from sources.mcp_client_pool import McpClientPool
+from integrations.mcp.client_pool import McpClientPool
 
 
 def _run(coro):

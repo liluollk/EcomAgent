@@ -187,8 +187,8 @@ def test_e2e_behavior_contract_scenarios(scenario):
 
 def test_e2e_idempotency_replay():
     from httpx import ASGITransport
-    from mocks.channel_api_mock import app as _api_app
-    from sources.rest_client import ChannelRestClient
+    from mock_commerce.routes import app as _api_app
+    from integrations.commerce.client import ChannelRestClient
 
     async def _run():
         client = ChannelRestClient(base_url="http://test", transport=ASGITransport(_api_app))

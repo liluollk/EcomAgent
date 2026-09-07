@@ -5,9 +5,9 @@ import asyncio
 import httpx
 import pytest
 
-from mocks.channel_api_mock import app as channel_api_app
-from sources.rest_client import ChannelRestClient, RestApiError
-from sources.mcp_client_pool import McpClientPool
+from mock_commerce.routes import app as channel_api_app
+from integrations.commerce.client import ChannelRestClient, RestApiError
+from integrations.mcp.client_pool import McpClientPool
 
 
 class MockResponder:
@@ -156,7 +156,7 @@ def test_builtin_tools_over_rest_full_chain():
         # 内置 handler → 平台数据
         r = await builtin_tools.query_inventory("taobao", "SKU-001")
         assert "库存" in r and "海洋" in r
-        r2 = await builtin_tools.update_price("jd", "SKU-002", 89.0)
+        r2 = await builtin_tools.update_price("jd", "SKU-002", 189.0)
         assert "已更新为" in r2
         r3 = await builtin_tools.query_knowledge_base("退款政策")
         assert "知识库" in r3 and "退款" in r3

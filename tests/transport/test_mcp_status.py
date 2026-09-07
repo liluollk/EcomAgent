@@ -3,7 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-import sources.mcp_server_config as msc
+import integrations.mcp.server_config as msc
 from transport.server import app
 
 

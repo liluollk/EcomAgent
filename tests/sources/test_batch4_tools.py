@@ -3,7 +3,7 @@
 import asyncio
 
 from sources import builtin_tools
-from sources.mcp_client_pool import McpClientPool
+from integrations.mcp.client_pool import McpClientPool
 from sources.skill_registry import create_default_registry
 from permission.rbac import can_role_write, role_gate_rule
 from permission.pre_tool_use import PreToolUseAction

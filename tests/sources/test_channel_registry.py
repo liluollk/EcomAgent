@@ -161,7 +161,7 @@ def test_cache_key_includes_platform(registry):
 
 
 def test_executor_for_dispatches_by_platform(registry):
-    from sources.platform_adapter import MockAdapter, TaobaoAdapter, JdAdapter
+    from integrations.commerce.adapter import MockAdapter, TaobaoAdapter, JdAdapter
 
     assert isinstance(registry.executor_for("taobao"), MockAdapter)  # 内置默认 mock
     assert isinstance(registry.executor_for(None), MockAdapter)

@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from sources.source import Source, Tool
-from sources.mcp_client_pool import McpClientPool
+from integrations.mcp.client_pool import McpClientPool
 
 
 def test_mcp_pool_register_source():
@@ -87,7 +87,7 @@ def test_mcp_pool_multi_server_merge_and_route(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("MCP_SERVERS_CONFIG_FILE", str(cfg))
-    import sources.mcp_server_config as _msc
+    import integrations.mcp.server_config as _msc
 
     _msc._store._mtime = -1
     _msc._store._servers = None

@@ -2,8 +2,8 @@
 
 import pytest
 
-import sources.mcp_server_config as msc
-from sources.mcp_server_config import McpServerRegistry, to_params
+import integrations.mcp.server_config as msc
+from integrations.mcp.server_config import McpServerRegistry, to_params
 
 
 @pytest.fixture(autouse=True)
