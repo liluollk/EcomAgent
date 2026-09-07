@@ -19,35 +19,28 @@
 
 ---
 
-把「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 执行策略 → 结果返回」抽象为统一执行闭环，让库存查询、调价、上下架、促销、订单分析等运营任务跑在同一套底座上。它不是 Prompt + Tool Calling 的演示，而是把 Agent 当作**运行时系统**来做——每一层都有明确的契约与测试。
+## 目录
 
-## 🏗️ 架构：一条执行链
+- [这是什么](#-这是什么)
+- [核心设计](#-核心设计)
+- [功能全景](#-功能全景)
+- [架构](#-架构)
+- [目录结构](#-目录结构)
+- [快速开始](#-快速开始)
+- [质量与验证](#-质量与验证)
+- [边界声明](#-边界声明)
 
-```
-前端 (React/TS)
-  │  WebSocket 事件流 + 权限/中断控制
-  ▼
-transport/server.py ── FastAPI REST + WS 双通道
-  ▼  一次 turn
-Workspace / Session ── 隔离上下文 / 权限模式 / 模型状态 / 审计
-Skill 注入 / Source 装配 ── SKILL.md 渐进式披露（菜单常驻，load_skill 才注入正文）
-AgentBackend ── OpenAI / Anthropic / Mock 统一事件流契约
-多轮 Tool Call 循环 ── 单轮多工具并发执行，结果按 Tool Call ID 归位
-PreToolUse ── RBAC 身份门 → 业务规则 → 模式门 → Human-in-the-Loop
-Execution Policy ── 分级超时 → 错误分类重试（仅瞬态）→ 幂等键（写操作）→ 结果校验
-AgentEvent ── 八类事件驱动 UI / 评测 / Trace（含 trace_id / attempt / duration_ms）
-  ▼  工具执行
-内置平台工具（11 个电商语义操作 + save_skill）
-  │  MCP 外部工具（子进程 stdio / JSON-RPC，配置化接入）
-  ▼
-Commerce Adapter（协议翻译）+ REST 客户端（httpx 真实 HTTP）
-  ▼
-Mock Commerce API（认证 / 错误码信封 / 限流 / 幂等 / 确定性故障注入）
-```
+---
 
-**第一原则：Runtime 不知道「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，Runtime 一行不改。
+## 💡 这是什么
 
-## 🔍 核心实现
+把「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 执行策略 → 结果返回」抽象为统一执行闭环，让库存查询、调价、上下架、促销、订单分析等运营任务跑在同一套底座上。
+
+**它不是 Prompt + Tool Calling 的演示，而是把 Agent 当作「运行时系统」来做**——每一层都有明确的契约与测试。
+
+---
+
+## 🎯 核心设计
 
 **① AgentEvent——一份事件流，三个消费方。** 八类事件同时驱动前端 UI、评测断言与轨迹回放，没有第二套日志；可观测字段是增补，不是重新设计。
 
@@ -109,6 +102,8 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
+---
+
 ## 📦 功能全景
 
 | 能力 | 说明 |
@@ -122,6 +117,36 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | 审批中心 | 跨会话聚合待审批写操作，对话内权限卡与审批页双入口，REST 决定唤醒挂起中的 Agent |
 | 运营看板 | 跨渠道聚合：近 7 天 GMV 趋势、渠道构成、库存水位与经营预警 |
 | 双前端 | React 控制台接真实后端；`demo/` 附独立可跑的 mock 前端（无需后端即可完整演示） |
+
+---
+
+## 🏗️ 架构
+
+```
+前端 (React/TS)
+  │  WebSocket 事件流 + 权限/中断控制
+  ▼
+transport/server.py ── FastAPI REST + WS 双通道
+  ▼  一次 turn
+Workspace / Session ── 隔离上下文 / 权限模式 / 模型状态 / 审计
+Skill 注入 / Source 装配 ── SKILL.md 渐进式披露（菜单常驻，load_skill 才注入正文）
+AgentBackend ── OpenAI / Anthropic / Mock 统一事件流契约
+多轮 Tool Call 循环 ── 单轮多工具并发执行，结果按 Tool Call ID 归位
+PreToolUse ── RBAC 身份门 → 业务规则 → 模式门 → Human-in-the-Loop
+Execution Policy ── 分级超时 → 错误分类重试（仅瞬态）→ 幂等键（写操作）→ 结果校验
+AgentEvent ── 八类事件驱动 UI / 评测 / Trace（含 trace_id / attempt / duration_ms）
+  ▼  工具执行
+内置平台工具（11 个电商语义操作 + save_skill）
+  │  MCP 外部工具（子进程 stdio / JSON-RPC，配置化接入）
+  ▼
+Commerce Adapter（协议翻译）+ REST 客户端（httpx 真实 HTTP）
+  ▼
+Mock Commerce API（认证 / 错误码信封 / 限流 / 幂等 / 确定性故障注入）
+```
+
+**第一原则：Runtime 不知道「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，Runtime 一行不改。
+
+---
 
 ## 🗂️ 目录结构
 
@@ -146,6 +171,28 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
+---
+
+## 🚀 快速开始
+
+```bash
+# 安装（mock 模式无需 API Key）
+pip install -e ".[dev]"
+
+# 启动后端（mock 模式）
+AGENT_BACKEND=mock python -m uvicorn transport.server:app --port 8000
+
+# 前端开发
+cd frontend && npm install && npm run dev   # http://localhost:5173
+
+# 前端构建
+cd frontend && npm run build
+```
+
+> 真实模型模式：设置 `AGENT_BACKEND=openai`（或 `anthropic`）并配置对应的 `*_API_KEY` / `*_BASE_URL` 环境变量即可。
+
+---
+
 ## ✅ 质量与验证
 
 ```bash
@@ -157,6 +204,8 @@ python -m harness --backend openai --provider deepseek --repeat 3   # 真实模�
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。
 
 **真实模型基准（DeepSeek-chat，2026-09-07，18 场景 ×3 = 54 轮）**：稳定通过 **17/18**，not-exercised 1，FLAKY/FAIL **0**（exit 0）——契约触发的轮次**全部正确**（触发通过率 100%）。not-exercised 的 1 条（`promotion_query_and_create`）与 3 条各 1 轮，是模型选择不发起写尝试，运行时守门/重试/幂等/权限契约在每次被触发时均按预期工作。同一模型在旧口径（要求第一个业务工具即期望工具）下仅 12/18——6 条假阳性全部源于「先查库存再调价」的合理行为被误判，佐证运行时契约必须与决策契约分档。
+
+---
 
 ## ⚠️ 边界声明
 
