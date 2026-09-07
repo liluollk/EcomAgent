@@ -52,3 +52,9 @@ gui-test-screenshots/
 # 内部过程文档（不公开）
 /docs/superpowers/
 /1. 最终架构.md
+
+# 内部设计稿 / 开发截图 / 本地构建产物（不上传）
+/DESIGN.md
+frontend/.shots/
+frontend/current-ui.png
+/static/
