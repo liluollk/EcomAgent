@@ -8,7 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?style=flat&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Vite-3178C6?style=flat&logo=typescript&logoColor=white)
-![pytest](https://img.shields.io/badge/pytest-374%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-379%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
 <img src="docs/images/agent-chat.png" width="100%" alt="会话演示"/>
@@ -100,7 +100,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
-**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具/传什么参数，剧本专属）与**运行时契约**（守门/重试/幂等/收尾，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑运行时契约子集、重复 N 次统计通过率与 token，独立报告不读写回归基线。
+**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具/传什么参数，剧本专属）与**运行时契约**（守门/重试/幂等/收尾，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑运行时契约子集。真实模型会按 SKILL 建议先做只读预检再调价，因此运行时契约口径是**期望工具出现在业务序列中即可、结果断言归属该工具自身**（先读后写不判负）；模型始终未触发期望工具的轮次记 **not-exercised**（非运行时失败），通过率只算契约被触发的轮次。故障注入同样按场景目标工具的读写语义**定向消费**——预检 GET 不消耗写故障步，重试契约不被预检干扰。独立报告不读写回归基线。
 
 <details>
 <summary>展开细节</summary>
@@ -142,19 +142,21 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | `events/` | 八类 AgentEvent 事件模型 |
 | `harness/` | 行为验证 Harness：场景数据表、运行器、断言、指纹基线 |
 | `frontend/` | React + TS 控制台（对话流、工具活动行、权限卡、看板） |
-| `tests/` | 374 个测试，按模块分目录，全部离线运行 |
+| `tests/` | 379 个测试，按模块分目录，全部离线运行 |
 
 </details>
 
 ## ✅ 质量与验证
 
 ```bash
-python -m pytest tests/ -q     # 374 个单元 / 集成 / E2E 测试，全离线
+python -m pytest tests/ -q     # 379 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条行为契约场景 + 基线验收，退化即非零退出
-python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（运行时契约子集 + token 统计）
+python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（18 条运行时契约场景 ×3，三态统计）
 ```
 
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。
+
+**真实模型基准（DeepSeek-chat，2026-09-07，18 场景 ×3 = 54 轮）**：稳定通过 **17/18**，not-exercised 1，FLAKY/FAIL **0**（exit 0）——契约触发的轮次**全部正确**（触发通过率 100%）。not-exercised 的 1 条（`promotion_query_and_create`）与 3 条各 1 轮，是模型选择不发起写尝试，运行时守门/重试/幂等/权限契约在每次被触发时均按预期工作。同一模型在旧口径（要求第一个业务工具即期望工具）下仅 12/18——6 条假阳性全部源于「先查库存再调价」的合理行为被误判，佐证运行时契约必须与决策契约分档。
 
 ## ⚠️ 边界声明
 
