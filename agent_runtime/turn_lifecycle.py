@@ -118,22 +118,27 @@ class TurnLifecycle:
         """
         return not self.unmet_prerequisites(resolved_skills)
 
-    def build_system_prompt(self, loaded_skills: Optional[list[str]] = None) -> str:
-        """构建系统提示词（渐进式技能加载两段式）。
+    def build_stable_prompt(self) -> str:
+        """构建不依赖会话状态的稳定提示词前缀。
 
-        第一段（始终存在）：品牌 / 活跃渠道 / 权限模式 / 可用技能菜单。
-        第二段（有技能加载后补充）：已加载技能的 SOP 指令段。
-
-        Args:
-            loaded_skills: 已加载的技能名列表（为 None 时表示无技能加载）。
-
-        Returns:
-            str: 系统提示词。
+        该段会被放在每次模型请求的最前面，不能包含权限模式、渠道、
+        技能、记忆、时间或其他运行时状态，以便供应商的前缀缓存复用。
         """
+        return "\n".join(
+            [
+                "你是电商运营 Agent。",
+                "你负责理解用户的运营意图，并通过业务工具完成库存、价格、商品、订单和促销相关任务。",
+                "工具调用必须遵守工具定义和系统权限；不得通过自然语言绕过权限、业务规则或人工审批。",
+                "工具返回失败时必须如实说明失败原因，不得编造平台结果。",
+            ]
+        )
+
+    def build_dynamic_prompt(self, loaded_skills: Optional[list[str]] = None) -> str:
+        """构建依赖当前会话状态的动态提示词段。"""
         sources_desc = ", ".join(self._session.active_sources) if self._session.active_sources else "未配置"
         brand = self._workspace.metadata.get("brand", "OceanBreeze")
         lines = [
-            f"你是 {brand} 品牌的电商运营助手。",
+            f"当前品牌: {brand}。",
             f"当前活跃渠道: {sources_desc}。",
             f"权限模式: {self._session.permission_mode.name}。",
         ]
@@ -157,3 +162,7 @@ class TurnLifecycle:
             lines.append("\n".join(loaded_sections))
         lines.append("请根据用户需求，调用 load_skill 加载对应技能，并按 SOP 使用工具完成运营任务。")
         return "\n".join(lines)
+
+    def build_system_prompt(self, loaded_skills: Optional[list[str]] = None) -> str:
+        """兼容旧调用方：返回稳定前缀和动态上下文的拼接结果。"""
+        return f"{self.build_stable_prompt()}\n\n{self.build_dynamic_prompt(loaded_skills)}"

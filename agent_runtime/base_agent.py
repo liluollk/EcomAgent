@@ -103,7 +103,8 @@ class BaseAgent:
         # 渐进式技能加载状态
         self._loaded_skills: set[str] = set()  # 当前 turn 已加载的技能名
         self._load_skill_def: Optional[dict] = None  # load_skill 工具定义（含菜单）
-        self._current_system_prompt: str = ""  # 当前系统提示词（跨轮更新）
+        self._stable_system_prompt: str = ""  # 可复用的稳定提示词前缀
+        self._current_system_prompt: str = ""  # 当前动态上下文（跨轮更新）
         self._all_tools: list[dict] = []  # 全量工具定义
 
     @property
@@ -241,11 +242,14 @@ class BaseAgent:
         self._loaded_skills = set()
         self._all_tools = list(tools)
         self._load_skill_def = self._build_load_skill_def()
-        self._current_system_prompt = self._build_system_prompt_text(
+        self._stable_system_prompt = lifecycle.build_stable_prompt()
+        self._current_system_prompt = self._build_dynamic_prompt_text(
             lifecycle, session, user_message
         )
         config = self._backend.get_config()
-        config.system_prompt = self._current_system_prompt
+        # system messages 是模型请求中的唯一提示词来源，避免通过 BackendConfig
+        # 再隐式发送一份动态 Prompt，破坏稳定前缀并造成重复上下文。
+        config.system_prompt = ""
         self._backend.update_runtime_config(config)
 
         # /命令显式指定技能（"/price_management 调价"）：跳过模型"看菜单点菜"，
@@ -253,11 +257,11 @@ class BaseAgent:
         preload = self._parse_slash_skill(user_message)
         if preload:
             self._loaded_skills.add(preload)
-            self._current_system_prompt = self._build_system_prompt_text(
+            self._current_system_prompt = self._build_dynamic_prompt_text(
                 lifecycle, session, user_message
             )
             config = self._backend.get_config()
-            config.system_prompt = self._current_system_prompt
+            config.system_prompt = ""
             self._backend.update_runtime_config(config)
             yield StatusEvent(message=f"已按 /{preload} 预加载技能")
 
@@ -344,8 +348,16 @@ class BaseAgent:
     def _build_system_prompt_text(
         self, lifecycle: TurnLifecycle, session: Session, user_message: str
     ) -> str:
-        """构建当前系统提示词（含技能菜单 + 已加载技能的 SOP 段 + 记忆注入）。"""
-        system_prompt = lifecycle.build_system_prompt(list(self._loaded_skills))
+        """兼容旧调用方：构建完整系统提示词。"""
+        stable_prompt = lifecycle.build_stable_prompt()
+        dynamic_prompt = self._build_dynamic_prompt_text(lifecycle, session, user_message)
+        return f"{stable_prompt}\n\n{dynamic_prompt}"
+
+    def _build_dynamic_prompt_text(
+        self, lifecycle: TurnLifecycle, session: Session, user_message: str
+    ) -> str:
+        """构建当前动态上下文（技能、权限、渠道和记忆）。"""
+        system_prompt = lifecycle.build_dynamic_prompt(list(self._loaded_skills))
         mem_section = DEFAULT_MEMORY_STORE.recall_section(
             session.workspace.workspace_id, user_message
         )
@@ -401,7 +413,7 @@ class BaseAgent:
                 )
         self._loaded_skills.add(skill_name)
         # 加载后刷新系统提示词（SOP 段追加），供后续轮次使用
-        self._current_system_prompt = self._build_system_prompt_text(
+        self._current_system_prompt = self._build_dynamic_prompt_text(
             lifecycle, lifecycle._session, ""
         ) if lifecycle is not None else self._current_system_prompt
         return ToolResultEvent(
@@ -448,10 +460,11 @@ class BaseAgent:
             set_call_context(session.session_id, round_count)
 
             visible_tools = self._visible_tools()
-            # 系统提示词注入为 messages 首条（每轮携带最新技能上下文）。
+            # 稳定提示词永远位于动态上下文之前，便于供应商复用前缀缓存。
             # 直接原地插入（而非副本），保证回合内追加的 tool 结果对 backend
             # 可见；回合结束后移除，避免污染会话历史。
-            messages.insert(0, {"role": "system", "content": self._current_system_prompt})
+            messages.insert(0, {"role": "system", "content": self._stable_system_prompt})
+            messages.insert(1, {"role": "system", "content": self._current_system_prompt})
 
             pending_tools: list[ToolStartEvent] = []
             round_tools: list[ToolStartEvent] = []
@@ -480,7 +493,7 @@ class BaseAgent:
                         yield event
             finally:
                 # 移除本轮注入的 system 消息（历史只保留 user/assistant/tool）
-                if messages and messages[0].get("role") == "system":
+                while messages and messages[0].get("role") == "system":
                     messages.pop(0)
 
             # 子阶段 B: 执行获批的工具调用（每完成一个即 yield，让调用方可感知进度后 abort）

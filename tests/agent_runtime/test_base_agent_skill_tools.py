@@ -105,6 +105,12 @@ def collect(backend, session: Session, message: str, tools: list[dict] | None = 
     return asyncio.run(run())
 
 
+def system_prompt_text(backend: RecordingBackend) -> str:
+    return "\n\n".join(
+        m["content"] for m in backend.last_messages if m.get("role") == "system"
+    )
+
+
 def test_all_tools_visible_from_first_round():
     """新语义：技能不绑定工具，全部业务工具第一轮起就可见（load_skill + 工具池）。"""
     backend = ProgressiveBackend("inventory_query", "query_inventory", {"channel": "taobao", "sku": "SKU-001"})
@@ -114,6 +120,20 @@ def test_all_tools_visible_from_first_round():
     assert names == ["load_skill", "query_inventory", "update_price", "create_promotion", "query_order_status"]
 
 
+def test_model_messages_put_stable_prompt_before_dynamic_context():
+    backend = RecordingBackend()
+    session = make_session()
+
+    collect(backend, session, "查询一下库存")
+
+    system_messages = [m for m in backend.last_messages if m.get("role") == "system"]
+    assert len(system_messages) == 2
+    assert "你是电商运营 Agent" in system_messages[0]["content"]
+    assert "当前活跃渠道" not in system_messages[0]["content"]
+    assert "当前活跃渠道" in system_messages[1]["content"]
+    assert "ASK" in system_messages[1]["content"]
+
+
 def test_load_skill_injects_sop_into_system_prompt():
     """load_skill 命中后，技能 SOP 正文注入后续轮次的系统提示词。"""
     backend = ProgressiveBackend("inventory_query", "query_inventory", {"channel": "taobao", "sku": "SKU-001"})
@@ -121,7 +141,7 @@ def test_load_skill_injects_sop_into_system_prompt():
     events = collect(backend, session, "查询一下库存")
 
     assert len(backend.received_tools_by_round) >= 2
-    system_prompt = backend.last_messages[0]["content"]
+    system_prompt = system_prompt_text(backend)
     assert "已加载技能 inventory_query" in system_prompt
     assert "执行库存查询 SOP" in system_prompt  # SKILL.md 正文注入
 
@@ -183,7 +203,7 @@ def test_slash_command_preloads_skill():
 
     statuses = [e.message for e in events if e.type == "status"]
     assert any("已按 /inventory_query 预加载技能" in s for s in statuses)
-    system_prompt = backend.last_messages[0]["content"]
+    system_prompt = system_prompt_text(backend)
     assert "执行库存查询 SOP" in system_prompt
     # 全程无需模型再调 load_skill（对比 test_load_skill_injects_sop_into_system_prompt）
     assert not session.tool_calls
@@ -197,7 +217,7 @@ def test_slash_command_unknown_skill_falls_back_to_menu():
 
     statuses = [e.message for e in events if e.type == "status"]
     assert not any("预加载技能" in s for s in statuses)
-    assert "执行库存查询 SOP" not in backend.last_messages[0]["content"]
+    assert "执行库存查询 SOP" not in system_prompt_text(backend)
 
 
 def test_slash_command_prerequisite_blocked_silently():

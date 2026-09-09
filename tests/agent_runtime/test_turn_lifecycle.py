@@ -65,3 +65,40 @@ def test_turn_lifecycle_build_system_prompt():
     assert "taobao" in prompt
     assert "jd" in prompt
     assert "ASK" in prompt
+
+
+def test_turn_lifecycle_stable_prompt_excludes_runtime_state():
+    ws = Workspace(
+        workspace_id="ws-001",
+        name="OceanBreeze",
+        metadata={"brand": "OceanBreeze"},
+    )
+    session = Session(session_id="sess-001", workspace=ws)
+    session.active_sources = ["taobao"]
+    lifecycle = TurnLifecycle(session, ws, FakeBackend())
+
+    stable = lifecycle.build_stable_prompt()
+    dynamic = lifecycle.build_dynamic_prompt(loaded_skills=[])
+
+    assert "权限模式" not in stable
+    assert "当前活跃渠道" not in stable
+    assert "taobao" not in stable
+    assert "ASK" not in stable
+    assert "OceanBreeze" not in stable
+    assert "ASK" in dynamic
+    assert "taobao" in dynamic
+    assert "OceanBreeze" in dynamic
+
+
+def test_turn_lifecycle_stable_prompt_is_same_when_runtime_state_changes():
+    ws = Workspace(workspace_id="ws-001", name="test", metadata={"brand": "A"})
+    session = Session(session_id="sess-001", workspace=ws)
+    lifecycle = TurnLifecycle(session, ws, FakeBackend())
+    first = lifecycle.build_stable_prompt()
+
+    session.active_sources = ["jd", "douyin"]
+    session.permission_mode = PermissionMode.EXECUTE
+    ws.metadata["brand"] = "B"
+    second = lifecycle.build_stable_prompt()
+
+    assert first == second

@@ -203,9 +203,12 @@ class AnthropicAgent:
 
         # OpenAI → Anthropic 消息归一化：tool_calls/tool 消息转为 tool_use/tool_result 内容块
         anthropic_messages, extra_system = _normalize_openai_messages(messages)
-        system = self._config.system_prompt or "You are a helpful assistant."
         if extra_system:
-            system = f"{system}\n\n{extra_system}"
+            # 当消息本身携带 system blocks 时，以消息为唯一事实源，
+            # 避免 BackendConfig.system_prompt 再复制一份上下文。
+            system = extra_system
+        else:
+            system = self._config.system_prompt or "You are a helpful assistant."
 
         try:
             yield StatusEvent(message="正在调用 Anthropic API...")

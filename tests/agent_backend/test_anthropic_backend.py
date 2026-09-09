@@ -135,3 +135,30 @@ async def test_anthropic_chat_no_thinking_by_default():
     body = captured[0]
     assert "thinking" not in body
     assert body["temperature"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_anthropic_system_messages_are_not_duplicated():
+    """消息中的稳定段和动态段应合并一次，不应和 BackendConfig 重复。"""
+    captured: list[dict] = []
+
+    async def handler(request):
+        captured.append(json.loads(request.content))
+        return _anthropic_sse_response()
+
+    config = BackendConfig(
+        provider=BackendProvider.ANTHROPIC,
+        api_key="test-key",
+        api_base="https://api.anthropic.com",
+        system_prompt="旧的重复提示词",
+    )
+    backend = _make_anthropic_backend(config, handler)
+    messages = [
+        {"role": "system", "content": "稳定前缀"},
+        {"role": "system", "content": "动态上下文"},
+        {"role": "user", "content": "你好"},
+    ]
+
+    [e async for e in backend.chat(messages, [], "s1")]
+
+    assert captured[0]["system"] == "稳定前缀\n\n动态上下文"
