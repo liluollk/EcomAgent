@@ -56,7 +56,7 @@
 <details>
 <summary>展开细节</summary>
 
-PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角色，工具级 ACL）→ **业务规则**（如成本保护：调价不得低于成本价）→ **模式门**（READONLY 只读 / ASK 询问 / EXECUTE 自动执行）。三类判定全部由规则引擎产出，模型无法绕过——成本保护还是双闸：PreToolUse 早闸拦截后，平台侧再以**自身成本数据**硬拒低于成本的写请求（不信任调用方传入的 cost_price），真实模型漏报或谎报成本也越不过去。ASK 模式下写操作会发 `permission_request` 事件并**挂起整个 turn**（异步 resolver 等待），批准后从挂起点恢复执行，拒绝则把拒绝原因作为工具结果回传给模型重新规划；对话内权限卡与跨会话「审批中心」双入口可响应同一挂起请求，全程留审计（谁批准的、批了什么）。
+PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角色，工具级 ACL）→ **业务规则**（如成本保护：调价不得低于成本价）→ **模式门**（READONLY 只读 / ASK 询问 / EXECUTE 自动执行）。所有工具都通过显式 `ToolPolicy` 声明读写副作用与审批要求，未知策略默认拒绝，不依赖 `query_` / `get_` 等名称前缀猜测。三类判定全部由规则引擎产出，模型无法绕过——成本保护还是双闸：PreToolUse 早闸拦截后，平台侧再以**自身成本数据**硬拒低于成本的写请求（不信任调用方传入的 cost_price），真实模型漏报或谎报成本也越不过去。ASK 模式下写操作会发 `permission_request` 事件并**挂起整个 turn**（异步 resolver 等待），批准后从挂起点恢复执行，拒绝则把拒绝原因作为工具结果回传给模型重新规划；对话内权限卡与跨会话「审批中心」双入口可响应同一挂起请求，全程留审计（谁批准的、批了什么）。
 
 </details>
 
@@ -81,6 +81,8 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 <summary>展开细节</summary>
 
 `CommerceProvider` 是工具层依赖的稳定领域 Protocol（`query_inventory / update_price / product_shelf / ...`，共 11 个语义操作），只返回库存、订单、促销等领域结果，不暴露 HTTP Response。具体实现 `HttpCommerceProvider` 负责组织 Execution Policy，并调用 `PlatformAdapter` 与 REST Client；`PlatformAdapter` 再把电商语义操作转换成具体平台的 HTTP 方法、路径、参数和响应格式。渠道注册表把「渠道 = base_url + 鉴权方式 + 平台类型」持久化为配置，**新增渠道不新增工具**，配置保存即时生效、无需重启；每个渠道独立 REST client，改配置自动重建。
+
+成本价不属于普通库存领域结果：库存 Tool Result 与 Mock 库存接口均不返回 `cost_price`，平台通过内部 `CostProvider` 查询成本保护所需数据；成本缺失或查询异常时高风险调价默认拦截。Workspace 的成本保护开关经 `PATCH /workspaces/{workspace_id}` 规范化后保存到独立 JSON，设置页只负责配置，不构成安全边界。
 
 </details>
 
@@ -112,7 +114,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | 技能体系 | SKILL.md 知识包，渐进式披露控制上下文；内置 10 技能 + `save_skill` 元技能热加载创建（经 HITL 确认） |
 | 长期记忆 | `MEMORY.md` 索引 + 独立记忆文件，写入经矛盾整合（新增 / 覆盖 / 废弃 / 跳过），跨会话保留经营决策 |
 | 上下文压缩 | 超过「模型窗口 − 安全边际」自动压缩为结构化摘要，摘要沉淀为长期记忆 |
-| 会话持久化 | Workspace / Session 两级状态 JSONL 增量落盘，多会话并行、中断后完整恢复（含工具调用链） |
+| 会话持久化 | Workspace 配置 JSON + Session JSONL 增量落盘，多会话并行、中断后完整恢复（含工具调用链） |
 | 渠道管理 | 渠道注册表配置化（base_url / 鉴权 / 启停），设置页操作即时生效；敏感字段掩码 |
 | 审批中心 | 跨会话聚合待审批写操作，对话内权限卡与审批页双入口，REST 决定唤醒挂起中的 Agent |
 | 运营看板 | 跨渠道聚合：近 7 天 GMV 趋势、渠道构成、库存水位与经营预警 |
