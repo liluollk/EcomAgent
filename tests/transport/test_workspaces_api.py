@@ -9,6 +9,7 @@ from transport.server import app, sessions, workspaces
 @pytest.fixture(autouse=True)
 def cleanup(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("WORKSPACE_CONFIG_FILE", str(tmp_path / "workspaces.json"))
     sessions.clear()
     workspaces.clear()
     yield
@@ -92,3 +93,36 @@ async def test_workspace_isolated_rules():
         gate2 = workspace_rules_rule(ws_a.rules)
         r2 = gate2("update_price", {"new_price": 20, "cost_price": 59})
         assert r2.action == PreToolUseAction.ALLOW  # 无规则 → 放行
+
+
+async def test_update_workspace_rules_and_restore_after_memory_clear(monkeypatch, tmp_path):
+    config_path = tmp_path / "workspaces.json"
+    monkeypatch.setenv("WORKSPACE_CONFIG_FILE", str(config_path))
+
+    async with await _client() as client:
+        created = await client.post("/workspaces", json={"workspace_id": "brand_c"})
+        assert created.status_code == 200
+
+        updated = await client.patch(
+            "/workspaces/brand_c",
+            json={"rules": []},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["rules"] == []
+
+        from transport import state
+        state.workspaces.clear()
+        listed = (await client.get("/workspaces")).json()
+        restored = next(w for w in listed if w["workspace_id"] == "brand_c")
+        assert restored["rules"] == []
+
+
+async def test_workspace_rejects_unknown_rule_type():
+    async with await _client() as client:
+        response = await client.post(
+            "/workspaces",
+            json={"workspace_id": "bad_rules", "rules": [{"type": "unknown_rule"}]},
+        )
+
+    assert response.status_code == 400
+    assert "未知规则" in response.json()["error"]

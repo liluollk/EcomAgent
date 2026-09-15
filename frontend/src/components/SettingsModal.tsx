@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ChannelPlatform, ChannelSource, ModelProvider, PermissionModeType, ProvidersResponse } from '../types';
 import { SkillManager } from './SkillManager';
+import { BusinessRuleSettings } from './BusinessRuleSettings';
 import { toast } from '../lib/toast';
 
 const MODE_INFO: { id: PermissionModeType; name: string; desc: string; dot: string }[] = [
@@ -9,12 +10,13 @@ const MODE_INFO: { id: PermissionModeType; name: string; desc: string; dot: stri
   { id: 'EXECUTE', name: '执行模式', desc: '所有操作自动执行，适合管理员（高风险）', dot: 'bg-danger' },
 ];
 
-type Tab = 'model' | 'channel' | 'permission' | 'notify' | 'skill';
+type Tab = 'model' | 'channel' | 'permission' | 'notify' | 'skill' | 'business';
 
 const TAB_LABELS: { id: Tab; label: string }[] = [
   { id: 'model', label: '模型配置' },
   { id: 'channel', label: '渠道连接' },
   { id: 'skill', label: '技能管理' },
+  { id: 'business', label: '业务规则' },
   { id: 'permission', label: '权限模式' },
   { id: 'notify', label: '通知设置' },
 ];
@@ -26,9 +28,10 @@ interface SettingsModalProps {
   onModeChange: (mode: PermissionModeType) => void;
   activeProvider: string;
   onProvidersChange: () => void;
+  workspaceId: string;
 }
 
-export function SettingsModal({ open, onClose, mode, onModeChange, activeProvider, onProvidersChange }: SettingsModalProps) {
+export function SettingsModal({ open, onClose, mode, onModeChange, activeProvider, onProvidersChange, workspaceId }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>('model');
 
   useEffect(() => {
@@ -79,6 +82,7 @@ export function SettingsModal({ open, onClose, mode, onModeChange, activeProvide
           {tab === 'model' && <ModelSettings activeProvider={activeProvider} onProvidersChange={onProvidersChange} />}
           {tab === 'channel' && <ChannelSettings />}
           {tab === 'skill' && <SkillSettings />}
+          {tab === 'business' && <BusinessRuleSettings workspaceId={workspaceId} />}
           {tab === 'permission' && <PermissionSettings mode={mode} onModeChange={onModeChange} />}
           {tab === 'notify' && <NotifySettings />}
         </div>

@@ -147,6 +147,20 @@ export interface SessionMeta extends SessionInfo {
   createdAt?: number;
 }
 
+/** 工作空间配置（后端 /workspaces 返回） */
+export interface WorkspaceRule {
+  type: 'price_above_cost' | string;
+  enabled?: boolean;
+}
+
+export interface WorkspaceConfig {
+  workspace_id: string;
+  name: string;
+  brand: string;
+  rules: WorkspaceRule[];
+  created_at: string;
+}
+
 /** 模型供应商（后端 /providers 返回，api_key 已掩码） */
 export interface ModelProvider {
   name: string;

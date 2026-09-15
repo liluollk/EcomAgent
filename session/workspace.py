@@ -21,7 +21,7 @@ class Workspace:
         workspace_id: 工作空间唯一标识。
         name: 工作空间名称。
         sources: 已附加的 Source 名称列表。
-        rules: 业务规则声明列表（如 [{"type": "price_above_cost"}]），由权限管线执行。
+        rules: 业务规则声明列表（如 [{"type": "price_above_cost", "enabled": True}]），由权限管线执行。
         credentials: 凭据引用名列表（不存密钥本身，密钥在 CredentialStore）。
         created_at: 创建时间。
         metadata: 可扩展的元数据字典。

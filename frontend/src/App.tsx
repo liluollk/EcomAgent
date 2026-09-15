@@ -531,6 +531,7 @@ export default function App() {
   const activeRole = sessions.find((s) => s.session_id === activeId)?.user?.role ?? '';
   const activeRoleLabel = ROLE_LABELS[activeRole] ?? '';
   const activeUserId = sessions.find((s) => s.session_id === activeId)?.user?.user_id ?? '';
+  const activeWorkspaceId = sessions.find((s) => s.session_id === activeId)?.workspace_id ?? 'default';
   const thinkingLevel = providers.find((p) => p.name === activeProvider)?.thinking_level ?? 'high';
 
   const handleRoleChange = (next: string) => {
@@ -626,6 +627,7 @@ export default function App() {
         onModeChange={handleModeChange}
         activeProvider={activeProvider}
         onProvidersChange={fetchProviders}
+        workspaceId={activeWorkspaceId}
       />
     </div>
   );
