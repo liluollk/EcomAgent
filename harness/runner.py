@@ -169,6 +169,8 @@ class Runner:
             attempts=attempts,
             failures=failures,
             trace_path=final_path,
+            kind=scenario.get("kind", "gold"),
+            metrics=list(scenario.get("metrics", [])),
         )
 
     def _run_once(self, scenario: dict[str, Any], timeout: float):

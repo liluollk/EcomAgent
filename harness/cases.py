@@ -16,6 +16,8 @@ step 字段约定：
     permission       "approve"/"reject"：断言 ASK 权限流程（需 mode=ASK）
 scenario 字段约定：
     name      场景名
+    kind      场景类型：gold/guarded/resilience/ambiguous
+    metrics   场景覆盖的领域指标名列表（仅用于分类与报告，不参与断言）
     setup     预先准备钩子名（见 harness/hooks.py）
     after     收尾验证钩子名（见 harness/hooks.py）
     mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
@@ -31,9 +33,21 @@ import hashlib
 import json
 from typing import Any
 
+VALID_KINDS = frozenset({"gold", "guarded", "resilience", "ambiguous"})
+VALID_METRICS = frozenset({
+    "tool_routing", "workflow_completion", "adapter_extensibility",
+    "memory_write", "skill_lifecycle", "action_safety", "graceful_empty",
+    "retry_contract", "idempotent_replay", "error_isolation",
+    "hitl_approve", "hitl_reject", "constraint_violation_blocked",
+    "mode_gate_block", "permission_denied", "fatal_no_retry",
+    "schema_validation", "memory_forget",
+})
+
 SCENARIOS: list[dict[str, Any]] = [
     {
         "name": "six_step_business_chain",
+        "kind": "gold",
+        "metrics": ["tool_routing", "workflow_completion"],
         "steps": [
             {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
              "input": {"channel": "taobao", "sku": "SKU-001"}},
@@ -51,6 +65,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "cost_interception",
+        "kind": "guarded",
+        "metrics": ["constraint_violation_blocked"],
         "real": True,
         "steps": [
             # 20 < 成本 59：早道 PreToolUse 业务规则拦截（成本价由平台真相 lookup 提供，
@@ -64,6 +80,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "dynamic_channel_add",
+        "kind": "gold",
+        "metrics": ["adapter_extensibility"],
         "setup": "add_pdd_channel",
         "steps": [
             {"message": "查一下 pdd 渠道 SKU-001 的库存", "tool": "query_inventory",
@@ -72,6 +90,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "cross_session_memory",
+        "kind": "gold",
+        "metrics": ["memory_write"],
     "real": True,
         "after": "assert_memory_landed",
         "steps": [
@@ -80,6 +100,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "skill_creation",
+        "kind": "gold",
+        "metrics": ["skill_lifecycle"],
         "after": "assert_skill_created",
         "steps": [
             {"message": "把查库存的流程做成一个叫 stock_check_pro 的技能", "tool": "save_skill",
@@ -88,6 +110,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "shelf_toggle",
+        "kind": "gold",
+        "metrics": ["action_safety"],
     "real": True,
         "steps": [
             {"message": "把淘宝 SKU-001 下架", "tool": "product_shelf",
@@ -98,6 +122,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "promotion_query_and_create",
+        "kind": "gold",
+        "metrics": ["tool_routing", "action_safety"],
     "real": True,
         "steps": [
             {"message": "看下抖音进行中的促销", "tool": "query_promotions",
@@ -108,6 +134,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "business_review",
+        "kind": "gold",
+        "metrics": ["tool_routing"],
     "real": True,
         "steps": [
             {"message": "看下淘宝近7天的销售分析", "tool": "query_order_stats",
@@ -118,6 +146,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "anomaly_watch",
+        "kind": "gold",
+        "metrics": ["tool_routing"],
     "real": True,
         "steps": [
             {"message": "看下抖音有什么异常预警", "tool": "query_anomalies",
@@ -126,6 +156,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "unknown_sku_graceful",
+        "kind": "gold",
+        "metrics": ["graceful_empty"],
     "real": True,
         "steps": [
             # 平台对未知 SKU 返回空库存行：工具优雅返回（库存 0），不报错不崩溃
@@ -135,6 +167,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "readonly_blocks_write",
+        "kind": "guarded",
+        "metrics": ["mode_gate_block"],
     "real": True,
         "mode": "READONLY",
         "steps": [
@@ -147,6 +181,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "rbac_denial",
+        "kind": "guarded",
+        "metrics": ["permission_denied"],
     "real": True,
         "role": "finance",
         "steps": [
@@ -159,6 +195,8 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "name": "memory_forget",
+        "kind": "ambiguous",
+        "metrics": ["memory_forget"],
     "real": True,
         "after": "assert_memory_forgotten",
         "steps": [
@@ -172,6 +210,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E14 上游限流一次：分类 TRANSIENT → 同幂等键重试成功
         "name": "upstream_429_retry_success",
+        "kind": "resilience",
+        "metrics": ["retry_contract"],
     "real": True,
         "fault": "rate_limit_once_then_success",
         "steps": [
@@ -183,6 +223,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E15 上游超时一次（读操作）：客户端短超时 → TRANSIENT 重试成功
         "name": "upstream_timeout_retry_success",
+        "kind": "resilience",
+        "metrics": ["retry_contract"],
     "real": True,
         "fault": "timeout_once_then_success",
         "steps": [
@@ -194,6 +236,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E16 上游持续 500：FATAL 不重试，优雅返回平台错误文本
         "name": "upstream_permanent_failure",
+        "kind": "resilience",
+        "metrics": ["fatal_no_retry"],
     "real": True,
         "fault": "permanent_500",
         "steps": [
@@ -206,6 +250,8 @@ SCENARIOS: list[dict[str, Any]] = [
         # E17 超时重试 + 幂等：服务端先落副作用再挂起（真实危险场景），
         # 重试同幂等键回放首次结果，写副作用只落一次（after 钩子断言）
         "name": "idempotent_repeated_write",
+        "kind": "resilience",
+        "metrics": ["retry_contract", "idempotent_replay"],
     "real": True,
         "fault": "timeout_once_then_success",
         "after": "assert_single_price_write",
@@ -219,6 +265,8 @@ SCENARIOS: list[dict[str, Any]] = [
         # E18 上游畸形响应（HTTP 200 + code=0 但 data 缺字段/类型错）：
         # 结果校验层以 UPSTREAM_INVALID_RESPONSE 拦截，不重试、优雅降级
         "name": "malformed_upstream_response",
+        "kind": "resilience",
+        "metrics": ["schema_validation"],
     "real": True,
         "fault": "malformed_once_then_success",
         "steps": [
@@ -230,6 +278,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E19 部分工具失败不拖垮会话：第一步 500 优雅报错，第二步恢复正常
         "name": "partial_tool_failure",
+        "kind": "resilience",
+        "metrics": ["error_isolation"],
     "real": True,
         "fault": "internal_error_once_then_success",
         "steps": [
@@ -244,6 +294,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E20 ASK 模式 + 批准：permission_request 后人工放行，工具真实执行
         "name": "permission_approve_then_execute",
+        "kind": "guarded",
+        "metrics": ["hitl_approve", "action_safety"],
     "real": True,
         "mode": "ASK",
         "steps": [
@@ -255,6 +307,8 @@ SCENARIOS: list[dict[str, Any]] = [
     {
         # E21 ASK 模式 + 拒绝：拒绝后不执行，turn 仍以 complete 完整收尾
         "name": "permission_reject_then_stop",
+        "kind": "guarded",
+        "metrics": ["hitl_reject", "action_safety"],
     "real": True,
         "mode": "ASK",
         "steps": [
@@ -265,6 +319,27 @@ SCENARIOS: list[dict[str, Any]] = [
         ],
     },
 ]
+
+
+def validate_scenarios(scenarios: list[dict[str, Any]]) -> None:
+    """校验场景元数据，避免分类拼写错误悄悄进入报告。"""
+    names: set[str] = set()
+    for scenario in scenarios:
+        name = scenario["name"]
+        if name in names:
+            raise ValueError(f"重复场景名: {name}")
+        names.add(name)
+
+        kind = scenario.get("kind", "gold")
+        if kind not in VALID_KINDS:
+            raise ValueError(f"未知场景类型 {kind!r}: {name}")
+
+        unknown = set(scenario.get("metrics", [])) - VALID_METRICS
+        if unknown:
+            raise ValueError(f"未知领域指标 {sorted(unknown)!r}: {name}")
+
+
+validate_scenarios(SCENARIOS)
 
 
 def case_fingerprint(scenario: dict[str, Any]) -> str:
