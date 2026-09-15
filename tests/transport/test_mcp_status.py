@@ -9,7 +9,7 @@ from transport.server import app
 
 @pytest.fixture(autouse=True)
 def isolate_env(tmp_path, monkeypatch):
-    """隔离运行时目录与 MCP server 配置，避免污染 data/。"""
+    """隔离执行目录与 MCP server 配置，避免污染 data/。"""
     monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path / "sessions"))
     monkeypatch.setenv("CHANNEL_CONFIG_FILE", str(tmp_path / "channels.json"))
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))

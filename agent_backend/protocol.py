@@ -25,7 +25,7 @@ class BackendProvider(Enum):
 
 @dataclass
 class AgentCapabilities:
-    """后端能力声明 — 用于驱动 UI 显示和运行时决策。
+    """后端能力声明 — 用于驱动 UI 显示和执行决策。
 
     Attributes:
         supports_tool_calling: 是否支持工具调用（function calling / tool use）。
@@ -42,7 +42,7 @@ class AgentCapabilities:
 
 @dataclass
 class BackendConfig:
-    """后端配置 — 包含模型选择、API 密钥和运行时参数。
+    """后端配置 — 包含模型选择、API 密钥和请求参数。
 
     Attributes:
         provider: 后端提供商。
@@ -79,7 +79,7 @@ class AgentBackend(Protocol):
         abort: 中断当前对话。
         capabilities: 返回后端能力声明。
         get_config: 获取当前后端配置。
-        update_runtime_config: 更新运行时配置（如系统提示词）。
+        update_runtime_config: 更新动态配置（如系统提示词）。
     """
 
     async def chat(
@@ -122,7 +122,7 @@ class AgentBackend(Protocol):
         ...
 
     def update_runtime_config(self, config: BackendConfig) -> None:
-        """更新运行时配置。
+        """更新动态配置。
 
         Args:
             config: 新的后端配置。

@@ -2,7 +2,7 @@
 JSONL 会话持久化 — 将 Session 消息与审计记录增量写入 JSONL 文件。
 
 JSONL 持久化机制。
-区分运行时状态（Session 对象）与持久化存储（JSONL 文件），
+区分当前状态（Session 对象）与持久化存储（JSONL 文件），
 支持会话恢复和审计追踪。
 
 文件格式（每行一条 JSON 记录）：

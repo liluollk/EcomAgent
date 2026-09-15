@@ -67,7 +67,7 @@ async def _mcp_lifespan(app: FastAPI):
     _stop_channel_api()
 
 
-app = FastAPI(title="电商运营 Agent Runtime", version="0.2.0", lifespan=_mcp_lifespan)
+app = FastAPI(title="面向电商运营的 Agent 平台", version="0.2.0", lifespan=_mcp_lifespan)
 
 # 注册 REST 路由
 app.include_router(sessions_router)

@@ -10,7 +10,7 @@ Python 版改用组合模式（后端作为依赖注入），而非继承 Backen
 - PreToolUsePipeline 权限拦截，在工具执行前进行安全检查
 - ASK 模式下阻塞式权限确认：挂起等待用户决定，批准执行、拒绝以错误结果回传 LLM
 - AbortHandler 中断机制，支持用户随时取消
-- BackendConfig 运行时更新，系统提示词动态注入
+- BackendConfig 动态更新，系统提示词动态注入
 """
 
 from __future__ import annotations

@@ -19,7 +19,7 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
 def _storage_dir() -> str:
-    """运行时读取存储目录（兼容测试的 env 隔离）。"""
+    """服务端读取存储目录（兼容测试的 env 隔离）。"""
     return os.environ.get("AGENT_STORAGE_DIR") or os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "data", "sessions")
     )

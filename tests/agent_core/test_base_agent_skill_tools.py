@@ -8,7 +8,7 @@
 import asyncio
 
 from agent_backend.protocol import BackendConfig, BackendProvider
-from agent_runtime.base_agent import BaseAgent
+from agent_core.base_agent import BaseAgent
 from events.agent_event import TextDeltaEvent, ToolStartEvent
 from session.session import Session
 from session.workspace import Workspace

@@ -8,7 +8,7 @@
   - HttpCommerceProvider：CommerceProvider Protocol 的实现，
     把操作结果映射为领域结果类型——不向上层暴露 HTTP Response。
 
-Runtime 只依赖 CommerceProvider 接口；将来接入淘宝/京东真实平台时，
+上层编排只依赖 CommerceProvider 接口；将来接入淘宝/京东真实平台时，
 替换 provider/client/adapter 实现即可，工具层与引擎零改动。
 """
 
@@ -38,7 +38,7 @@ from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
 
 
 def _current_policy():
-    """动态取默认策略（允许 harness/测试在运行时替换为快配置）。"""
+    """动态取默认策略（允许 harness/测试在执行过程中替换为快配置）。"""
     from execution import policy as _ep
 
     return _ep.DEFAULT_EXECUTION_POLICY

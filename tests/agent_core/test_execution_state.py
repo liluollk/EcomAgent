@@ -3,7 +3,7 @@
 import asyncio
 
 from agent_backend.protocol import AgentCapabilities, BackendConfig, BackendProvider
-from agent_runtime.base_agent import BaseAgent
+from agent_core.base_agent import BaseAgent
 from events.agent_event import ToolStartEvent
 from permission.pre_tool_use import PreToolUseAction, PreToolUsePipeline, PreToolUseResult
 from session.session import ExecutionState, PermissionMode, Session

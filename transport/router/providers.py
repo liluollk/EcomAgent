@@ -103,5 +103,5 @@ async def test_provider(name: str) -> JSONResponse:
             }
         )
     return JSONResponse(
-        content={"ok": True, "message": f"{provider} 配置有效（未发起真实网络请求，需真实调用时以运行时为准）"}
+        content={"ok": True, "message": f"{provider} 配置有效（未发起真实网络请求，需真实调用时以实际响应为准）"}
     )

@@ -2,7 +2,7 @@
 
 - /mcp/servers：data/mcp_servers.json 的增删改查（用户自行接入想用的 MCP）；
 - /mcp/servers/{name}/test：连通性测试（拉起子进程 → initialize → 关闭）；
-- /mcp/status：运行时连接状态 + 各 server 已发现工具聚合。
+- /mcp/status：平台连接状态 + 各 server 已发现工具聚合。
 """
 
 from __future__ import annotations

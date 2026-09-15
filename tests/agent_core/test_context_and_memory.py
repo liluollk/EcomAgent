@@ -11,9 +11,9 @@ import os
 
 import pytest
 
-from agent_runtime.context_policy import ContextCompressor, context_threshold
-from agent_runtime.memory_store import MemoryStore
-from agent_runtime.base_agent import BaseAgent
+from agent_core.context_policy import ContextCompressor, context_threshold
+from agent_core.memory_store import MemoryStore
+from agent_core.base_agent import BaseAgent
 from agent_backend.protocol import BackendConfig, BackendProvider
 from agent_backend.factory import create_backend
 from session.session import Session, PermissionMode
@@ -236,11 +236,11 @@ def _run_chat(agent, session, text):
 
 def test_chat_writes_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
-    from agent_runtime import memory_store as ms_mod
+    from agent_core import memory_store as ms_mod
     # 断言必须读被 patch 的同一实例：模块级单例指向项目真实 data/memory，
     # 读单例会把运行环境里的历史记忆混入（隔离假绿）
     store = ms_mod.MemoryStore(root=str(tmp_path / "memory"))
-    monkeypatch.setattr("agent_runtime.base_agent.DEFAULT_MEMORY_STORE", store)
+    monkeypatch.setattr("agent_core.base_agent.DEFAULT_MEMORY_STORE", store)
 
     agent, ws = _make_agent()
     session = _make_session(ws)
@@ -252,8 +252,8 @@ def test_chat_writes_memory(monkeypatch, tmp_path):
 
 def test_chat_triggers_compaction_event(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
-    from agent_runtime import memory_store as ms_mod
-    monkeypatch.setattr("agent_runtime.base_agent.DEFAULT_MEMORY_STORE",
+    from agent_core import memory_store as ms_mod
+    monkeypatch.setattr("agent_core.base_agent.DEFAULT_MEMORY_STORE",
                         ms_mod.MemoryStore(root=str(tmp_path / "memory")))
 
     agent, ws = _make_agent()
@@ -328,10 +328,10 @@ def test_integration_injected_obsolete(memory):
 
 def test_compression_sinks_summary_to_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
-    from agent_runtime import memory_store as ms_mod
+    from agent_core import memory_store as ms_mod
 
     monkeypatch.setattr(
-        "agent_runtime.base_agent.DEFAULT_MEMORY_STORE",
+        "agent_core.base_agent.DEFAULT_MEMORY_STORE",
         ms_mod.MemoryStore(root=str(tmp_path / "memory")),
     )
 

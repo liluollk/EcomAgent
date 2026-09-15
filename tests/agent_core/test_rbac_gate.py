@@ -1,7 +1,7 @@
 """BaseAgent 身份门测试 — RBAC 角色在 PreToolUse 管线中的拦截与放行、审计带 user。"""
 
 from agent_backend.protocol import AgentCapabilities, BackendConfig, BackendProvider
-from agent_runtime.base_agent import BaseAgent
+from agent_core.base_agent import BaseAgent
 from events.agent_event import TextDeltaEvent, ToolStartEvent
 from permission.rbac import CUSTOMER_SERVICE, OPERATOR, FINANCE, role_gate_rule
 from permission.pre_tool_use import PreToolUsePipeline

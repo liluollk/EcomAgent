@@ -1,4 +1,4 @@
-"""真实模型评测模式支撑：运行时契约子集 + relaxed 断言语义。"""
+"""真实模型评测模式支撑：执行契约子集 + relaxed 断言语义。"""
 
 from events.agent_event import CompleteEvent, ToolResultEvent, ToolStartEvent
 from harness.assertions import NotExercisedError, assert_step
@@ -20,7 +20,7 @@ _STEP = {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
          "input": {"channel": "taobao", "sku": "SKU-001"}, "result_contains": ["已更新"]}
 
 
-def test_real_model_scenarios_is_subset_of_runtime_tier():
+def test_real_model_scenarios_is_subset_of_execution_tier():
     subset = real_model_scenarios()
     assert subset and all(s.get("real") for s in subset)
     assert len(subset) < len(SCENARIOS)
@@ -30,7 +30,7 @@ def test_real_model_scenarios_is_subset_of_runtime_tier():
 
 
 def test_relaxed_skips_load_skill_and_input_subset():
-    """真实模型模式：无 load_skill、入参不精确匹配，仍判运行时契约通过。"""
+    """真实模型模式：无 load_skill、入参不精确匹配，仍判执行契约通过。"""
     evs = _events(with_load_skill=False, input_={"channel": "taobao", "sku": "SKU-001", "new_price": 89.0})
     assert_step("x", _STEP, evs, relaxed=True)  # 不抛异常
 
@@ -45,7 +45,7 @@ def test_strict_mode_still_requires_load_skill():
 
 
 def test_relaxed_expected_tool_missing_raises_not_exercised():
-    """期望工具完全未出现 = not exercised（非运行时失败），与断言失败区分。"""
+    """期望工具完全未出现 = not exercised（非执行失败），与断言失败区分。"""
     evs = _events(with_load_skill=False, tool="query_inventory")
     try:
         assert_step("x", _STEP, evs, relaxed=True)

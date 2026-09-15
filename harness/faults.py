@@ -1,7 +1,7 @@
 """评测故障装配 — 场景级确定性故障脚本 + 快执行策略。
 
 runner（python -m harness）与 e2e 驱动器（tests/e2e）共用本模块，
-保证「场景数据 → Runner → Mock API Fault Script → Runtime → Event →
+保证「场景数据 → Runner → Mock API Fault Script → Agent 编排 → Event →
 Assertion」是一条链路上的同一套语义。
 
 快策略要点（与生产默认的差异，仅评测进程内生效）：

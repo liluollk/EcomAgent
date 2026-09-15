@@ -2,7 +2,7 @@
 后端工厂 — 根据 BackendConfig.provider 创建对应的后端实例。
 
 createBackend() 工厂函数。
-简化版：直接根据 provider 枚举选择后端，不依赖 CLI 运行时路径解析。
+简化版：直接根据 provider 枚举选择后端，不依赖 CLI 动态路径解析。
 """
 
 from __future__ import annotations

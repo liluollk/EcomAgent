@@ -146,7 +146,7 @@ async def test_channel_api_all_endpoints():
 def test_builtin_tools_over_rest_full_chain():
     """全链路：内置平台 API 工具 → 渠道注册表 → RestClient → mock 平台服务。
 
-    电商工具在内置通道（sources/builtin_tools.py）执行，走运行时默认路径：
+    电商工具在内置通道（sources/builtin_tools.py）执行，走平台默认路径：
     渠道注册表解析 client（进程内服务），验证完整 REST 语义（鉴权 / 信封 / 错误码）。
     """
     from sources import builtin_tools

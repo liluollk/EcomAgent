@@ -6,7 +6,7 @@
     python -m harness --case six_step_business_chain --case cost_interception
     python -m harness --timeout 180 --retries 1 --runs-dir .harness-runs
     python -m harness --backend openai --provider deepseek --repeat 3
-                                          # 真实模型评测：运行时契约场景 ×3，独立报告
+                                          # 真实模型评测：执行契约场景 ×3，独立报告
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeat", type=int, default=1,
                    help="真实模型模式每场景重复次数（吸收 run 间方差，默认 1）")
     p.add_argument("--real-only", action="store_true",
-                   help="只跑运行时契约场景（真实模型模式自动启用）")
+                   help="只跑执行契约场景（真实模型模式自动启用）")
     return p
 
 
@@ -53,7 +53,7 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
 
     三态判定（契约触发口径）：
       PASS           契约被触发的轮次全部通过（触发即正确 = 稳定）
-      NOT-EXERCISED  模型从未触发期望业务工具——非运行时失败，不计入失败
+      NOT-EXERCISED  模型从未触发期望业务工具——非执行失败，不计入失败
       FLAKY/FAIL     契约触发过但存在断言/超时失败
 
     通过率 = 触发轮次中通过的占比（分母剔除 not-exercised）。
@@ -117,9 +117,9 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
           f"   契约触发通过率 {trigger_rate:.1%}"
           f"   总 token {total_usage['prompt_tokens']}+{total_usage['completion_tokens']}")
     if flaky:
-        print("存在契约触发后的失败场景（见上方 FAIL 行）——运行时有真实缺口或断言过严，需人工复核。")
+        print("存在契约触发后的失败场景（见上方 FAIL 行）——平台有真实缺口或断言过严，需人工复核。")
     else:
-        print("无契约触发后的失败：not-exercised 场景为模型未触发（不构成运行时缺陷）。")
+        print("无契约触发后的失败：not-exercised 场景为模型未触发（不构成执行缺陷）。")
     print("（真实模型模式不读写回归基线——方差下二值基线语义不适用）")
     return 0 if flaky == 0 else 1
 

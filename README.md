@@ -2,7 +2,7 @@
 
 # EcomAgent
 
-**面向电商运营的 Agent Runtime · 任务编排 / Tool 安全控制 / 业务能力接入 / 行为回归**
+**面向电商运营的 Agent 平台 · 任务编排 / Tool 安全控制 / 业务能力接入 / 行为回归**
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?style=flat&logo=fastapi&logoColor=white)
@@ -34,9 +34,9 @@
 
 ## 💡 这是什么
 
-把「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 执行策略 → 结果返回」抽象为统一执行闭环，让库存查询、调价、上下架、促销、订单分析等运营任务跑在同一套底座上。
+把「任务输入 → 上下文装配 → 模型决策 → 工具调用 → 权限确认 → 执行策略 → 结果返回」抽象为统一执行闭环，让库存查询、调价、上下架、促销、订单分析等运营任务跑在同一套平台能力上。
 
-**它不是 Prompt + Tool Calling 的演示，而是把 Agent 当作「运行时系统」来做**——每一层都有明确的契约与测试。
+**它不是 Prompt + Tool Calling 的演示，而是把 Agent 当作可持续执行的业务系统来做**——每一层都有明确的契约与测试。
 
 ---
 
@@ -47,7 +47,7 @@
 <details>
 <summary>展开细节</summary>
 
-运行时对外只暴露八类事件（`text_delta / tool_start / tool_result / permission_request / typed_error / status / complete / abort`）。同一份事件流同时驱动三个消费方，不存在第二套日志或第二套状态。可观测性字段（`trace_id / attempt / duration_ms / idempotent_replay`）是后来在事件上**增补的字段，不是重新设计的事件**：Execution Policy 执行完把元数据回填进 `tool_result`，Trace 就从事件流上自然长出来了。
+平台对外只暴露八类事件（`text_delta / tool_start / tool_result / permission_request / typed_error / status / complete / abort`）。同一份事件流同时驱动三个消费方，不存在第二套日志或第二套状态。可观测性字段（`trace_id / attempt / duration_ms / idempotent_replay`）是后来在事件上**增补的字段，不是重新设计的事件**：Execution Policy 执行完把元数据回填进 `tool_result`，Trace 就从事件流上自然长出来了。
 
 </details>
 
@@ -75,7 +75,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
-**④ Commerce Adapter——Runtime 只见领域接口，协议细节全部下沉。** `CommerceProvider` Protocol 返回领域结果而非 HTTP Response；新增渠道不新增工具（11 个语义操作按 `channel` 参数分派，注册表配置化即时生效）。
+**④ Commerce Adapter——执行编排只见领域接口，协议细节全部下沉。** `CommerceProvider` Protocol 返回领域结果而非 HTTP Response；新增渠道不新增工具（11 个语义操作按 `channel` 参数分派，注册表配置化即时生效）。
 
 <details>
 <summary>展开细节</summary>
@@ -93,7 +93,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 </details>
 
-**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具/传什么参数，剧本专属）与**运行时契约**（守门/重试/幂等/收尾，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑运行时契约子集。真实模型会按 SKILL 建议先做只读预检再调价，因此运行时契约口径是**期望工具出现在业务序列中即可、结果断言归属该工具自身**（先读后写不判负）；模型始终未触发期望工具的轮次记 **not-exercised**（非运行时失败），通过率只算契约被触发的轮次。故障注入同样按场景目标工具的读写语义**定向消费**——预检 GET 不消耗写故障步，重试契约不被预检干扰。独立报告不读写回归基线。
+**⑥ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景是一张数据表；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具/传什么参数，剧本专属）与**执行契约**（守门/重试/幂等/收尾，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑执行契约子集。真实模型会按 SKILL 建议先做只读预检再调价，因此执行契约口径是**期望工具出现在业务序列中即可、结果断言归属该工具自身**（先读后写不判负）；模型始终未触发期望工具的轮次记 **not-exercised**（非执行失败），通过率只算契约被触发的轮次。故障注入同样按场景目标工具的读写语义**定向消费**——预检 GET 不消耗写故障步，重试契约不被预检干扰。独立报告不读写回归基线。
 
 <details>
 <summary>展开细节</summary>
@@ -123,10 +123,10 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 ## 🏗️ 架构
 
 <p align="center">
-  <img src="docs/images/architecture.svg" width="58%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent Runtime 执行核心 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
+  <img src="docs/images/architecture.svg" width="58%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent 执行编排 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
 </p>
 
-**第一原则：Runtime 不知道「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，Runtime 一行不改。
+**第一原则：执行编排不感知「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，上层编排流程不改。
 
 ---
 
@@ -139,7 +139,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 |---|---|
 | `transport/` | FastAPI REST + WS 双通道，权限管线与工具源装配 |
 | `agent_backend/` | 模型后端抽象与消息归一化 |
-| `agent_runtime/` | 执行核心：回合循环、工具并发执行、权限挂起、上下文压缩与长期记忆 |
+| `agent_core/` | 执行核心：回合循环、工具并发执行、权限挂起、上下文压缩与长期记忆 |
 | `session/` | Workspace / Session 状态、JSONL 持久化、中断恢复 |
 | `permission/` | RBAC 身份门、业务规则、模式门、审计 |
 | `sources/` | 内置平台工具、技能注册表、渠道注册表、MCP 客户端 |
@@ -180,17 +180,17 @@ cd frontend && npm run build
 ```bash
 python -m pytest tests/ -q     # 394 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条行为契约场景 + 基线验收，退化即非零退出
-python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（18 条运行时契约场景 ×3，三态统计）
+python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（18 条执行契约场景 ×3，三态统计）
 ```
 
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。
 
-**历史真实模型基准样例（DeepSeek-chat，2026-09-07，18 场景 ×3 = 54 轮）**：稳定通过 **17/18**，not-exercised 1，FLAKY/FAIL **0**（exit 0）——契约触发的轮次**全部正确**（触发通过率 100%）。该结果用于展示评测流程，不代表每次运行结果完全固定。not-exercised 的 1 条（`promotion_query_and_create`）与 3 条各 1 轮，是模型选择不发起写尝试，运行时守门/重试/幂等/权限契约在每次被触发时均按预期工作。同一模型在旧口径（要求第一个业务工具即期望工具）下仅 12/18——6 条假阳性全部源于「先查库存再调价」的合理行为被误判，佐证运行时契约必须与决策契约分档。
+**历史真实模型基准样例（DeepSeek-chat，2026-09-07，18 场景 ×3 = 54 轮）**：稳定通过 **17/18**，not-exercised 1，FLAKY/FAIL **0**（exit 0）——契约触发的轮次**全部正确**（触发通过率 100%）。该结果用于展示评测流程，不代表每次运行结果完全固定。not-exercised 的 1 条（`promotion_query_and_create`）与 3 条各 1 轮，是模型选择不发起写尝试，平台守门/重试/幂等/权限契约在每次被触发时均按预期工作。同一模型在旧口径（要求第一个业务工具即期望工具）下仅 12/18——6 条假阳性全部源于「先查库存再调价」的合理行为被误判，佐证执行契约必须与决策契约分档。
 
 ---
 
 ## ⚠️ 边界声明
 
-1. **业务数据为模拟**：协议层（MCP / REST / 认证 / 错误码 / 幂等）为真实实现，模拟的是平台返回的数据；接真实电商平台需要平台资质 + 各平台字段映射与签名适配层（真实多平台系统的固有成本），Runtime 与评测体系原样复用。
+1. **业务数据为模拟**：协议层（MCP / REST / 认证 / 错误码 / 幂等）为真实实现，模拟的是平台返回的数据；接真实电商平台需要平台资质 + 各平台字段映射与签名适配层（真实多平台系统的固有成本），上层编排与评测体系原样复用。
 2. 摘要与记忆检索当前为规则 / 关键词实现，LLM 摘要与向量检索的升级路径已预留。
-3. MCP 通道保留但冻结：已验证 Runtime 作为 MCP Client 接入外部工具；电商主链路走 Commerce Adapter，两个方向互不污染。
+3. MCP 通道保留但冻结：已验证平台作为 MCP Client 接入外部工具；电商主链路走 Commerce Adapter，两个方向互不污染。

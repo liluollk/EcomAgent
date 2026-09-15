@@ -3,7 +3,7 @@
 import pytest
 from session.session import Session, PermissionMode
 from session.workspace import Workspace
-from agent_runtime.turn_lifecycle import TurnLifecycle
+from agent_core.turn_lifecycle import TurnLifecycle
 
 
 class FakeBackend:

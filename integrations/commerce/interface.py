@@ -1,8 +1,8 @@
 """
 CommerceProvider Protocol — 电商平台接入的稳定领域接口。
 
-Runtime 只知道这个 Protocol，不知道任何具体平台（淘宝/京东/抖音）的细节。
-具体平台通过 Adapter 实现此接口，Runtime 一行代码不需要动。
+Agent 编排层只知道这个 Protocol，不知道任何具体平台（淘宝/京东/抖音）的细节。
+具体平台通过 Adapter 实现此接口，上层编排流程不需要改动。
 """
 
 from __future__ import annotations

@@ -153,7 +153,7 @@ class AnthropicAgent:
         return self._config
 
     def update_runtime_config(self, config: BackendConfig) -> None:
-        """更新运行时配置并重新创建客户端。
+        """更新动态配置并重新创建客户端。
 
         Args:
             config: 新的后端配置。

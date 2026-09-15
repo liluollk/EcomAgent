@@ -19,7 +19,7 @@ def _setup_add_pdd_channel() -> None:
 
 def _after_memory_landed() -> None:
     """跨会话记忆场景收尾：断言显式记忆已落盘且可检索注入。"""
-    from agent_runtime import memory_store as _ms
+    from agent_core import memory_store as _ms
 
     store = _ms.DEFAULT_MEMORY_STORE
     assert "3 万件" in store.recall_section("default", query="双11")
@@ -37,7 +37,7 @@ def _after_skill_created() -> None:
 
 def _after_memory_forgotten() -> None:
     """记忆遗忘场景收尾：断言显式记忆已删除、不再被检索注入。"""
-    from agent_runtime import memory_store as _ms
+    from agent_core import memory_store as _ms
 
     store = _ms.DEFAULT_MEMORY_STORE
     assert "3 万件" not in store.recall_section("default", query="双11"), (

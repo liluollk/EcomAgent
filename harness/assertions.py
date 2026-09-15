@@ -33,8 +33,8 @@ _STEP_PERM_MSG = "[{name}] step「{msg}」未发起权限请求（ASK 流程缺�
 class NotExercisedError(AssertionError):
     """真实模型模式下，期望的业务工具未被模型触发（not exercised）。
 
-    与断言失败不同义：模型未造出「写尝试」前提 ≠ 运行时守门/重试契约
-    被破坏。真实评测统计时从分母剔除（契约未被触发，不构成对运行时的
+    与断言失败不同义：模型未造出「写尝试」前提 ≠ 平台守门/重试契约
+    被破坏。真实评测统计时从分母剔除（契约未被触发，不构成对平台的
     检验），而不是当作失败噪声。
     """
 
@@ -80,7 +80,7 @@ def assert_step(scenario_name: str, step: dict, events: list, relaxed: bool = Fa
         scenario_name: 场景名（错误消息定位用）。
         step: 场景表中的一个 step 字典（字段约定见 harness/cases.py）。
         events: 单轮对话收集到的 AgentEvent 流。
-        relaxed: 真实模型模式——只断言运行时契约（工具名出现在业务序列/
+        relaxed: 真实模型模式——只断言执行契约（工具名出现在业务序列/
             结果语义/重试/权限/收尾），跳过决策契约（load_skill 前置、
             首工具次序、入参子集精确匹配）。剧本回归模式 relaxed=False，
             两类契约全查。

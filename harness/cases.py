@@ -21,7 +21,7 @@ scenario 字段约定：
     mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
     role      会话角色（manager/operator/customer_service/finance，缺省 manager）
     fault     Mock Commerce API 确定性故障脚本名（见 mock_commerce/fault_injection.py）
-    real      True = 运行时契约场景（真实模型模式可跑：断言的是运行时对任意
+    real      True = 执行契约场景（真实模型模式可跑：断言的是平台对任意
               决策的守门/重试/幂等/收尾行为，与模型选了哪个工具的具体参数无关）
 """
 
@@ -279,5 +279,5 @@ def case_fingerprint(scenario: dict[str, Any]) -> str:
 
 
 def real_model_scenarios() -> list[dict[str, Any]]:
-    """运行时契约场景子集（真实模型模式默认只跑这些）。"""
+    """执行契约场景子集（真实模型模式默认只跑这些）。"""
     return [s for s in SCENARIOS if s.get("real")]

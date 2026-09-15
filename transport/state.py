@@ -19,7 +19,7 @@ from session.storage import save_session, load_session_full
 from agent_backend.protocol import BackendConfig
 from agent_backend.factory import create_backend
 from agent_backend.provider_registry import DEFAULT_PROVIDER_REGISTRY
-from agent_runtime.base_agent import BaseAgent
+from agent_core.base_agent import BaseAgent
 from sources import builtin_tools
 from integrations.mcp.client_pool import McpClientPool
 from permission.pre_tool_use import PreToolUsePipeline
@@ -178,7 +178,7 @@ async def broadcast_mode(session_id: str, mode: str) -> None:
 def apply_mode_change(session: Session, mode: str) -> str:
     """更新会话权限模式并持久化（不广播，由调用方决定要不要发）。
 
-    session.permission_mode 由运行时管线实时读取（mode_gate_rule 用 callable 闭包），
+    session.permission_mode 由权限管线实时读取（mode_gate_rule 用 callable 闭包），
     因此同一条 WS 连接上切换即时生效，无需重建 agent。
     """
     validate_mode(mode)

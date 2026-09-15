@@ -1,7 +1,7 @@
 """测试 AbortHandler — 中断和重置。"""
 
 import pytest
-from agent_runtime.abort_handler import AbortHandler
+from agent_core.abort_handler import AbortHandler
 
 
 def test_abort_handler_initial():

@@ -1,5 +1,5 @@
 """
-Commerce 领域结果类型 — Adapter 将外部 API 响应转换为 Runtime 可理解的领域结果。
+Commerce 领域结果类型 — Provider 将 Adapter 归一化后的外部响应转换为统一的领域结果。
 
 不暴露 HTTP Response，只返回领域类型。
 """

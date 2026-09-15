@@ -33,7 +33,7 @@ from harness.hooks import get_after_hook, get_setup_hook
 
 @pytest.fixture(autouse=True)
 def e2e_isolate(tmp_path, monkeypatch):
-    """隔离所有运行时目录与注册表缓存，避免污染 data/ 与跨用例状态。"""
+    """隔离所有执行目录与注册表缓存，避免污染 data/ 与跨用例状态。"""
     monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path / "sessions"))
     monkeypatch.setenv("CHANNEL_CONFIG_FILE", str(tmp_path / "channels.json"))
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
@@ -52,11 +52,11 @@ def e2e_isolate(tmp_path, monkeypatch):
     _cr.DEFAULT_CHANNEL_REGISTRY._clients.clear()
 
     # 记忆 store 重置到隔离目录（模块级单例需重新注入）
-    from agent_runtime import memory_store as _ms
+    from agent_core import memory_store as _ms
 
     fresh = _ms.MemoryStore(root=str(tmp_path / "memory"))
-    monkeypatch.setattr("agent_runtime.base_agent.DEFAULT_MEMORY_STORE", fresh)
-    monkeypatch.setattr("agent_runtime.memory_store.DEFAULT_MEMORY_STORE", fresh)
+    monkeypatch.setattr("agent_core.base_agent.DEFAULT_MEMORY_STORE", fresh)
+    monkeypatch.setattr("agent_core.memory_store.DEFAULT_MEMORY_STORE", fresh)
 
     # 后端 provider 注册表指向 mock（离线剧本后端）
     import agent_backend.provider_registry as _pr

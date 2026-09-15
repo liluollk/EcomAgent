@@ -46,7 +46,7 @@ class Runner:
     backend="mock"（缺省）：剧本后端，回归验收模式——两类契约全查，
       结果与 baseline.json 指纹对比，退化即非零退出。
     backend="openai"/"anthropic" + provider=<providers.json 中的名字>：
-      真实模型模式——只跑运行时契约场景（relaxed 断言），独立报告，
+      真实模型模式——只跑执行契约场景（relaxed 断言），独立报告，
       不读写回归基线（真实模型有 run 间方差，二值基线语义不适用）。
     """
 
@@ -109,10 +109,10 @@ class Runner:
         _cr._store._channels = None
         _cr.DEFAULT_CHANNEL_REGISTRY._clients.clear()
 
-        from agent_runtime import memory_store as _ms
+        from agent_core import memory_store as _ms
 
         fresh = _ms.MemoryStore(root=str(env_dir / "memory"))
-        import agent_runtime.base_agent as _ba
+        import agent_core.base_agent as _ba
 
         _ba.DEFAULT_MEMORY_STORE = fresh
         _ms.DEFAULT_MEMORY_STORE = fresh
@@ -149,7 +149,7 @@ class Runner:
                         final_status = "passed"
                         break
                     if status == "not_exercised":
-                        # 模型未触发期望业务工具：非运行时失败，内层不重试
+                        # 模型未触发期望业务工具：非执行失败，内层不重试
                         # （同一模型同场景重复跑大概率同样不触发；方差由外层 --repeat 吸收）
                         failures.append(detail)
                         final_status = "not_exercised"

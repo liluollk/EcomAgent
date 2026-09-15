@@ -5,7 +5,7 @@ import time
 
 from agent_backend.protocol import AgentCapabilities, BackendConfig, BackendProvider
 from agent_backend.mock_backend import MockAgent  # noqa: F401 (保留对齐)
-from agent_runtime.base_agent import BaseAgent
+from agent_core.base_agent import BaseAgent
 from events.agent_event import ToolStartEvent, TextDeltaEvent
 from permission.pre_tool_use import PreToolUseAction, PreToolUsePipeline, PreToolUseResult
 from session.session import Session, PermissionMode

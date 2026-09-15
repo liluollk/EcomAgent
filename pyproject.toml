@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ecomagent"
 version = "0.1.0"
-description = "电商运营 Agent Runtime — 多后端可扩展 Agent 执行引擎"
+description = "面向电商运营的 Agent 平台 — 多后端可扩展执行编排"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -33,7 +33,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["agent_backend*", "agent_runtime*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*", "execution*", "integrations*", "mock_commerce*", "harness*"]
+include = ["agent_backend*", "agent_core*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*", "execution*", "integrations*", "mock_commerce*", "harness*"]
 exclude = ["tests*"]
 
 [tool.ruff]
