@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from harness.cases import SCENARIOS, real_model_scenarios
-from harness.metrics import summarize
+from harness.metrics import summarize, summarize_real_rows
 from harness.recorder import Recorder
 from harness.report import compare_baseline, load_baseline, render_report, save_baseline
 from harness.runner import Runner
@@ -96,7 +96,9 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
             total_usage[k] += usage[k]
         rows.append({"name": scenario["name"], "passes": passes, "not_exercised": not_exercised,
                      "triggers": triggers, "verdict": verdict, "mean_duration_s": round(mean_dur, 2),
-                     "usage": usage, "last_fail": last_fail})
+                     "usage": usage, "last_fail": last_fail,
+                     "kind": scenario.get("kind", "gold"),
+                     "metrics": list(scenario.get("metrics", []))})
         mark = verdict if verdict == "PASS" else ("NOT-EX" if verdict == "NOT-EXERCISED" else "FAIL")
         print(f"  [{idx}/{len(scenarios)}] {scenario['name']:34s} {passes}/{n} "
               f"{mark:9s} avg {mean_dur:.1f}s  "
@@ -106,12 +108,33 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
     triggered_runs = sum(r["triggers"] for r in rows)
     passed_runs = sum(r["passes"] for r in rows)
     trigger_rate = round(passed_runs / triggered_runs, 4) if triggered_runs else 0.0
+    evaluation_summary = summarize_real_rows(rows)
     report = {"mode": "real_model", "backend": args.backend, "provider": args.provider,
               "repeat": n, "scenarios": rows, "total_usage": total_usage,
               "stable": stable, "not_exercised": not_ex, "flaky": flaky,
-              "trigger_pass_rate": trigger_rate}
-    recorder.write_report(run_id, "\n".join(
-        f"{r['name']}: {r['passes']}/{n} [{r['verdict']}]" for r in rows), report)
+              "trigger_pass_rate": trigger_rate, **evaluation_summary}
+    report_lines = [
+        f"真实模型评测  backend={args.backend}  provider={args.provider or '(激活供应商)'}  repeat={n}",
+        "按类型:",
+    ]
+    for kind, counts in evaluation_summary["by_kind"].items():
+        report_lines.append(
+            f"  {kind}: scenarios={counts['scenarios']} runs={counts['runs']} "
+            f"triggered={counts['triggered']} passed={counts['passes']} "
+            f"not_exercised={counts['not_exercised']} safe_no_op={counts['safe_no_op']}"
+        )
+    report_lines.append("领域指标:")
+    for metric, counts in evaluation_summary["metric_hits"].items():
+        report_lines.append(
+            f"  {metric}: runs={counts['runs']} triggered={counts['triggered']} "
+            f"passed={counts['passed']} not_exercised={counts['not_exercised']} "
+            f"safe_no_op={counts['safe_no_op']}"
+        )
+    report_lines.extend([
+        "场景明细:",
+        *(f"  {r['name']}: {r['passes']}/{n} [{r['verdict']}]" for r in rows),
+    ])
+    recorder.write_report(run_id, "\n".join(report_lines), report)
     print(f"\n真实模型评测完成：稳定通过 {stable}/{len(scenarios)}，"
           f"not-exercised {not_ex}，FLAKY/FAIL {flaky}"
           f"   契约触发通过率 {trigger_rate:.1%}"
@@ -129,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         for s in SCENARIOS:
-            print(f"  {s['name']:32s} steps={len(s['steps'])}{'  [real]' if s.get('real') else ''}")
+            metrics = ",".join(s.get("metrics", [])) or "-"
+            print(f"  {s['name']:32s} kind={s.get('kind', 'gold'):11s} "
+                  f"metrics={metrics} steps={len(s['steps'])}"
+                  f"{'  [real]' if s.get('real') else ''}")
         return 0
 
     real_mode = args.backend != "mock"

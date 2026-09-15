@@ -102,6 +102,10 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 21 条端到端场景是一张数据表（输入 → 期望轨迹：工具序列 / 参数 / 失败语义 / 尝试次数 / 权限事件），Runner 驱动完整链路（内置工具 + 真实 MCP 子进程 + 剧本后端 + 故障脚本），逐条断言后与 **baseline 场景指纹对比，通过率退化即非零退出**——行为回归在 CI 语义下可拦截。覆盖业务链路、权限（成本拦截 / 只读拦写 / ASK 批准与拒绝）、记忆与技能、以及全部故障场景（429 重试成功 / 超时重试幂等防重复副作用 / 持续 500 优雅失败 / 畸形响应拦截 / 部分工具失败不拖垮会话）。它与 pytest 是两个概念：**pytest 是代码回归网，Harness 是行为验收外壳**，评测集同时是 pytest 的夹具数据，单一事实源。
 
+为避免把不同性质的场景混成一个通过率，场景额外标注四类元数据：`gold`（正常业务结果）、`guarded`（权限 / 模式 / 成本 / 审批守门）、`resilience`（重试 / 超时 / 幂等 / 异常收尾）和 `ambiguous`（断言允许多种合理路径）。每条场景还声明一个或多个领域指标，例如 `tool_routing`、`action_safety`、`retry_contract`、`idempotent_replay`；这些标签只参与报告分类，不进入步骤断言，也不改变 baseline 指纹。
+
+报告同时输出整体结果、按类型汇总和按领域指标汇总。真实模型模式继续保留 `PASS` / `NOT-EXERCISED` / `FLAKY/FAIL` 三态：模型未触发期望工具不计为执行失败；如果 guarded 场景重复运行始终未触发，则单独记为 `safe_no_op`，表示“安全地没有发生动作”，而不是把它误报为已验证的权限拦截。
+
 </details>
 
 ---
@@ -182,7 +186,8 @@ cd frontend && npm run build
 ```bash
 python -m pytest tests/ -q     # 394 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条行为契约场景 + 基线验收，退化即非零退出
-python -m harness --backend openai --provider deepseek --repeat 3   # 真实模型评测（18 条执行契约场景 ×3，三态统计）
+python -m harness --list                                                # 查看场景类型与领域指标
+python -m harness --backend openai --provider deepseek --repeat 3        # 真实模型评测（18 条执行契约场景 ×3，三态统计）
 ```
 
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。
