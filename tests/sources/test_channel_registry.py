@@ -160,6 +160,22 @@ def test_cache_key_includes_platform(registry):
     assert c1 is not c2
 
 
+def test_drop_client_closes_async_client_without_running_loop(registry):
+    """同步配置变更也必须正确关闭旧的异步 HTTP client。"""
+    class FakeClient:
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    client = FakeClient()
+    registry._clients["pdd"] = (("test",), client)
+
+    registry._drop_client("pdd")
+
+    assert client.closed is True
+
+
 def test_executor_for_dispatches_by_platform(registry):
     from integrations.commerce.adapter import MockAdapter, TaobaoAdapter, JdAdapter
 

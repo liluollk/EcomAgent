@@ -267,12 +267,15 @@ class ChannelRegistry:
     def _drop_client(self, name: str) -> None:
         old = self._clients.pop(name, None)
         if old is not None:
-            try:
-                import asyncio
+            import asyncio
 
-                asyncio.create_task(old[1].aclose())
+            try:
+                loop = asyncio.get_running_loop()
             except RuntimeError:
-                pass
+                # 配置更新通常是同步调用；没有运行中的 loop 时直接完成异步关闭。
+                asyncio.run(old[1].aclose())
+            else:
+                loop.create_task(old[1].aclose())
 
     @staticmethod
     def _masked(cfg: dict[str, Any]) -> dict[str, Any]:
