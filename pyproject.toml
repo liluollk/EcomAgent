@@ -29,8 +29,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+    "ignore:.*import python_multipart.*:PendingDeprecationWarning:starlette.formparsers",
+]
 
 [tool.setuptools.packages.find]
 include = ["agent_backend*", "agent_core*", "transport*", "session*", "events*", "permission*", "sources*", "mocks*", "execution*", "integrations*", "mock_commerce*", "harness*"]
