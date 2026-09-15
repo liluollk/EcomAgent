@@ -57,7 +57,11 @@ async def inventory(channel: str, sku: str, x_api_key: str | None = Header(None)
         return ok_response({"unexpected_field": True, "stock": "N/A"})
     check_channel(channel)
     # 未知 SKU → 空库存行（优雅降级契约）；已知 SKU 返回渠道库存数据
-    row = dict(INVENTORY.get(channel, {})) if sku in KNOWN_SKUS else {}
+    row = (
+        {key: value for key, value in INVENTORY.get(channel, {}).items() if key != "cost_price"}
+        if sku in KNOWN_SKUS
+        else {}
+    )
     await apply_fault_post()
     return ok_response({"channel": channel, "sku": sku, **row})
 

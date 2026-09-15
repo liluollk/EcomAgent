@@ -11,11 +11,18 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from session.session import Session, PermissionMode
 from session.workspace import Workspace
 from session.storage import save_session, load_session_full
+from session.workspace_store import (
+    load_workspace_record,
+    load_workspace_records,
+    normalize_rules,
+    save_workspace_record,
+)
 from agent_backend.protocol import BackendConfig
 from agent_backend.factory import create_backend
 from agent_backend.provider_registry import DEFAULT_PROVIDER_REGISTRY
@@ -25,6 +32,7 @@ from integrations.mcp.client_pool import McpClientPool
 from permission.pre_tool_use import PreToolUsePipeline
 from permission.rule_engine import mode_gate_rule, workspace_rules_rule
 from permission.rbac import role_gate_rule
+from integrations.commerce.cost_provider import get_cost_provider
 
 # ---------------------------------------------------------------------------
 # 全局 MCP 客户端池 & 生命周期
@@ -106,6 +114,48 @@ def _default_workspace() -> Workspace:
     return _get_workspace_or_create("default")
 
 
+def _workspace_from_record(record: dict) -> Workspace:
+    created_at = record.get("created_at")
+    try:
+        parsed_created_at = datetime.fromisoformat(created_at) if created_at else None
+    except (TypeError, ValueError):
+        parsed_created_at = None
+    try:
+        rules = normalize_rules(record.get("rules"), default=True)
+    except ValueError:
+        # 磁盘配置可能来自旧版本或手工编辑；未知规则不能静默关闭成本保护。
+        rules = normalize_rules(None, default=True)
+    return Workspace(
+        workspace_id=str(record["workspace_id"]),
+        name=str(record.get("name") or record["workspace_id"]),
+        sources=[str(item) for item in record.get("sources", []) if isinstance(item, str)],
+        rules=rules,
+        credentials=[str(item) for item in record.get("credentials", []) if isinstance(item, str)],
+        created_at=parsed_created_at or datetime.now(timezone.utc),
+        metadata={str(k): str(v) for k, v in (record.get("metadata") or {}).items()},
+    )
+
+
+def _workspace_record(workspace: Workspace) -> dict:
+    return {
+        "workspace_id": workspace.workspace_id,
+        "name": workspace.name,
+        "sources": list(workspace.sources),
+        "rules": [dict(rule) for rule in workspace.rules],
+        "credentials": list(workspace.credentials),
+        "created_at": workspace.created_at.isoformat(),
+        "metadata": dict(workspace.metadata),
+    }
+
+
+def _restore_workspaces_from_disk() -> None:
+    """将磁盘上的 Workspace 配置恢复到内存注册表。"""
+    for record in load_workspace_records():
+        workspace_id = str(record.get("workspace_id"))
+        if workspace_id and workspace_id not in workspaces:
+            workspaces[workspace_id] = _workspace_from_record(record)
+
+
 def _get_workspace_or_create(workspace_id: str) -> Workspace:
     """按 id 获取工作空间，不存在则惰性创建（多品牌隔离的注册表入口）。
 
@@ -116,12 +166,17 @@ def _get_workspace_or_create(workspace_id: str) -> Workspace:
     ws = workspaces.get(workspace_id)
     if ws is not None:
         return ws
+    stored = load_workspace_record(workspace_id)
+    if stored is not None:
+        ws = _workspace_from_record(stored)
+        workspaces[workspace_id] = ws
+        return ws
     if workspace_id == "default":
         ws = Workspace(
             workspace_id="default",
             name="OceanBreeze",
             metadata={"brand": "OceanBreeze"},
-            rules=[{"type": "price_above_cost"}],
+            rules=[{"type": "price_above_cost", "enabled": True}],
             credentials=["taobao_oauth", "jd_oauth", "douyin_oauth"],
         )
     else:
@@ -129,9 +184,10 @@ def _get_workspace_or_create(workspace_id: str) -> Workspace:
             workspace_id=workspace_id,
             name=workspace_id,
             metadata={"brand": workspace_id},
-            rules=[{"type": "price_above_cost"}],
+            rules=[{"type": "price_above_cost", "enabled": True}],
         )
     workspaces[workspace_id] = ws
+    save_workspace_record(_workspace_record(ws))
     return ws
 
 
@@ -280,12 +336,9 @@ def _build_backend_config() -> BackendConfig:
 def _platform_cost_lookup(channel, sku):
     """平台成本真相访问器：成本保护由平台数据决定，不由模型决定。
 
-    mock 平台进程内同步读；真实平台对应一次异步查询/缓存（回调接口不变，
-    由装配层按渠道 platform 字段接线）。未知渠道/SKU 返回 None → 规则回退。
+    当前实现由 MockCostProvider 提供；未来替换提供方时规则层接口不变。
     """
-    from mock_commerce.store import get_cost_price
-
-    return get_cost_price(channel, sku)
+    return get_cost_provider().get_cost_price(channel, sku)
 
 
 def _build_agent(session: Session) -> BaseAgent:
@@ -297,9 +350,16 @@ def _build_agent(session: Session) -> BaseAgent:
     # 模式以 callable 传入：每次工具调用实时读取 session.permission_mode，
     # 使同一条 WS 连接上的模式切换即时生效（不需要重建 agent / 管线）。
     pipeline = PreToolUsePipeline()
-    pipeline.add_checker(role_gate_rule(session.user["role"]))
+    tool_policies = {**mcp_pool.get_all_tool_policies(), **builtin_tools.get_tool_policies()}
+    policy_lookup = lambda tool_name: tool_policies.get(tool_name)
+    pipeline.add_checker(role_gate_rule(session.user["role"], policy_lookup=policy_lookup))
     pipeline.add_checker(workspace_rules_rule(session.workspace.rules, cost_lookup=_platform_cost_lookup))
-    pipeline.add_checker(mode_gate_rule(lambda: session.permission_mode.name))
+    pipeline.add_checker(
+        mode_gate_rule(
+            lambda: session.permission_mode.name,
+            policy_lookup=policy_lookup,
+        )
+    )
     agent.set_permission_pipeline(pipeline)
 
     # handler 合并：内置平台 API 工具优先，MCP 外部工具补充；

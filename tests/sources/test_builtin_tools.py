@@ -66,3 +66,10 @@ def test_skill_creator_builtin_in_menu():
     skill = reg.get("skill_creator")
     assert skill is not None and skill.builtin
     assert "save_skill" in skill.body
+
+
+def test_query_inventory_does_not_expose_cost_price():
+    result = _run(builtin_tools.query_inventory("taobao", "SKU-001"))
+
+    assert "库存 1523 件" in result
+    assert "成本价" not in result

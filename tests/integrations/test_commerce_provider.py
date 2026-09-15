@@ -1,6 +1,7 @@
 """HttpCommerceProvider 测试 — 领域结果映射（经 ASGI 真实信封语义）。"""
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -19,6 +20,11 @@ def test_query_inventory_domain_result():
     assert r.stock == 1523
     assert r.name.startswith("海洋")
     assert r.channel == "taobao"
+    assert "cost_price" not in r.extra
+
+
+def test_update_price_provider_does_not_accept_caller_cost_price():
+    assert "cost_price" not in inspect.signature(get_commerce_provider("taobao").update_price).parameters
 
 
 def test_unknown_sku_graceful_empty_row():

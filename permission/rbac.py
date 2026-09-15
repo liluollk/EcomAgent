@@ -2,7 +2,7 @@
 RBAC — 基于角色的访问控制（身份门）。
 
 多角色场景：电商运营团队的 store owner / operator / customer_service / finance
-各自持有不同写权限；读操作（query_/get_/list_/search_ 前缀）对所有角色开放。
+各自持有不同写权限；只有显式注册为 read 的工具对所有角色开放。
 
 身份门注册为 PreToolUse 管线第一位检查器：先校验“该角色是否有权执行此工具”，
 再交给模式门 / 业务规则 / ASK 继续做行为合规判断。职责分离：
@@ -16,9 +16,10 @@ RBAC — 基于角色的访问控制（身份门）。
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 from .pre_tool_use import PreToolUseResult, PreToolUseAction
+from .tool_policy import ToolPolicy, get_builtin_tool_policies
 
 # ---------------------------------------------------------------------------
 # 角色定义（真实电商运营场景）
@@ -46,8 +47,6 @@ ROLE_LABELS = {
 
 DEFAULT_ROLE = OPERATOR
 
-_READ_PREFIXES = ("query_", "get_", "list_", "search_")
-
 # 角色 → 允许调用的写工具集合（读工具对所有角色开放）。
 # 批次 4 扩展：商品上下架（product_shelf）与售后工单（service_ticket）入 ACL：
 #   manager 店长全权（改价 / 促销 / 上下架 / 工单 / 创建技能）；
@@ -67,20 +66,30 @@ def is_valid_role(role: str) -> bool:
     return role in ALL_ROLES
 
 
-def can_role_write(role: str, tool_name: str) -> bool:
-    """角色是否被授权调用指定写工具（读工具视为全放开）。
+def _default_policy_lookup(tool_name: str) -> Optional[ToolPolicy]:
+    return get_builtin_tool_policies().get(tool_name)
+
+
+def can_role_write(
+    role: str,
+    tool_name: str,
+    policy_lookup: Optional[Callable[[str], Optional[ToolPolicy]]] = None,
+) -> bool:
+    """角色是否被授权调用指定工具，策略缺失时安全拒绝。
 
     Args:
         role: 角色名。
         tool_name: 工具名。
 
     Returns:
-        bool: 读操作恒为 True；写操作查询 ACL（未知角色按只读处理）。
+        bool: 显式 read 操作恒为 True；write 操作查询 ACL。
     """
-    if tool_name.startswith(_READ_PREFIXES):
-        return True
-    # load_skill 是元工具（仅加载技能上下文，不产生外部副作用），所有角色可用
-    if tool_name == "load_skill":
+    if role not in ALL_ROLES:
+        return False
+    policy = (policy_lookup or _default_policy_lookup)(tool_name)
+    if policy is None:
+        return False
+    if str(policy.get("side_effect", "")).lower() == "read":
         return True
     allowed = ROLE_WRITE_ACL.get(role)
     if allowed is None:
@@ -89,7 +98,10 @@ def can_role_write(role: str, tool_name: str) -> bool:
     return tool_name in allowed
 
 
-def role_gate_rule(role: str) -> Callable:
+def role_gate_rule(
+    role: str,
+    policy_lookup: Optional[Callable[[str], Optional[ToolPolicy]]] = None,
+) -> Callable:
     """角色门规则工厂 — 将角色 ACL 接入 PreToolUse 管线。
 
     放在管线第一位：身份门最先执行，不通过直接 BLOCK，
@@ -102,8 +114,23 @@ def role_gate_rule(role: str) -> Callable:
         Callable: 检查器函数 (tool_name, tool_input) -> PreToolUseResult。
     """
 
+    lookup = policy_lookup or _default_policy_lookup
+
     def _gate(tool_name: str, tool_input: dict) -> PreToolUseResult:
-        if can_role_write(role, tool_name):
+        if role not in ALL_ROLES:
+            return PreToolUseResult(
+                action=PreToolUseAction.BLOCK,
+                reason=f"角色 {role} 非法，默认拒绝执行 {tool_name}",
+            )
+        policy = lookup(tool_name)
+        if policy is None:
+            return PreToolUseResult(
+                action=PreToolUseAction.BLOCK,
+                reason=f"工具 {tool_name} 未注册安全策略，默认拒绝执行",
+            )
+        if can_role_write(role, tool_name, lookup):
+            return PreToolUseResult(action=PreToolUseAction.ALLOW)
+        if str(policy.get("side_effect", "")).lower() == "read":
             return PreToolUseResult(action=PreToolUseAction.ALLOW)
         return PreToolUseResult(
             action=PreToolUseAction.BLOCK,

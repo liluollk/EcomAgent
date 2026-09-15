@@ -22,13 +22,21 @@ def test_role_set_and_default():
     assert not is_valid_role("admin")  # 管理员概念不存在
 
 
-def test_read_tools_open_to_all_roles():
-    """读工具（query_/get_/list_/search_ 前缀）对所有角色放行。"""
+def test_explicit_read_tools_open_to_all_roles():
+    """注册为 read 的工具对所有角色放行，名称前缀本身不授予权限。"""
+    policies = {
+        "query_inventory": {"side_effect": "read", "requires_approval": False},
+    }
     for role in ALL_ROLES:
-        for tool in ("query_inventory", "get_order", "list_products", "search_products"):
-            assert can_role_write(role, tool), f"{role} 应可读 {tool}"
-            gate = role_gate_rule(role)
-            assert gate(tool, {}).action == PreToolUseAction.ALLOW
+        assert can_role_write(role, "query_inventory", policies.get)
+        gate = role_gate_rule(role, policies.get)
+        assert gate("query_inventory", {}).action == PreToolUseAction.ALLOW
+
+
+def test_unknown_prefixed_tool_is_not_read_by_name():
+    for role in ALL_ROLES:
+        assert not can_role_write(role, "query_unknown", lambda _name: None)
+        assert role_gate_rule(role, lambda _name: None)("get_unknown", {}).action == PreToolUseAction.BLOCK
 
 
 def test_manager_full_write():
@@ -62,10 +70,10 @@ def test_finance_read_only():
     assert gate("query_inventory", {}).action == PreToolUseAction.ALLOW
 
 
-def test_unknown_role_read_only_safe_default():
-    """未知角色按只读处理：读放行、写拦截。"""
+def test_unknown_role_safe_default():
+    """未知角色和未知工具均安全默认拒绝。"""
     assert not can_role_write("admin", "update_price")
-    assert can_role_write("admin", "query_inventory")
+    assert not can_role_write("admin", "query_inventory", lambda _name: None)
     gate = role_gate_rule("admin")
     assert gate("update_price", {}).action == PreToolUseAction.BLOCK
-    assert gate("query_inventory", {}).action == PreToolUseAction.ALLOW
+    assert gate("query_inventory", {}).action == PreToolUseAction.BLOCK

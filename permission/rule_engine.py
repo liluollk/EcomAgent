@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from .pre_tool_use import PreToolUseResult, PreToolUseAction
+from .tool_policy import get_builtin_tool_policies
 
 
 def price_above_cost_rule(
@@ -20,7 +21,8 @@ def price_above_cost_rule(
     拦截 update_price 工具调用中 new_price 低于 cost_price 的情况。
     成本价来源：生产装配经 workspace_rules_rule 注入平台真相 cost_lookup，
     覆盖 tool_input["cost_price"]（成本保护由平台数据决定，不由模型决定）；
-    无注入时回退 tool_input 自带 cost_price（直接调用方 / 单测语义）。
+    无注入时保留直接调用方的低层规则语义；平台装配时必须注入
+    CostProvider，不能让模型参数作为平台成本真相。
 
     Args:
         tool_name: 工具名称。
@@ -43,26 +45,42 @@ def price_above_cost_rule(
     return PreToolUseResult(action=PreToolUseAction.ALLOW)
 
 
-def mode_gate_rule(mode):
+def mode_gate_rule(
+    mode,
+    policy_lookup: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
+):
     """模式门规则工厂 — 将会话权限模式接入 PreToolUse 管线。
 
     对应 pre_tool_use 文档中描述的模式语义：
-    - READONLY: 非只读工具（非 query_/get_/list_/search_ 前缀）自动 BLOCK。
-    - ASK: 非只读工具触发 ASK，挂起等待用户确认。
+    - READONLY: 写工具自动 BLOCK，显式只读工具 ALLOW。
+    - ASK: 需要审批的工具触发 ASK，挂起等待用户确认。
     - EXECUTE: 全部放行（除非被其他业务规则拦截）。
 
     Args:
         mode: 权限模式名（READONLY / ASK / EXECUTE），或返回模式名的可调用对象。
             传 callable 时每次调用实时取值，实现「同一条 WS 连接内切换即时生效」。
+        policy_lookup: 按工具名返回安全策略的函数。未找到策略时拒绝执行，
+            从而保证未知工具不能通过 EXECUTE 或命名约定绕过治理。
 
     Returns:
         Callable: 检查器函数，可注册到 PreToolUsePipeline。
     """
 
+    lookup = policy_lookup or get_builtin_tool_policies().get
+
     def _gate(tool_name: str, tool_input: dict[str, Any]) -> PreToolUseResult:
         current = mode() if callable(mode) else mode
-        # load_skill 是元工具（仅加载技能上下文，不产生外部副作用），视为只读放行
-        is_read = tool_name == "load_skill" or tool_name.startswith(("query_", "get_", "list_", "search_"))
+        policy = lookup(tool_name)
+        if policy is None:
+            return PreToolUseResult(
+                action=PreToolUseAction.BLOCK,
+                reason=f"工具 {tool_name} 未注册安全策略，默认拒绝执行",
+            )
+        policy = policy or {}
+        side_effect = str(policy.get("side_effect", "write")).lower()
+        requires_approval = bool(policy.get("requires_approval", side_effect != "read"))
+        is_read = side_effect == "read" and not requires_approval
+
         if is_read or current == "EXECUTE":
             return PreToolUseResult(action=PreToolUseAction.ALLOW)
         if current == "READONLY":
@@ -93,11 +111,13 @@ def workspace_rules_rule(rules: list[dict], cost_lookup: Optional[Callable[[Any,
 
     每项声明 {"type": "price_above_cost", ...} 分派到实现函数；
     任一规则返回非 ALLOW 即短路（与管线整体短路语义一致）；
-    未知规则类型与空规则列表视为全放行。
+    未知规则类型由 Workspace API 在配置入口拒绝；执行过程中对未知声明跳过，
+    以兼容直接构造的历史 Workspace 对象。
 
     cost_lookup（可选）：平台成本真相访问器 (channel, sku) -> cost_price | None。
     提供时，price_above_cost 规则以平台数据覆盖调用方传入的 cost_price——
-    成本保护由平台真相决定，不由模型决定；返回 None 则回退 tool_input 自带值。
+    成本保护由平台真相决定，不由模型决定；返回 None 或抛错都会失败关闭。
+    未注入时自动使用默认 CostProvider，绝不回退到模型传入的 cost_price。
 
     Args:
         rules: Workspace.rules 列表（业务规则声明）。
@@ -107,17 +127,34 @@ def workspace_rules_rule(rules: list[dict], cost_lookup: Optional[Callable[[Any,
         Callable: 检查器函数 (tool_name, tool_input) -> PreToolUseResult。
     """
 
+    if cost_lookup is None:
+        from integrations.commerce.cost_provider import get_cost_provider
+
+        cost_lookup = get_cost_provider().get_cost_price
+
     def _gate(tool_name: str, tool_input: dict[str, Any]) -> PreToolUseResult:
         for rule in rules or []:
             rtype = rule.get("type", "")
+            if rule.get("enabled") is False:
+                continue
             impl = _RULE_DISPATCH.get(rtype)
             if impl is None:
                 continue
             effective = tool_input
-            if rtype == "price_above_cost" and cost_lookup is not None and tool_name == "update_price":
-                platform_cost = cost_lookup(tool_input.get("channel"), tool_input.get("sku"))
-                if platform_cost is not None:
-                    effective = {**tool_input, "cost_price": platform_cost}
+            if rtype == "price_above_cost" and tool_name == "update_price":
+                try:
+                    platform_cost = cost_lookup(tool_input.get("channel"), tool_input.get("sku"))
+                except Exception as exc:
+                    return PreToolUseResult(
+                        action=PreToolUseAction.BLOCK,
+                        reason=f"无法获取平台成本价，已拦截调价：{exc}",
+                    )
+                if platform_cost is None:
+                    return PreToolUseResult(
+                        action=PreToolUseAction.BLOCK,
+                        reason="无法确认平台成本价，已拦截调价",
+                    )
+                effective = {**tool_input, "cost_price": platform_cost}
             result = impl(tool_name, effective)
             if result.action != PreToolUseAction.ALLOW:
                 return result

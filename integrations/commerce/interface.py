@@ -43,7 +43,6 @@ class CommerceProvider(Protocol):
         sku_id: str,
         price: Decimal,
         channel: str = "",
-        cost_price: Decimal = Decimal("0"),
         idempotency_key: str | None = None,
     ) -> UpdatePriceResult:
         """更新商品价格。"""

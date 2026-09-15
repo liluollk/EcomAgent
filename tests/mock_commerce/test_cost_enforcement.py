@@ -28,13 +28,13 @@ def _client():
     )
 
 
-def test_inventory_exposes_cost_price():
-    """库存结果携带成本价（真实模型的数据面）。"""
+def test_inventory_does_not_expose_cost_price():
+    """普通库存接口不返回内部成本价。"""
 
     async def _run():
         async with _client() as c:
             r = await c.get("/v1/taobao/inventory", params={"sku": "SKU-001"})
-            assert r.json()["data"]["cost_price"] == 59.0
+            assert "cost_price" not in r.json()["data"]
 
     asyncio.run(_run())
 

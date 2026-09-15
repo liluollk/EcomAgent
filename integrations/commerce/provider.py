@@ -92,12 +92,13 @@ class HttpCommerceProvider:
     async def query_inventory(self, sku_id: str, channel: str = "") -> InventoryResult:
         ch = self._ch(channel)
         data = await invoke_operation(ch, "query_inventory", {"sku": sku_id})
+        public_extra = {key: value for key, value in data.items() if key != "cost_price"}
         return InventoryResult(
             sku_id=sku_id,
             name=str(data.get("name", "")),
             stock=int(data.get("stock", 0)),
             channel=ch or "",
-            extra=data,
+            extra=public_extra,
         )
 
     async def update_price(
@@ -105,14 +106,13 @@ class HttpCommerceProvider:
         sku_id: str,
         price: Decimal,
         channel: str = "",
-        cost_price: Decimal = Decimal("0"),
         idempotency_key: str | None = None,
     ) -> UpdatePriceResult:
         ch = self._ch(channel)
         data = await invoke_operation(
             ch,
             "update_price",
-            {"sku": sku_id, "new_price": float(price), "cost_price": float(cost_price)},
+            {"sku": sku_id, "new_price": float(price)},
         )
         return UpdatePriceResult(
             sku_id=sku_id,

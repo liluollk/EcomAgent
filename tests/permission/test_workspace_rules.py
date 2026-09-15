@@ -6,7 +6,10 @@ from permission.pre_tool_use import PreToolUseAction
 
 def test_price_above_cost_rule_dispatched():
     """默认规则 {type: price_above_cost} 拦截低于成本价的改价。"""
-    gate = workspace_rules_rule([{"type": "price_above_cost"}])
+    gate = workspace_rules_rule(
+        [{"type": "price_above_cost"}],
+        cost_lookup=lambda _channel, _sku: 50,
+    )
     result = gate("update_price", {"new_price": 30, "cost_price": 50})
     assert result.action == PreToolUseAction.BLOCK
     assert "低于成本价" in result.reason
@@ -61,13 +64,34 @@ def test_cost_lookup_allows_above_platform_cost():
     assert gate("update_price", {"channel": "taobao", "sku": "SKU-001", "new_price": 89}).action == PreToolUseAction.ALLOW
 
 
-def test_cost_lookup_none_falls_back_to_model_input():
-    """lookup 返回 None（未知 SKU/渠道）→ 回退 tool_input 自带 cost_price。"""
+def test_cost_lookup_none_blocks_without_model_fallback():
+    """没有平台成本真相时不能信任模型传入的 cost_price。"""
     gate = workspace_rules_rule(
         [{"type": "price_above_cost"}],
         cost_lookup=lambda ch, sku: None,
     )
-    # 无平台真相，回退模型传的 50 → 30<50 拦截
-    assert gate("update_price", {"new_price": 30, "cost_price": 50}).action == PreToolUseAction.BLOCK
-    # 回退且模型也没传 → cost 0 → 放行
-    assert gate("update_price", {"new_price": 30}).action == PreToolUseAction.ALLOW
+    result = gate("update_price", {"new_price": 30, "cost_price": 1})
+    assert result.action == PreToolUseAction.BLOCK
+    assert "成本价" in result.reason
+
+
+def test_cost_lookup_error_blocks_closed():
+    def fail(_channel, _sku):
+        raise RuntimeError("cost service unavailable")
+
+    result = workspace_rules_rule(
+        [{"type": "price_above_cost"}], cost_lookup=fail
+    )("update_price", {"channel": "taobao", "sku": "SKU-001", "new_price": 100})
+
+    assert result.action == PreToolUseAction.BLOCK
+    assert "成本价" in result.reason
+
+
+def test_workspace_rule_never_uses_model_cost_without_provider():
+    result = workspace_rules_rule([{"type": "price_above_cost"}])(
+        "update_price",
+        {"channel": "unknown", "sku": "SKU-999", "new_price": 10000, "cost_price": 9999},
+    )
+
+    assert result.action == PreToolUseAction.BLOCK
+    assert "成本价" in result.reason

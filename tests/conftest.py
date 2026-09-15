@@ -14,6 +14,10 @@ if str(project_root) not in sys.path:
 
 # 测试进程使用独立持久化目录，避免污染真实数据与跨用例串扰
 os.environ.setdefault("AGENT_STORAGE_DIR", tempfile.mkdtemp(prefix="agent-test-"))
+os.environ.setdefault(
+    "WORKSPACE_CONFIG_FILE",
+    os.path.join(tempfile.mkdtemp(prefix="workspace-test-"), "workspaces.json"),
+)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

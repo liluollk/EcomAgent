@@ -1,14 +1,13 @@
-"""内置平台 API 工具 — 11 个电商运营语义操作（工具三通道之一）。
+"""内置平台 API 工具 — 11 个电商运营语义操作（工具通道之一）。
 
-定位（工具三通道）：
-  1. 内置平台 API 工具（本模块）：电商运营语义操作，handler 经
-     Execution Policy（超时/错误分类重试/幂等键/结果校验）→
-     PlatformAdapter → ChannelRestClient 打到渠道平台（当前 mock 网关，
+定位：电商运营语义操作统一经 CommerceProvider 领域接口执行——
+handler 只做「契约 → 领域方法」的薄转译，返回领域结果而非裸 HTTP：
+  1. 平台能力（本模块 11 个操作）：各 handler 调用 get_commerce_provider()
+     的领域方法，Execution Policy（超时/错误分类重试/幂等键/结果校验）
+     → PlatformAdapter → ChannelRestClient 打到渠道平台（当前 mock 网关，
      真实平台资质到位后换 adapter 实现，工具名与文本模板不变）；
-     关键工具（查库存/改价/上下架）已迁 CommerceProvider 领域接口，
-     返回领域结果而非 HTTP Response；
   2. MCP 外部工具：用户经 mcp_servers.json 配置接入的第三方工具服务；
-  3. 专用工具（如 save_skill）：见 builtin_tools 扩展。
+  3. 元技能（save_skill 等）：不碰平台，见 sources.skill_registry。
 
 与 mocks/mcp_tool_server.py 的旧实现逐字对齐（参数名/默认值/结果文本），
 保证 e2e/harness 断言与前端展示零漂移。handler 契约：**kwargs → str。
@@ -22,7 +21,9 @@ from typing import Any, Callable, Optional
 from execution.policy.timeout import TimeoutError as ToolTimeoutError
 from execution.policy.validation import ValidationError
 from integrations.commerce.client import RestApiError
-from integrations.commerce.provider import get_commerce_provider, invoke_operation
+from integrations.commerce.models import PromotionRequest
+from integrations.commerce.provider import get_commerce_provider
+from permission.tool_policy import ToolPolicy, get_builtin_tool_policies
 
 _ACTION_CN = {"on": "上架", "off": "下架"}
 
@@ -36,25 +37,6 @@ def _format_exec_error(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
         return f"[上游响应异常] {exc.message}"
     return f"[执行异常] {exc}"
-
-
-async def _exec(channel, operation: str, params: dict) -> dict:
-    """执行一次语义操作：Execution Policy 管控的共享执行通道。
-
-    链路：Permission（引擎层已过）→ Execution Policy（超时/重试/幂等/校验）
-    → PlatformAdapter（协议翻译）→ REST Client（单次 HTTP）→ 归一化 dict。
-    平台错误/超时/畸形响应统一归一为 _platform_error 文本（不抛出），
-    让上层 LLM 可理解可解释；尝试次数与耗时由策略层记入事件元数据。
-    channel 为 None 时（平台级操作）使用默认客户端。
-    """
-    from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
-
-    if channel is not None and DEFAULT_CHANNEL_REGISTRY.client_for(channel) is None:
-        return {"_platform_error": f"[平台错误 10002] 渠道不存在: {channel}"}
-    try:
-        return await invoke_operation(channel, operation, params)
-    except (RestApiError, ToolTimeoutError, ValidationError) as e:
-        return {"_platform_error": _format_exec_error(e)}
 
 
 def _dec(value: float) -> Decimal:
@@ -72,9 +54,7 @@ async def query_inventory(channel: str, sku: str) -> str:
         r = await get_commerce_provider(channel).query_inventory(sku)
     except (RestApiError, ToolTimeoutError, ValidationError) as e:
         return _format_exec_error(e)
-    cost = r.extra.get("cost_price")
-    cost_note = f"，成本价 {cost} 元" if cost is not None else ""
-    return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}{cost_note}"
+    return f"渠道 {channel} 商品 {sku} 库存 {r.stock} 件：{r.name}"
 
 
 async def update_price(channel: str, sku: str, new_price: float) -> str:
@@ -92,18 +72,24 @@ async def update_price(channel: str, sku: str, new_price: float) -> str:
 
 
 async def create_promotion(channel: str, sku: str, discount: float, start_time: str, end_time: str) -> str:
-    data = await _exec(channel, "create_promotion", {"sku": sku, "discount": discount, "start_time": start_time, "end_time": end_time})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    replay = "（幂等：重复请求，未重复创建）" if data.get("idempotent_replay") else ""
-    return f"渠道 {channel} 商品 {sku} 已创建 {discount*100}% 折扣促销，时间: {start_time} ~ {end_time}{replay}"
+    try:
+        r = await get_commerce_provider(channel).create_promotion(
+            PromotionRequest(
+                sku_id=sku, discount=discount, start_time=start_time, end_time=end_time, channel=channel
+            )
+        )
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    replay = "（幂等：重复请求，未重复创建）" if r.idempotent_replay else ""
+    return f"渠道 {channel} 商品 {sku} 已创建 {r.discount * 100}% 折扣促销，时间: {r.start_time} ~ {r.end_time}{replay}"
 
 
 async def query_order_status(channel: str, order_id: str) -> str:
-    data = await _exec(channel, "query_order_status", {"order_id": order_id})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return f"渠道 {channel} 订单 {order_id} 状态: {data.get('status', '未知')}"
+    try:
+        r = await get_commerce_provider(channel).query_order_status(order_id)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    return f"渠道 {channel} 订单 {order_id} 状态: {r.status}"
 
 
 async def product_shelf(channel: str, sku: str, action: str) -> str:
@@ -117,54 +103,66 @@ async def product_shelf(channel: str, sku: str, action: str) -> str:
 
 
 async def service_ticket(channel: str, order_id: str, issue: str, priority: str = "normal") -> str:
-    data = await _exec(channel, "service_ticket", {"order_id": order_id, "issue": issue, "priority": priority})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    replay = "（幂等：重复请求，未重复创建）" if data.get("idempotent_replay") else ""
-    return (f"已创建售后工单 {data.get('ticket_id', '')}"
-            f"（{channel} 订单 {order_id}，优先级 {priority}）：{issue}{replay}")
+    try:
+        r = await get_commerce_provider(channel).create_service_ticket(
+            order_id, issue, channel=channel, priority=priority
+        )
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    replay = "（幂等：重复请求，未重复创建）" if r.idempotent_replay else ""
+    return (
+        f"已创建售后工单 {r.ticket_id}"
+        f"（{channel} 订单 {order_id}，优先级 {priority}）：{issue}{replay}"
+    )
 
 
 async def query_order_stats(channel: str, period: str = "近7天") -> str:
-    data = await _exec(channel, "query_order_stats", {"period": period})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return (f"{channel} 渠道 {period} 订单 {data.get('orders', 0)} 单，"
-            f"GMV {data.get('gmv', 0)} 元，客单价 {data.get('avg', 0)} 元")
+    try:
+        r = await get_commerce_provider(channel).query_order_stats(period=period)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    return (
+        f"{channel} 渠道 {r.period} 订单 {r.orders} 单，"
+        f"GMV {r.gmv} 元，客单价 {r.avg} 元"
+    )
 
 
 async def query_anomalies(channel: str) -> str:
-    data = await _exec(channel, "query_anomalies", {})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    items = data.get("items", [])
-    detail = "：" + "；".join(items) if items else "，经营状态正常"
-    return f"{channel} 渠道异常项：{len(items)} 个{detail}"
+    try:
+        r = await get_commerce_provider(channel).query_anomalies()
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    detail = "：" + "；".join(r.items) if r.items else "，经营状态正常"
+    return f"{channel} 渠道异常项：{len(r.items)} 个{detail}"
 
 
 async def query_promotions(channel: str) -> str:
-    data = await _exec(channel, "query_promotions", {})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    items = data.get("items", [])
-    names = "、".join(i.get("name", "") for i in items)
+    try:
+        r = await get_commerce_provider(channel).query_promotions()
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    names = "、".join(i.get("name", "") for i in r.items)
     return f"{channel} 渠道进行中的促销：{names if names else '无'}"
 
 
 async def query_after_sales_stats(channel: str, period: str = "近7天") -> str:
-    data = await _exec(channel, "query_after_sales_stats", {"period": period})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    return (f"{channel} 渠道 {period} 退款率 {data.get('refund_rate', 0) * 100:.1f}%，"
-            f"售后工单 {data.get('tickets', 0)} 单")
+    try:
+        r = await get_commerce_provider(channel).query_after_sales_stats(period=period)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    return (
+        f"{channel} 渠道 {r.period} 退款率 {r.refund_rate * 100:.1f}%，"
+        f"售后工单 {r.tickets} 单"
+    )
 
 
 async def query_knowledge_base(topic: str) -> str:
-    data = await _exec(None, "query_knowledge_base", {"topic": topic})
-    if "_platform_error" in data:
-        return data["_platform_error"]
-    if data.get("matched"):
-        return f"[知识库] {data.get('key', '')}：{data.get('text', '')}"
+    try:
+        r = await get_commerce_provider().query_knowledge_base(topic)
+    except (RestApiError, ToolTimeoutError, ValidationError) as e:
+        return _format_exec_error(e)
+    if r.matched:
+        return f"[知识库] {r.key}：{r.text}"
     return f"[知识库] 未找到「{topic}」相关条目，可补充完善知识库文档"
 
 
@@ -371,7 +369,8 @@ _HANDLERS: dict[str, Callable[..., Any]] = {
     "save_skill": save_skill,
 }
 
-
+# 工具安全策略不放进发给模型的 JSON Schema，避免把平台治理字段暴露给模型后端。
+# 未出现在这里的工具（例如未声明元数据的 MCP 工具）由权限管线默认拒绝。
 def get_definitions() -> list[dict[str, Any]]:
     """内置工具定义列表（OpenAI function-calling 形状）。"""
     return [dict(d) for d in _DEFINITIONS]
@@ -380,6 +379,11 @@ def get_definitions() -> list[dict[str, Any]]:
 def get_handlers() -> dict[str, Callable[..., Any]]:
     """内置工具 handler 映射（**kwargs → str，async 安全）。"""
     return dict(_HANDLERS)
+
+
+def get_tool_policies() -> dict[str, ToolPolicy]:
+    """返回内置工具的平台安全策略，不影响模型可见的工具 Schema。"""
+    return get_builtin_tool_policies()
 
 
 def tool_names() -> list[str]:

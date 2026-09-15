@@ -11,6 +11,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from sources.source import Source, Tool
+from permission.tool_policy import ToolPolicy, policy_from_definition
 
 
 def default_server_params() -> StdioServerParameters:
@@ -165,6 +166,15 @@ class McpClientPool:
                     "parameters": tool.parameters,
                 })
         return all_tools
+
+    def get_all_tool_policies(self) -> dict[str, ToolPolicy]:
+        """返回 MCP 工具显式声明的策略；没有声明的工具不会自动按名称放行。"""
+        policies: dict[str, ToolPolicy] = {}
+        for definition in self.get_all_tool_definitions():
+            policy = policy_from_definition(definition)
+            if policy is not None:
+                policies[str(definition["name"])] = policy
+        return policies
 
     def get_all_handlers(self) -> dict[str, Callable[..., Any]]:
         if self._servers:
