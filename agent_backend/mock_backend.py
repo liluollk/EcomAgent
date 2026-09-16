@@ -29,8 +29,16 @@ from .protocol import AgentBackend, BackendConfig, AgentCapabilities, BackendPro
 
 _CHANNEL_CN = {"taobao": "淘宝", "jd": "京东", "douyin": "抖音", "pdd": "拼多多"}
 
+# 平台（调价闭环的领域标识）→ 中文标签
+_PLATFORM_CN = {"taobao": "淘宝", "douyin": "抖店", "jd": "京东", "mock": "本地 Mock"}
+
 # 结果前缀 → 视为执行失败（错误文本随成功通道回传，由文案前缀区分）
-_ERROR_PREFIXES = ("[平台错误", "[执行超时", "[上游响应异常", "[已拒绝", "[执行异常")
+# 「拦截 / 未生效 / 未确认」都是调价工具的正常返回文本（工具不抛异常），
+# 但语义上是失败，收尾总结必须按失败处理，不能当成改价成功。
+_ERROR_PREFIXES = (
+    "[平台错误", "[执行超时", "[上游响应异常", "[已拒绝", "[执行异常",
+    "拦截：", "调价未生效", "调价结果未确认",
+)
 
 
 def _last_tool_context(messages: list[dict]) -> tuple[str, dict, str]:
@@ -49,6 +57,15 @@ def _last_tool_context(messages: list[dict]) -> tuple[str, dict, str]:
     return name, args, result
 
 
+def _platform_label(args: dict) -> str:
+    """调价工具的领域引用标签：平台 + 商品 / SKU。"""
+    platform = str(args.get("platform", ""))
+    label = _PLATFORM_CN.get(platform, platform)
+    product = str(args.get("product_id", ""))
+    sku = str(args.get("sku_id", ""))
+    return f"{label} {product}/{sku}".strip()
+
+
 def _summarize(tool_name: str, args: dict, result: str) -> str:
     """按工具类型把结果文本组织成收尾总结：复述关键事实 + 下一步建议。"""
     if result.startswith(_ERROR_PREFIXES):
@@ -57,11 +74,54 @@ def _summarize(tool_name: str, args: dict, result: str) -> str:
                 "这个操作被拒绝了，我不会继续执行。"
                 "可以调整方案再来一次——比如先查询确认现状，或者换一个商品 / 渠道。"
             )
+        if result.startswith("调价结果未确认"):
+            # 写入已发出但回查没跑完：不能声称成功，也不能声称没执行
+            return (
+                f"这次调价没能确认结果：{result}"
+                "为避免在不确定的状态上继续操作，我已停止后续动作。"
+                "建议先重新查一次当前价，确认实际状态后再决定是否重做。"
+            )
+        if result.startswith("调价未生效"):
+            return (
+                f"这次调价没有生效：{result}"
+                "平台写入与回查结论不一致，我不会把它当作已完成。"
+                "建议核对活动/规则后再提一次，或换一个 SKU 试试。"
+            )
         return (
-            f"这次没有执行成功：{result}。"
+            f"这次没有执行成功：{result}"
             "为避免在不确定的状态上继续操作，我已停止后续动作。"
-            "建议稍后重试，或告诉我改用其他渠道完成。"
+            "建议稍后重试，或告诉我改用其他平台完成。"
         )
+
+    if tool_name == "query_product_snapshot":
+        m = re.search(r"当前价 ([\d.]+) 元，库存 (\d+) 件，状态 (\S+?)([；。]|$)", result)
+        if m:
+            price, stock = m.group(1), int(m.group(2))
+            advice = "库存偏紧，建议尽快安排补货" if stock < 20 else "库存可以支撑近期销售"
+            activity = ""
+            m_act = re.search(r"进行中活动：(.+?)(（|；|$)", result)
+            if m_act:
+                activity = f"当前在「{m_act.group(1)}」活动中，改价可能被平台锁价拦住；"
+            return (
+                f"查询完成：{_platform_label(args)} 当前价 {price} 元、库存 {stock} 件，{advice}。"
+                f"{activity}需要的话我可以按新目标价提交这次调价。"
+            )
+        if "暂不可查询" in result:
+            return (
+                f"这个商品我没查到：{result}"
+                "请确认平台、商品号与 SKU 是否正确；如果平台尚未接入调价通道，我也不会做任何写操作。"
+            )
+        return f"查询完成：{result}"
+
+    if tool_name == "update_price":
+        m = re.search(r"价格已更新为 ([\d.]+) 元", result)
+        if m:
+            replay = "本次结果为重试后的幂等回放，平台没有重复执行调价。" if "幂等" in result else ""
+            return (
+                f"调价完成：{_platform_label(args)} 价格已更新为 {m.group(1)} 元，并已回查平台确认一致。"
+                f"{replay}建议接下来几天关注该商品的转化率变化，确认调价效果。"
+            )
+        return f"调价结果：{result}"
 
     ch = _CHANNEL_CN.get(str(args.get("channel", "")), str(args.get("channel", "")))
     sku = str(args.get("sku", ""))
@@ -74,17 +134,6 @@ def _summarize(tool_name: str, args: dict, result: str) -> str:
             return (
                 f"查询完成：{ch}渠道 {sku}「{name}」当前库存 {stock} 件，{advice}。"
                 "需要的话我可以顺手对比一下这款在其他渠道的库存。"
-            )
-
-    if tool_name == "update_price":
-        m = re.search(r"价格已更新为 ([\d.]+) 元", result)
-        if m:
-            cost = args.get("cost_price")
-            cost_note = f"，高于成本价 {cost} 元，可正常生效" if cost else ""
-            replay_note = "本次结果为重试后的幂等回放，平台没有重复执行调价。" if "幂等" in result else ""
-            return (
-                f"调价完成：{ch}渠道 {sku} 价格已更新为 {m.group(1)} 元{cost_note}。{replay_note}"
-                "建议接下来几天关注该商品的转化率变化，确认调价效果。"
             )
 
     if tool_name == "create_promotion":
@@ -158,24 +207,56 @@ def _extract_channel(text: str, default: str = "taobao") -> str:
     return default
 
 
+def _extract_platform(text: str, default: str = "") -> str:
+    """从用户文本识别平台（调价闭环的领域标识：taobao / douyin / jd）。
+
+    淘宝与天猫都归 taobao、抖音与抖店都归 douyin——平台标识是领域概念，
+    与商家怎么说无关。
+    """
+    aliases = {
+        "淘宝": "taobao", "天猫": "taobao", "taobao": "taobao",
+        "抖店": "douyin", "抖音": "douyin", "douyin": "douyin",
+        "京东": "jd", "jd": "jd",
+    }
+    for key, platform in aliases.items():
+        if key in text:
+            return platform
+    return default
+
+
+def _extract_target_price(text: str) -> float | None:
+    """从用户文本提取目标价（「调到/改为/调整到 99」等形态）。"""
+    m = re.search(
+        r"(?:改为|调到|调整到|调整为|调整至|改成|改到)\s*(\d+(?:\.\d+)?)", text
+    )
+    return float(m.group(1)) if m else None
+
+
+# 读意图词：只用于「没有写意图时」判断这是一次快照查询。
+# 注意不要放「改价 / 调价」这类动词——它们由 _PRICE_WRITE_WORDS 认领，
+# 否则「改一下价格」会被判成读，实际却是一次未提交的写入（静默丢指令）。
+_PRICE_WORDS = ("价格", "定价")
+# 写意图词：显式带目标价的写法 + 只有意图没给数值的写法。
+# 后者同样按「提交一次改价」处理（目标价用高于成本的兜底值），
+# 因为「改一下价格」在语义上就是一次写入请求，不是查询。
+_PRICE_WRITE_WORDS = (
+    "调到", "改为", "调整到", "调整为", "调整至", "改成", "改到",
+    "改价", "调价", "改一下价", "调一下价", "调整价格", "修改价格",
+    "改一下价格", "调一下价格", "改下价格", "调下价格",
+)
+
+
 def _slash_skill(user_message: str) -> str | None:
     """提取 "/技能名 ..." 前缀显式指定的技能名（非 / 开头返回 None）。"""
     m = re.match(r"^/([A-Za-z_][A-Za-z0-9_]*)", (user_message or "").strip())
     return m.group(1) if m else None
 
 
-# 技能名 → 剧本关键词提示：/命令只点名技能时，让 domain 工具分支照常命中
+# 技能名 → 剧本关键词提示：/命令只点名技能时，让 domain 工具分支照常命中。
+# 只保留默认技能：扩展技能依赖默认 Agent 未注册的扩展工具，需要扩展通道才可用。
 _SKILL_KEYWORD_HINTS = {
     "skill_creator": "创建技能",
-    "promotion_management": "促销",
     "price_management": "价格",
-    "knowledge_inquiry": "知识",
-    "order_analytics": "分析",
-    "anomaly_detection": "异常",
-    "product_listing": "下架",
-    "after_sales": "工单",
-    "order_management": "订单",
-    "inventory_query": "库存",
 }
 
 
@@ -268,46 +349,47 @@ class MockAgent:
 
     @staticmethod
     def _skill_for(user_message: str) -> str:
-        """按关键词映射技能名（与内置技能 keywords 对齐）；/命令显式点名优先。"""
+        """按关键词映射技能名（与内置技能 keywords 对齐）；/命令显式点名优先。
+
+        默认 Agent 只注册调价闭环工具，因此这里只映射**默认技能**：
+        创建技能 → skill_creator；其余需求统一走 price_management
+        （它的 SOP 覆盖「查快照 → 提交目标价 → 审批 → 执行 → 回查」）。
+        扩展技能（客服/知识库/经营分析等）依赖未注册的扩展工具，剧本不引导。
+        """
         explicit = _slash_skill(user_message)
         if explicit:
             return explicit
         if any(w in user_message for w in ("创建技能", "做成", "生成技能", "写个技能", "沉淀")):
             return "skill_creator"
-        if any(w in user_message for w in ("促销", "优惠", "折扣", "满减")):
-            return "promotion_management"
-        if any(w in user_message for w in ("价格", "调价", "改价", "定价", "降价")):
-            return "price_management"
-        if any(w in user_message for w in ("知识", "规范", "话术", "政策")):
-            return "knowledge_inquiry"
-        if any(w in user_message for w in ("分析", "销售额", "GMV", "成交", "统计", "盘点")):
-            return "order_analytics"
-        if any(w in user_message for w in ("异常", "预警", "风控")):
-            return "anomaly_detection"
-        if any(w in user_message for w in ("上架", "下架", "下柜")):
-            return "product_listing"
-        if any(w in user_message for w in ("工单", "客诉")):
-            return "after_sales"
-        if any(w in user_message for w in ("订单", "发货", "物流")):
-            return "order_management"
-        return "inventory_query"
+        return "price_management"
 
     def _domain_tool_start(self, messages: list[dict]) -> ToolStartEvent:
-        """第二轮：根据用户消息关键词构造 domain 工具调用（与旧剧本一致）。"""
+        """第二轮：根据用户消息解析平台 / 商品 / SKU / 目标价，构造工具调用。
+
+        默认调价闭环只暴露 query_product_snapshot 与 update_price 两个业务工具：
+        因此这里的主分支是「有目标价 → 提交调价」「否则 → 查快照」，
+        平台从消息里识别（淘宝/天猫 → taobao，抖店/抖音 → douyin）。
+        旧扩展工具分支保留在下方，供扩展通道与历史评测使用。
+        """
         last_user = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
-        # 指代继承：「把这个商品调价」这类不带渠道/SKU 的指令，从本轮之前的
-        # 用户消息里继承最近提到的渠道与 SKU（模拟多轮对话的上下文指代）。
+        # 指代继承：「把这个商品调价」这类不带平台/SKU 的指令，从本轮之前的
+        # 用户消息里继承最近提到的平台与 SKU（模拟多轮对话的上下文指代）。
         history_user = " ".join(
             str(m.get("content", "")) for m in messages[:-1] if m.get("role") == "user"
         )
+        platform = _extract_platform(last_user, default="")
+        if not platform:
+            platform = _extract_platform(history_user, default="taobao")
+        m_sku = re.search(r"SKU-\d+", last_user) or re.search(r"SKU-\d+", history_user)
+        sku = m_sku.group(0) if m_sku else "SKU-002"
+        m_item = re.search(r"ITEM-\d+", last_user) or re.search(r"ITEM-\d+", history_user)
+        product = m_item.group(0) if m_item else "ITEM-1001"
         channel = _extract_channel(last_user, default="")
         if not channel:
             channel = _extract_channel(history_user, default="taobao")
-        m_sku = re.search(r"SKU-\d+", last_user) or re.search(r"SKU-\d+", history_user)
-        sku = m_sku.group(0) if m_sku else "SKU-001"
         # /命令只点名技能未带指令时，按技能名补关键词提示，保证分支照常命中
         explicit = _slash_skill(last_user)
         if explicit:
@@ -326,17 +408,37 @@ class MockAgent:
                     "keywords": ["库存盘点", "存货核查"],
                     "body": (
                         "执行库存盘点 SOP：\n"
-                        "1) 确认渠道与 SKU；\n"
-                        "2) 调用 query_inventory 获取库存；\n"
-                        "3) 汇总并向用户汇报。"
+                        "1) 确认平台、商品号与 SKU；\n"
+                        "2) 调用 query_product_snapshot 获取当前价与库存；\n"
+                        "3) 汇总并向用户汇报；改价前必须先看快照。"
                     ),
                 },
             )
-        if "促销" in last_user and any(w in last_user for w in ("查看", "查询", "进行中", "有哪些", "看下")):
+        # —— 默认调价闭环：先看目标价，再决定走「快照查询」还是「提交调价」——
+        target_price = _extract_target_price(last_user)
+        if target_price is not None or any(w in last_user for w in _PRICE_WRITE_WORDS):
             return ToolStartEvent(
-                tool_name="query_promotions",
-                tool_use_id="call_mock_promo_query",
-                input={"channel": channel or "douyin"},
+                tool_name="update_price",
+                tool_use_id="call_mock_price_update",
+                input={
+                    "platform": _extract_platform(last_user, default=platform),
+                    "product_id": product,
+                    "sku_id": sku,
+                    # 没给目标价时用一个高于成本的默认值，保证剧本可跑通
+                    "target_price": target_price if target_price is not None else 99.0,
+                },
+            )
+        if any(w in last_user for w in ("快照", "当前价", "库存", "在售", "在卖")) or any(
+            w in last_user for w in _PRICE_WORDS
+        ):
+            return ToolStartEvent(
+                tool_name="query_product_snapshot",
+                tool_use_id="call_mock_price_snapshot",
+                input={
+                    "platform": _extract_platform(last_user, default=platform),
+                    "product_id": product,
+                    "sku_id": sku,
+                },
             )
         if "促销" in last_user or "活动" in last_user:
             return ToolStartEvent(
@@ -407,7 +509,7 @@ class MockAgent:
                 input={"channel": channel, "order_id": "TB-10086"},
             )
         return ToolStartEvent(
-            tool_name="query_inventory",
-            tool_use_id="call_mock_inv",
-            input={"channel": channel, "sku": sku},
+            tool_name="query_product_snapshot",
+            tool_use_id="call_mock_price_snapshot",
+            input={"platform": platform, "product_id": product, "sku_id": sku},
         )

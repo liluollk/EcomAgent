@@ -98,19 +98,35 @@ def test_mock_probe_ok():
 
 
 def test_stub_adapters_honest_probe():
-    """真实平台 stub 的 probe 诚实返回「尚未接入」，不误报连通。"""
+    """jd/open 仍是 stub（诚实返回「尚未接入」）；taobao/douyin 已实现调价执行面。"""
     import asyncio
 
-    for kind in ("taobao", "jd", "douyin", "open"):
+    for kind in ("jd", "open"):
         adapter = get_adapter(kind)
         result = asyncio.run(adapter.probe({"platform": kind}))
         assert result["ok"] is False
         assert "尚未接入" in result["message"]
 
+    for kind in ("taobao", "douyin"):
+        adapter = get_adapter(kind)
+        result = asyncio.run(adapter.probe({"platform": kind}))
+        assert result["ok"] is True
+
 
 def test_stub_build_request_raises():
+    """jd/open 仍是 stub：build_request 抛 NotImplementedError。"""
     with pytest.raises(NotImplementedError):
-        TaobaoAdapter().build_request("query_inventory", "taobao", {})
+        JdAdapter().build_request("query_inventory", "jd", {})
+    with pytest.raises(NotImplementedError):
+        GenericOpenAdapter().build_request("query_inventory", "open", {})
+
+
+def test_taobao_douyin_adapters_are_real():
+    """taobao/douyin 不再是 stub：实现 PricePlatform 三动作与 build_request。"""
+    for cls in (TaobaoAdapter, DouyinAdapter):
+        adapter = cls()
+        for op in ("query_snapshot", "apply_price", "verify_price", "build_request"):
+            assert callable(getattr(adapter, op))
 
 
 def test_adapter_registry_keys():

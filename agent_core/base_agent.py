@@ -39,6 +39,7 @@ from execution.policy import get_last_outcome, set_call_context
 from session.session import Session, ExecutionState
 from session.workspace import Workspace
 from permission.pre_tool_use import PreToolUsePipeline, PreToolUseAction, PreToolUseResult
+from sources.builtin_tools import _PRICE_SESSION_CTX
 from .turn_lifecycle import TurnLifecycle, DEFAULT_SKILL_REGISTRY as _SKILL_REG
 from .abort_handler import AbortHandler
 from .context_policy import ContextCompressor, context_threshold
@@ -49,6 +50,26 @@ MAX_TOOL_ROUNDS = 10
 
 # 权限解析器签名：接收权限请求，返回用户是否批准
 PermissionResolver = Callable[[PermissionRequestEvent], Awaitable[bool]]
+
+# 需要引擎注入 operation_id 的工具：调价操作要把「权限事件」与「协调器操作记录」
+# 关联到同一个 operation_id，供审批、恢复与审计对账。其余工具（含 MCP 工具、
+# 元技能）不受影响，避免把引擎内部字段塞进无关的工具调用。
+OPERATION_CONTEXT_TOOLS = frozenset({"update_price"})
+
+
+def _handler_accepts_param(handler: Callable, name: str) -> bool:
+    """判断 handler 是否接受名为 name 的关键字参数（用于安全注入 operation_id）。
+
+    显式声明该参数、或签名里收了 **kwargs 的 handler 都算接受——
+    后者覆盖测试里的脚本化 handler（def handler(**kwargs)）。
+    """
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 class BaseAgent:
@@ -93,6 +114,9 @@ class BaseAgent:
         self._pipeline: Optional[PreToolUsePipeline] = None
         self._tool_handlers: dict[str, Callable] = {}
         self._tool_sources: dict[str, str] = {}  # 工具名 → 来源通道（commerce/mcp）
+        self._turn_number: int = 0  # 当前 turn 序号（用于 operation_id 生成）
+        self._operation_seq: int = 0  # 调价操作序号（保证「一次工具调用 = 一个操作 ID」）
+        self._current_session: Optional[Session] = None  # 当前 turn 的会话（供调价工具审计）
         self._permission_resolver: Optional[PermissionResolver] = None
         self._permission_canceller: Optional[Callable[[], None]] = None
         self._pending_tool_tasks: set[asyncio.Task] = set()
@@ -229,6 +253,7 @@ class BaseAgent:
             session, self._workspace, self._backend, registry=self._skill_registry
         )
         session.execution_state = ExecutionState.RUNNING
+        self._current_session = session
         self._lifecycle = lifecycle
         self._trace_id = uuid.uuid4().hex[:12]
         # 真实模型成本维度：每回合清零后端 token 累计
@@ -453,6 +478,7 @@ class BaseAgent:
                 session.execution_state = ExecutionState.ABORTED
                 break
             round_count += 1
+            self._turn_number = round_count
             # 幂等键上下文（session/turn）：后续工具任务经 contextvars 继承
             set_call_context(session.session_id, round_count)
 
@@ -527,6 +553,21 @@ class BaseAgent:
         # Trace 从事件流上自然生长：工具事件统一携带轨迹 ID 与来源通道
         event.trace_id = self._trace_id
         event.source = self._tool_sources.get(event.tool_name, "")
+        # 调价操作上下文贯通：在权限检查之前，为调价工具注入引擎生成的
+        # operation_id = op-{session_id}-{turn}-{tool_use_id}。
+        # 该值随后同时进入 permission_request 事件与 handler 入参，保证
+        # 「权限事件 == 协调器」用的是同一个 operation_id（不会各算各的）。
+        handler = self._tool_handlers.get(event.tool_name)
+        if (
+            handler is not None
+            and event.tool_name in OPERATION_CONTEXT_TOOLS
+            and _handler_accepts_param(handler, "operation_id")
+            and not event.input.get("operation_id")
+        ):
+            event.input = {
+                **event.input,
+                "operation_id": self._make_operation_id(session, event.tool_use_id),
+            }
         perm_result = self._check_permission(event)
 
         if perm_result.action == PreToolUseAction.BLOCK:
@@ -565,19 +606,38 @@ class BaseAgent:
     ) -> AsyncGenerator[AgentEvent, None]:
         """ASK 权限模式：发起权限请求 -> 等待用户决定 -> 批准执行 / 拒绝。"""
         yield event  # 先展示工具预览卡
+        # 调价操作上下文贯通：工具输入携带 operation_id 时，将其与平台/商品引用/
+        # 目标价/规则摘要一并带进权限请求，便于审批与执行状态审计关联。
+        op_ctx = {
+            key: event.input.get(key)
+            for key in ("operation_id", "platform", "product_ref", "target_price", "rule_summary")
+            if event.input.get(key) is not None
+        }
         request = PermissionRequestEvent(
             request_id=f"perm_{event.tool_use_id}",
             tool_name=event.tool_name,
             tool_input=event.input,
             reason=perm_result.reason or "该操作将产生业务副作用，需要用户确认",
+            **op_ctx,
         )
-        session.permission_requests.append({
+        perm_record = {
             "request_id": request.request_id,
             "tool_name": event.tool_name,
             "input": event.input,
             "user": session.user,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        perm_record.update(op_ctx)
+        session.permission_requests.append(perm_record)
+        if op_ctx.get("operation_id"):
+            session.price_operations[op_ctx["operation_id"]] = {
+                "operation_id": op_ctx["operation_id"],
+                "platform": op_ctx.get("platform", ""),
+                "product_ref": op_ctx.get("product_ref"),
+                "target_price": op_ctx.get("target_price", ""),
+                "rule_summary": op_ctx.get("rule_summary", ""),
+                "tool_use_id": event.tool_use_id,
+            }
         session.execution_state = ExecutionState.WAITING_PERMISSION
         yield request
 
@@ -728,6 +788,20 @@ class BaseAgent:
         except Exception:
             return False
 
+    def _make_operation_id(self, session: Session, tool_use_id: str) -> str:
+        """生成引擎侧的 operation_id：op-{session_id}-{seq}-{tool_use_id}。
+
+        必须保证「一次工具调用 = 一个操作」：这个 ID 同时决定操作审计的落盘
+        主键与派生出的平台幂等键。早先的方案是 op-{session_id}-{turn}-{tool_use_id}，
+        它默认 tool_use_id 每次调用都不同——但后端并不保证这一点（离线剧本后端
+        对同类调用复用同一个 tool_use_id，同一 turn 内多次调用也会重号）。
+        一撞号就会出两类实际事故：审计记录被两次操作混写、幂等键相同导致平台把
+        第二次请求当成第一次的重放（跨商品、甚至跨平台读到上一次的响应）。
+        因此改用进程内自增序号：不依赖后端如何取 ID，且仍然是可读、可追溯的确定值。
+        """
+        self._operation_seq += 1
+        return f"op-{session.session_id}-{self._operation_seq}-{tool_use_id}"
+
     def _check_permission(self, event: ToolStartEvent) -> PreToolUseResult:
         """通过 PreToolUsePipeline 检查工具调用权限。
 
@@ -780,6 +854,11 @@ class BaseAgent:
                 result=f"工具 {event.tool_name} 未注册",
                 is_error=True,
             )
+        # 把当前会话注入上下文，供调价工具（update_price）按 session 隔离落审计。
+        token = None
+        session = getattr(self, "_current_session", None)
+        if session is not None:
+            token = _PRICE_SESSION_CTX.set(session)
         try:
             if inspect.iscoroutinefunction(handler):
                 result = await handler(**event.input)
@@ -804,3 +883,6 @@ class BaseAgent:
                 result=str(e),
                 is_error=True,
             )
+        finally:
+            if token is not None:
+                _PRICE_SESSION_CTX.reset(token)

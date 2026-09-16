@@ -17,9 +17,57 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
+
+import httpx
+from decimal import Decimal, InvalidOperation
+
+from integrations.commerce.client import ChannelRestClient, RestApiError, get_rest_client
+from integrations.commerce.price_models import (
+    PriceChangeCommand,
+    PriceError,
+    PriceErrorCode,
+    PricePlatform,
+    ProductSnapshot,
+    PriceVerification,
+    PriceWriteReceipt,
+    ProductRef,
+    as_price,
+)
+
+# 调价路径的请求在 HTTP 层无法区分读写：快照、回查、写入都是 POST
+# （淘宝单端点按信封 method 分发、抖店是 JSON body）。故障脚本若只看方法，
+# 场景里第一次快照预检就会把唯一的写故障步吃掉，重试/超时契约全成假阴性。
+# 因此 Adapter 在发起请求前，把「本次请求属于哪个调价操作」告诉 mock 网关，
+# 由 mock 侧的故障路由决定这一步该不该被消费（见 mock_commerce/fault_injection.py
+# 的 request_operation_var / _FAULT_OPERATIONS）。
+#
+# 定向消费只对「mock 与 Adapter 同进程」的离线演练有意义；真实 HTTP transport 下
+# mock 不在本进程，这里静默降级为不做定向——此时故障脚本退化为对任意请求生效，
+# 与旧语义一致（静态故障本来就全程生效）。
+def _enter_fault_operation(operation: str):
+    """进入指定调价操作作用域，返回可用于复位的作用域令牌（无 mock 时返回 None）。"""
+    if not operation:
+        return None
+    try:
+        from mock_commerce.fault_injection import request_operation_var
+    except Exception:  # pragma: no cover - 真实部署下 mock 不在本进程
+        return None
+    return request_operation_var, request_operation_var.set(operation)
+
+
+def _exit_fault_operation(scope) -> None:
+    if scope is None:
+        return
+    var, token = scope
+    var.reset(token)
+
 
 PLATFORM_KINDS = ["mock", "taobao", "jd", "douyin", "open"]
 
@@ -104,8 +152,378 @@ class MockAdapter(PlatformAdapter):
         }
 
 
+class _BasePriceAdapter(PlatformAdapter):
+    """调价执行面 Adapter 基类：把 PricePlatform 三动作 + PlatformAdapter 接缝收敛。
+
+    子类只需提供协议相关细节（端点、信封构造、价格单位、错误映射、响应解析）。
+    共享的是单次请求通道、超时/连接失败的翻译，以及 idempotency_key 透传——
+    这些与协议无关，收敛到一处避免两平台重复实现。
+    """
+
+    platform: str = ""
+    price_scale: int = 2
+    _endpoint: str = ""
+    _method_snapshot: str = ""
+    _method_update: str = ""
+    _snapshot_response_key: str = ""
+    _update_response_key: str = ""
+
+    def __init__(self, client: "ChannelRestClient | None" = None) -> None:
+        # 默认走离线 ASGI（mock_commerce.routes.app）；也可注入带短超时的 client 做故障测试
+        self._client = client or get_rest_client()
+
+    # --- PlatformAdapter 接缝（保留，供既有 channel 注册表/测试使用） ---
+    def build_request(self, operation, channel, params):
+        method = self._method_for(operation)
+        return "POST", self._endpoint_for(operation), {"json_body": self._build_envelope(method, params)}
+
+    async def probe(self, cfg):
+        return {
+            "ok": True,
+            "message": f"{self.kind} 调价执行面就绪（离线契约实现，未经真实平台资质）",
+            "data": {"platform": self.platform},
+        }
+
+    # --- PricePlatform 接缝（调价闭环依赖） ---
+    async def query_snapshot(self, ref: ProductRef) -> "ProductSnapshot":
+        return await self._read_snapshot(ref, operation="snapshot")
+
+    async def _read_snapshot(self, ref: ProductRef, *, operation: str) -> "ProductSnapshot":
+        """读快照。同一个读接口服务两种语义：用户查询（snapshot）与结果回查（verify）。
+
+        两者协议形态相同，但语义不同——故障脚本要能分别命中（回查超时 ≠ 查询超时），
+        所以操作语义必须一路传到请求层。
+        """
+        env = self._build_envelope(self._method_snapshot, self._ref_params(ref))
+        raw = await self._call_raw(
+            "POST", self._endpoint_for("snapshot"), env, operation=operation
+        )
+        data = self._unwrap(raw, self._snapshot_response_key)
+        return self._parse_snapshot(ref, data)
+
+    async def apply_price(self, command: PriceChangeCommand, *, idempotency_key=None) -> PriceWriteReceipt:
+        ref = command.product_ref
+        env = self._build_envelope(self._method_update, {
+            **self._ref_params(ref),
+            "price": self._price_out(command.target_price),
+        })
+        raw = await self._call_raw(
+            "POST", self._endpoint_for("apply_price"), env,
+            idempotency_key=idempotency_key, writing=True, operation="apply_price",
+        )
+        data = self._unwrap(raw, self._update_response_key)
+        return self._parse_write_receipt(ref, data)
+
+    async def verify_price(self, ref: ProductRef, expected_price) -> PriceVerification:
+        expected = as_price(expected_price)
+        snapshot = await self._read_snapshot(ref, operation="verify")
+        consistent = snapshot.current_price == expected
+        return PriceVerification(
+            product_ref=ref, expected_price=expected,
+            observed_price=snapshot.current_price, consistent=consistent, attempts=1,
+        )
+
+    # --- 子类协议 ---
+    def _method_for(self, operation):
+        return self._method_snapshot if operation in ("snapshot", "verify") else self._method_update
+
+    def _endpoint_for(self, operation):
+        return self._endpoint
+
+    def _ref_params(self, ref: ProductRef) -> dict:
+        raise NotImplementedError
+
+    def _build_envelope(self, method, params) -> dict:
+        raise NotImplementedError
+
+    def _price_out(self, price: Decimal):
+        raise NotImplementedError
+
+    def _price_in(self, raw) -> Decimal:
+        raise NotImplementedError
+
+    def _unwrap(self, raw, response_key) -> dict:
+        raise NotImplementedError
+
+    def _parse_snapshot(self, ref, data) -> "ProductSnapshot":
+        raise NotImplementedError
+
+    def _parse_write_receipt(self, ref, data) -> PriceWriteReceipt:
+        raise NotImplementedError
+
+    # --- 共享请求通道 ---
+    def _timeout_seconds(self, writing: bool) -> float | None:
+        """单次请求的超时：取 Execution Policy 的读写分级与客户端传输超时中更紧的一个。
+
+        Execution Policy 是统一旋钮——评测把默认策略换成快配置（读 0.5s / 写 0.8s）
+        即可确定性地触发超时；客户端的 httpx 超时是传输层兜底。离线 ASGITransport
+        不会自己触发 httpx 超时，所以下面的 wait_for 是超时语义的实际来源。
+        """
+        from execution import policy as _ep
+
+        policy_seconds = _ep.DEFAULT_EXECUTION_POLICY.timeout.timeout_for(
+            "update_price" if writing else "query_snapshot"
+        )
+        client_timeout = getattr(getattr(self._client, "_client", None), "timeout", None)
+        client_seconds = getattr(client_timeout, "read", None)
+        candidates = [
+            float(seconds)
+            for seconds in (policy_seconds, client_seconds)
+            if isinstance(seconds, (int, float)) and seconds
+        ]
+        return min(candidates) if candidates else None
+
+    async def _call_raw(
+        self, method, path, envelope, *, idempotency_key=None, writing=False, operation=""
+    ):
+        # 在 adapter 边界强制「请求超时」：ASGI transport（离线测试）不会替我们触发
+        # httpx 的读超时，这里用 asyncio.wait_for 统一把超时翻译成 PriceError，
+        # 写超时必须标记 side_effect_possible=True（服务端可能已生效，必须回查而非重试写）。
+        timeout = self._timeout_seconds(writing)
+        scope = _enter_fault_operation(operation)
+        coro = self._client.call_raw(
+            method, path, json_body=envelope, idempotency_key=idempotency_key
+        )
+        try:
+            raw = await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
+        except asyncio.TimeoutError as e:
+            raise PriceError(
+                PriceErrorCode.TRANSIENT_ERROR, f"{self.platform} 请求超时",
+                platform=self.platform, side_effect_possible=writing,
+            ) from e
+        except PriceError:
+            raise
+        except httpx.TimeoutException as e:
+            # 真实 HTTP transport 下由 httpx 直接抛出的超时
+            raise PriceError(
+                PriceErrorCode.TRANSIENT_ERROR, f"{self.platform} 请求超时",
+                platform=self.platform, side_effect_possible=writing,
+            ) from e
+        except httpx.HTTPStatusError as e:
+            raise PriceError(
+                self._map_status(e.response.status_code),
+                f"{self.platform} HTTP {e.response.status_code}", platform=self.platform,
+            ) from e
+        except RestApiError as e:
+            raise PriceError(
+                PriceErrorCode.FATAL_ERROR, f"{self.platform} 响应无法解析: {e}", platform=self.platform
+            ) from e
+        except httpx.HTTPError as e:
+            raise PriceError(
+                PriceErrorCode.TRANSIENT_ERROR, f"{self.platform} 连接失败: {e}", platform=self.platform
+            ) from e
+        finally:
+            _exit_fault_operation(scope)
+        return raw
+
+    @staticmethod
+    def _map_status(status: int) -> PriceErrorCode:
+        if status == 429:
+            return PriceErrorCode.TRANSIENT_ERROR
+        if status >= 500:
+            return PriceErrorCode.FATAL_ERROR
+        return PriceErrorCode.CLIENT_ERROR
+
+
+class TaobaoAdapter(_BasePriceAdapter):
+    """淘宝开放平台 TOP 风格调价 Adapter（离线契约实现）。
+
+    单端点 POST /taobao/top/api，按信封 method 分发；参数信封 + HMAC-SHA256 签名；
+    价格以「元·两位小数字符串」收发。鉴权（app_key/session/sign）只在 Adapter 内生成。
+    """
+
+    kind = "taobao"
+    platform = "taobao"
+    price_scale = 2
+    _endpoint = "/taobao/top/api"
+    _method_snapshot = "taobao.item.sku.get"
+    _method_update = "taobao.item.sku.price.update"
+    _snapshot_response_key = "item_sku_get_response"
+    _update_response_key = "item_sku_price_update_response"
+    _APP_KEY = "mock_app_key"
+    _APP_SECRET = "mock_app_secret"
+    _SESSION = "mock_session"
+
+    def _ref_params(self, ref: ProductRef) -> dict:
+        return {"num_iid": ref.product_id, "sku_id": ref.sku_id, "shop_id": ref.shop_id}
+
+    def _build_envelope(self, method, params) -> dict:
+        base = {
+            "method": method,
+            "app_key": self._APP_KEY,
+            "session": self._SESSION,
+            "timestamp": str(int(time.time())),
+            "format": "json",
+            "v": "2.0",
+            "sign_method": "hmac-sha256",
+        }
+        all_params = {**base, **params}
+        base["sign"] = self._sign({k: v for k, v in all_params.items() if k != "sign"})
+        return {**base, **params}
+
+    def _sign(self, params) -> str:
+        items = sorted((str(k), str(v)) for k, v in params.items())
+        raw = self._APP_SECRET + "".join(f"{k}{v}" for k, v in items) + self._APP_SECRET
+        return hmac.new(self._APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
+
+    def _price_out(self, price: Decimal) -> str:
+        return f"{Decimal(price).quantize(Decimal('0.01'))}"
+
+    def _price_in(self, raw) -> Decimal:
+        return Decimal(str(raw))
+
+    def _unwrap(self, raw, response_key) -> dict:
+        if not isinstance(raw, dict):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "淘宝返回结构异常", platform="taobao")
+        if "error_response" in raw:
+            err = raw["error_response"]
+            code = err.get("code")
+            raise PriceError(self._map_code(code), str(err.get("msg", "淘宝错误")), platform="taobao", platform_code=code)
+        resp = raw.get(response_key) or {}
+        if resp.get("code", 0) not in (0, None):
+            code = resp.get("code")
+            raise PriceError(self._map_code(code), str(resp.get("msg", "淘宝错误")), platform="taobao", platform_code=code)
+        data = resp.get("data") or {}
+        if "price" not in data:
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "淘宝响应缺少 price 字段", platform="taobao")
+        # 畸形成功响应（信封完好但价格字段不可解析）→ 统一转为 PriceError
+        try:
+            self._price_in(data["price"])
+        except (InvalidOperation, ValueError, TypeError):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "淘宝返回价格无法解析", platform="taobao")
+        return data
+
+    def _parse_snapshot(self, ref, data) -> "ProductSnapshot":
+        return ProductSnapshot(
+            product_ref=ref, name="",
+            current_price=self._price_in(data.get("price", "0")),
+            stock=int(data.get("num", 0)),
+            status=str(data.get("status", "")),
+            activity_name=str(data.get("activity", "")),
+            activity_locked=bool(data.get("activity_locked", False)),
+            observed_at="",
+        )
+
+    def _parse_write_receipt(self, ref, data) -> PriceWriteReceipt:
+        return PriceWriteReceipt(
+            product_ref=ref,
+            applied_price=self._price_in(data.get("price", "0")),
+            idempotent_replay=bool(data.get("idempotent_replay", False)),
+            attempts=1,
+        )
+
+    @staticmethod
+    def _map_code(code) -> PriceErrorCode:
+        return {
+            15: PriceErrorCode.CLIENT_ERROR,    # 参数非法
+            21: PriceErrorCode.CLIENT_ERROR,    # 鉴权失败
+            26: PriceErrorCode.CLIENT_ERROR,    # 权限不足
+            27: PriceErrorCode.CLIENT_ERROR,    # 商品不存在
+            40: PriceErrorCode.BUSINESS_ERROR,  # 价格低于成本/合规拦截
+            41: PriceErrorCode.BUSINESS_ERROR,  # 活动锁价
+            7: PriceErrorCode.TRANSIENT_ERROR,  # 限流
+            8: PriceErrorCode.TRANSIENT_ERROR,  # 系统繁忙
+            9998: PriceErrorCode.CAPABILITY_UNSUPPORTED,  # 能力不支持
+        }.get(code, PriceErrorCode.FATAL_ERROR)
+
+
+class DouyinAdapter(_BasePriceAdapter):
+    """抖音电商开放平台调价 Adapter（离线契约实现）。
+
+    JSON 请求体 + access_token；价格以「分·整数」收发；成功 {code,msg,data}、
+    错误 {code,msg}（code!=0）。与淘宝同打到一份离线 mock 网关，但协议形态完全不同。
+    鉴权（access_token/app_key/sign）只在 Adapter 内生成。
+    """
+
+    kind = "douyin"
+    platform = "douyin"
+    price_scale = 0
+    _method_snapshot = ""
+    _method_update = ""
+    _snapshot_response_key = ""
+    _update_response_key = ""
+    _ENDPOINT_SNAPSHOT = "/douyin/product/sku/get"
+    _ENDPOINT_UPDATE = "/douyin/product/sku/price"
+    _APP_KEY = "mock_app_key"
+    _APP_SECRET = "mock_app_secret"
+    _ACCESS_TOKEN = "mock_access_token"
+
+    def _endpoint_for(self, operation):
+        return self._ENDPOINT_SNAPSHOT if operation in ("snapshot", "verify") else self._ENDPOINT_UPDATE
+
+    def _ref_params(self, ref: ProductRef) -> dict:
+        return {"product_id": ref.product_id, "sku_id": ref.sku_id, "shop_id": ref.shop_id}
+
+    def _build_envelope(self, method, params) -> dict:
+        base = {
+            "access_token": self._ACCESS_TOKEN,
+            "app_key": self._APP_KEY,
+            "sign": self._sign(params),
+            "timestamp": int(time.time()),
+        }
+        return {**base, **params}
+
+    def _sign(self, params) -> str:
+        items = sorted((str(k), str(v)) for k, v in params.items())
+        raw = self._APP_SECRET + "".join(f"{k}{v}" for k, v in items) + self._APP_SECRET
+        return hmac.new(self._APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
+
+    def _price_out(self, price: Decimal) -> int:
+        return int((Decimal(price) * 100).to_integral_value())
+
+    def _price_in(self, raw) -> Decimal:
+        return Decimal(int(raw)) / 100
+
+    def _unwrap(self, raw, response_key) -> dict:
+        if not isinstance(raw, dict):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "抖店返回结构异常", platform="douyin")
+        code = raw.get("code", 0)
+        if code != 0:
+            raise PriceError(self._map_code(code), str(raw.get("msg", "抖店错误")), platform="douyin", platform_code=code)
+        data = raw.get("data") or {}
+        if "price" not in data:
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "抖店响应缺少 price 字段", platform="douyin")
+        try:
+            self._price_in(data["price"])
+        except (InvalidOperation, ValueError, TypeError):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "抖店返回价格无法解析", platform="douyin")
+        return data
+
+    def _parse_snapshot(self, ref, data) -> "ProductSnapshot":
+        return ProductSnapshot(
+            product_ref=ref, name="",
+            current_price=self._price_in(data.get("price", 0)),
+            stock=int(data.get("stock", 0)),
+            status=str(data.get("status", "")),
+            activity_name=str(data.get("promotion", "")),
+            activity_locked=bool(data.get("promotion_locked", False)),
+            observed_at="",
+        )
+
+    def _parse_write_receipt(self, ref, data) -> PriceWriteReceipt:
+        return PriceWriteReceipt(
+            product_ref=ref,
+            applied_price=self._price_in(data.get("price", 0)),
+            idempotent_replay=bool(data.get("idempotent_replay", False)),
+            attempts=1,
+        )
+
+    @staticmethod
+    def _map_code(code) -> PriceErrorCode:
+        return {
+            40001: PriceErrorCode.CLIENT_ERROR,   # 参数错误
+            40002: PriceErrorCode.CLIENT_ERROR,   # 鉴权失败
+            40010: PriceErrorCode.CLIENT_ERROR,   # 商品不存在
+            30001: PriceErrorCode.BUSINESS_ERROR,  # 价格不合规
+            30002: PriceErrorCode.BUSINESS_ERROR,  # 活动锁价
+            20001: PriceErrorCode.TRANSIENT_ERROR,  # 系统繁忙/限流
+            50000: PriceErrorCode.FATAL_ERROR,     # 系统错误
+            90000: PriceErrorCode.CAPABILITY_UNSUPPORTED,  # 能力不支持
+        }.get(code, PriceErrorCode.FATAL_ERROR)
+
+
 class _StubAdapter(PlatformAdapter):
-    """真实平台 adapter 的 stub 基类。"""
+    """真实平台（京东 / 自定义开放平台）adapter 的 stub：诚实声明尚未接入。"""
 
     def build_request(self, operation, channel, params):
         raise NotImplementedError(
@@ -124,16 +542,8 @@ class _StubAdapter(PlatformAdapter):
         return f"<{type(self).__name__} kind={self.kind} (stub)>"
 
 
-class TaobaoAdapter(_StubAdapter):
-    kind = "taobao"
-
-
 class JdAdapter(_StubAdapter):
     kind = "jd"
-
-
-class DouyinAdapter(_StubAdapter):
-    kind = "douyin"
 
 
 class GenericOpenAdapter(_StubAdapter):

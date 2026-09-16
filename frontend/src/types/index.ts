@@ -42,6 +42,23 @@ export interface PermissionRequestEvent {
   tool_name: string;
   tool_input: Record<string, unknown>;
   reason: string;
+  /** 以下为引擎注入的调价操作上下文；非调价工具的审批不带这些字段 */
+  operation_id?: string;
+  platform?: string;
+  product_ref?: { platform?: string; shop_id?: string; product_id?: string; sku_id?: string };
+  target_price?: number;
+  rule_summary?: string;
+}
+
+/** 结构化错误：对应 Python 核心 AgentEvent。 */
+export interface TypedErrorEvent {
+  type: 'typed_error';
+  error?: {
+    code: string;
+    title: string;
+    message: string;
+    can_retry?: boolean;
+  } | null;
 }
 
 /** 结构化错误：对应 Python 核心 AgentEvent。 */
@@ -129,6 +146,12 @@ export interface PermissionInfo {
   toolName: string;
   toolInput: Record<string, unknown>;
   reason: string;
+  /** 调价操作的审批上下文：审批要看到「改哪个商品的价、改成多少、触发了哪条规则」 */
+  operationId?: string;
+  platform?: string;
+  productRef?: { product_id?: string; sku_id?: string };
+  targetPrice?: number;
+  ruleSummary?: string;
 }
 
 /** 聊天消息：在 UI 中展示的完整消息 */
@@ -229,5 +252,7 @@ export interface Skill {
   body: string;
   enabled: boolean;
   builtin: boolean;
+  /** 是否属于默认调价闭环；false 表示该技能的 SOP 依赖扩展工具通道 */
+  default?: boolean;
   created_at?: number;
 }

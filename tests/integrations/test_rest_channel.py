@@ -146,22 +146,33 @@ async def test_channel_api_all_endpoints():
 def test_builtin_tools_over_rest_full_chain():
     """全链路：内置平台 API 工具 → 渠道注册表 → RestClient → mock 平台服务。
 
-    电商工具在内置通道（sources/builtin_tools.py）执行，走平台默认路径：
+    调价闭环（默认工具）在内置通道（sources/builtin_tools.py）执行，走平台默认路径：
     渠道注册表解析 client（进程内服务），验证完整 REST 语义（鉴权 / 信封 / 错误码）。
+    扩展工具（客服 / 知识库 / 经营分析等）走同一通道，但不在默认 Agent 工具表里。
     """
     from sources import builtin_tools
 
     async def scenario():
-        assert len(builtin_tools.tool_names()) == 12  # 11 电商操作 + save_skill
-        # 内置 handler → 平台数据
-        r = await builtin_tools.query_inventory("taobao", "SKU-001")
-        assert "库存" in r and "海洋" in r
-        r2 = await builtin_tools.update_price("jd", "SKU-002", 189.0)
-        assert "已更新为" in r2
-        r3 = await builtin_tools.query_knowledge_base("退款政策")
-        assert "知识库" in r3 and "退款" in r3
+        # 默认 Agent 只看到调价闭环 + 元技能
+        assert set(builtin_tools.tool_names()) == {
+            "query_product_snapshot", "update_price", "save_skill",
+        }
+        # 调价闭环：快照 → 提交目标价（含平台回查）
+        snap = await builtin_tools.query_product_snapshot("taobao", "ITEM-1001", "SKU-002")
+        assert "当前价" in snap and "库存" in snap
+        updated = await builtin_tools.update_price(
+            "taobao", "ITEM-1001", "SKU-002", 99.0, operation_id="op-rest-chain",
+        )
+        assert "已更新" in updated and "回查一致" in updated
+
+        # 扩展工具仍在同一通道可用，但不在默认工具表
+        ext = builtin_tools.get_extension_handlers()
+        assert "query_knowledge_base" in ext and "query_knowledge_base" not in builtin_tools.get_handlers()
+        kb = await ext["query_knowledge_base"]("退款政策")
+        assert "知识库" in kb and "退款" in kb
+
         # 平台错误码链路：未知渠道 → 10002 错误文本透传
-        r4 = await builtin_tools.query_anomalies("no-such")
-        assert "[平台错误 10002]" in r4
+        anomalies = await ext["query_anomalies"]("no-such")
+        assert "[平台错误 10002]" in anomalies
 
     asyncio.run(scenario())

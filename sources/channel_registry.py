@@ -5,8 +5,10 @@
 设计：
 - 渠道配置持久化到 JSON 文件（默认 data/channels.json，可用 CHANNEL_CONFIG_FILE 覆盖）。
   主进程管理 API 写入，MCP Server 子进程与 mock 平台服务共享读取同一文件，实现跨进程同步。
-- 每个渠道一个独立 REST client（base_url + 鉴权头），按渠道名解析；新增渠道无需新增
-  工具（11 个工具按 channel 参数分派），写入配置后下次调用即生效，无需重启。
+- 每个渠道一个独立 REST client（base_url + 鉴权头），按渠道名解析；渠道只决定「发到哪、
+  怎么鉴权」，不改变模型可见的工具集合——调价闭环始终是那三个工具，平台差异由
+  integrations/commerce 的平台 Adapter 承接。新建渠道写入配置后，该平台一旦有 Adapter
+  即生效，无需新增工具。
 - 鉴权：auth_type=mock 用 mock key；auth_type=api_key 用配置的 api_key（或回退 mock key）。
   真实 OAuth token 换取/签名由各平台 adapter 负责（本层只负责注入鉴权头发送）。
 

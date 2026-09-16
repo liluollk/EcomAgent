@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from harness.assertions import NotExercisedError, assert_step
+from harness.execution_contract import assert_execution_contract, snapshot_store
 from harness.hooks import get_after_hook, get_setup_hook
 from harness.metrics import CaseRecord
 from harness.recorder import Recorder, _serialize_event
@@ -171,6 +172,7 @@ class Runner:
             trace_path=final_path,
             kind=scenario.get("kind", "gold"),
             metrics=list(scenario.get("metrics", [])),
+            platform=scenario.get("platform", ""),
         )
 
     def _run_once(self, scenario: dict[str, Any], timeout: float):
@@ -226,6 +228,8 @@ class Runner:
                     current_step.clear()
                     current_step.update(step)
                     tools = _build_tools()
+                    # 执行契约基线：本步开始前的操作集合与平台副作用条数
+                    before = snapshot_store(session.session_id)
                     events = [ev async for ev in agent.chat(session, step["message"], tools)]
                     # 成本维度：每轮 chat 后立即累计（断言失败也要计入 token）
                     u = getattr(agent.backend, "usage", None)
@@ -234,7 +238,14 @@ class Runner:
                         case_usage["completion_tokens"] += u.get("completion_tokens", 0)
                     self.last_usage = dict(case_usage)
                     raw_events.extend(events)
+                    # 先断言决策契约（模型选了什么），再断言执行契约（真的这样跑了吗）。
+                    # 顺序有意为之：真实模型模式下期望工具未被触发时，决策契约会抛
+                    # NotExercisedError 并终止，避免把「没触发」误报成「执行出错」。
                     assert_step(scenario["name"], step, events, relaxed=self.relaxed)
+                    assert_execution_contract(
+                        scenario["name"], step, events,
+                        session_id=session.session_id, before=before,
+                    )
 
                 after = get_after_hook(scenario.get("after"))
                 if after:

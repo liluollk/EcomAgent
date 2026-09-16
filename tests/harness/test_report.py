@@ -55,11 +55,11 @@ def test_compare_regression_detected():
 
 def test_compare_fingerprint_change_detected():
     baseline = _baseline()
-    baseline["cases"]["six_step_business_chain"] = "deadbeef" * 4  # 篡改指纹
+    baseline["cases"]["price_update_two_platforms"] = "deadbeef" * 4  # 篡改指纹
     ok, msg = compare_baseline(_metrics(_NAMES), baseline)
     assert not ok
     assert "指纹" in msg
-    assert "six_step_business_chain" in msg
+    assert "price_update_two_platforms" in msg
 
 
 def test_compare_partial_run_vs_full_baseline():

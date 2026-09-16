@@ -1,0 +1,48 @@
+{
+  "platform": "taobao",
+  "ref": {"shop_id": "SHOP-01", "product_id": "ITEM-1001", "sku_id": "SKU-002"},
+  "target_price": "89.00",
+  "price_unit": "yuan",
+  "endpoint": "/taobao/top/api",
+  "request_envelope": {
+    "method": "taobao.item.sku.price.update",
+    "app_key": "mock_app_key",
+    "session": "mock_session",
+    "timestamp": "<int 秒>",
+    "format": "json",
+    "v": "2.0",
+    "sign_method": "hmac-sha256",
+    "sign": "<HMAC-SHA256 十六进制大写，由 adapter 内部生成>",
+    "num_iid": "ITEM-1001",
+    "sku_id": "SKU-002",
+    "shop_id": "SHOP-01",
+    "price": "89.00"
+  },
+  "success_snapshot_response": {
+    "item_sku_get_response": {
+      "code": 0,
+      "msg": "ok",
+      "data": {"price": "89.00", "num": 100, "status": "on_sale", "activity": "", "activity_locked": false}
+    }
+  },
+  "success_update_response": {
+    "item_sku_price_update_response": {
+      "code": 0,
+      "msg": "ok",
+      "data": {"price": "89.00", "num": 100, "status": "on_sale", "activity": "", "activity_locked": false}
+    }
+  },
+  "error_response": {"error_response": {"code": 40, "sub_code": "isv.biz-error", "msg": "价格低于成本价，平台拒绝"}},
+  "error_code_mapping": [
+    {"code": 15, "name": "参数非法", "expected": "CLIENT_ERROR"},
+    {"code": 21, "name": "鉴权失败", "expected": "CLIENT_ERROR"},
+    {"code": 26, "name": "权限不足", "expected": "CLIENT_ERROR"},
+    {"code": 27, "name": "商品不存在", "expected": "CLIENT_ERROR"},
+    {"code": 40, "name": "价格低于成本/合规拦截", "expected": "BUSINESS_ERROR"},
+    {"code": 41, "name": "活动锁价", "expected": "BUSINESS_ERROR"},
+    {"code": 7, "name": "限流", "expected": "TRANSIENT_ERROR"},
+    {"code": 8, "name": "系统繁忙", "expected": "TRANSIENT_ERROR"},
+    {"code": 9998, "name": "能力不支持", "expected": "CAPABILITY_UNSUPPORTED"},
+    {"code": 500, "name": "系统错误", "expected": "FATAL_ERROR"}
+  ]
+}

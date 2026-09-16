@@ -116,11 +116,24 @@ async def test_patch_channel_platform_switch():
 
 
 async def test_source_connectivity_real_platform_stub():
-    """真实平台（taobao）测连通：stub 诚实返回「尚未接入」，不误报连通。"""
+    """京东仍是 stub：测连通诚实返回「尚未接入」，不误报连通。"""
+    async with await _client() as client:
+        await client.post("/sources", json={"name": "jdshop", "label": "京东店", "platform": "jd"})
+        resp = await client.post("/sources/jdshop/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "尚未接入" in body["message"]
+
+
+async def test_source_connectivity_contract_only_platform_is_honest():
+    """淘宝/抖店调价 Adapter 是离线契约实现：测连通可以说 ok，但必须如实声明
+    它打的是本地契约网关、没有真实平台资质，不能读成生产接入。"""
     async with await _client() as client:
         await client.post("/sources", json={"name": "tbshop", "label": "淘宝店", "platform": "taobao"})
         resp = await client.post("/sources/tbshop/test")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["ok"] is False
-        assert "尚未接入" in body["message"]
+        assert body["ok"] is True
+        assert "离线契约实现" in body["message"]
+        assert "未经真实平台资质" in body["message"]

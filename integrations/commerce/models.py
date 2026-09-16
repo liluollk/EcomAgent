@@ -1,7 +1,13 @@
 """
-Commerce 领域结果类型 — Provider 将 Adapter 归一化后的外部响应转换为统一的领域结果。
+Commerce 扩展面结果类型 — Provider 将 Adapter 归一化后的外部响应转换为统一的领域结果。
 
 不暴露 HTTP Response，只返回领域类型。
+
+边界说明：
+  本版本的核心闭环是**多平台商品调价**，它的领域类型在
+  integrations/commerce/price_models.py（ProductSnapshot / PriceChangeCommand /
+  PriceVerification）。本文件里的类型服务于扩展面（库存、促销、订单、工单、
+  知识库、经营统计），它们不在默认 Agent 工具表中，也不参与调价评测链路。
 """
 
 from __future__ import annotations

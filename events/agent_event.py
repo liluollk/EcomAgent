@@ -94,6 +94,10 @@ class PermissionRequestEvent:
 
     包含请求 ID、工具名、参数和原因。
     调用方需响应该请求（allow/deny），随后 Agent 才能继续执行。
+
+    调价操作上下文字段（operation_id / platform / product_ref / target_price /
+    rule_summary）为可选，仅在工具输入携带 operation_id 时填充，缺省不破坏
+    既有消费方。
     """
 
     type: Literal["permission_request"] = "permission_request"
@@ -101,6 +105,13 @@ class PermissionRequestEvent:
     tool_name: str = ""
     tool_input: dict[str, Any] = None
     reason: str = ""
+    # 调价操作上下文（可选；由 update_price 工具输入携带 operation_id 时贯通，
+    # 缺省不破坏既有消费方）
+    operation_id: str = ""
+    platform: str = ""
+    product_ref: Optional[dict[str, str]] = None
+    target_price: str = ""
+    rule_summary: str = ""
 
     def __post_init__(self):
         if self.tool_input is None:

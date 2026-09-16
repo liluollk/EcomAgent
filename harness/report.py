@@ -48,6 +48,14 @@ def render_report(metrics: Metrics, run_id: str) -> str:
             f"timeout={counts['timeout']} error={counts['error']} "
             f"not_exercised={counts['not_exercised']}"
         )
+    lines.append("按平台:")
+    for platform, counts in metrics.by_platform.items():
+        lines.append(
+            f"  {platform:12s} cases={counts['cases']} exercised={counts['exercised']} "
+            f"passed={counts['passed']} failed={counts['failed']} "
+            f"timeout={counts['timeout']} error={counts['error']} "
+            f"not_exercised={counts['not_exercised']}"
+        )
     lines.extend([
         "领域指标:",
     ])
@@ -64,7 +72,7 @@ def render_report(metrics: Metrics, run_id: str) -> str:
     for c in metrics.cases:
         flag = "PASS" if c.passed else c.status.upper()
         retry = f" (attempts={c.attempts})" if c.attempts > 1 else ""
-        line = f"  [{flag:7s}] {c.name} [{c.kind}]{retry}"
+        line = f"  [{flag:7s}] {c.name} [{c.kind}/{c.platform}]{retry}"
         if not c.passed:
             for f in c.failures:
                 line += f"\n             kind={f.get('kind')} detail={f.get('detail', '')}"

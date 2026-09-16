@@ -24,19 +24,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_builtin_registry_exposes_11_tools():
-    """内置注册表暴露全部 11 个电商语义操作 + save_skill，定义含 JSON Schema。"""
-    names = set(builtin_tools.tool_names())
-    assert ALL_11_TOOLS <= names
-    assert "save_skill" in names
-    assert BATCH4_TOOLS <= names
+def test_default_registry_exposes_price_loop_and_extension_has_rest():
+    """默认注册表只暴露调价闭环 3 工具；其余 11 个老操作经由扩展注册表提供。"""
+    default_names = set(builtin_tools.tool_names())
+    assert default_names == {"query_product_snapshot", "update_price", "save_skill"}
+    ext_names = set(builtin_tools.EXTENSION_TOOL_NAMES)
+    # 原 11 个电商操作全部由默认 + 扩展覆盖（update_price 进默认，其余 10 进扩展）
+    assert ALL_11_TOOLS <= (default_names | ext_names)
+    assert BATCH4_TOOLS <= ext_names
+    # 扩展定义与 handler 名一致、且都是合法 function-calling 形状
+    assert {d["name"] for d in builtin_tools.get_extension_definitions()} == ext_names
+    assert set(builtin_tools.get_extension_handlers()) == ext_names
     for d in builtin_tools.get_definitions():
         assert d["parameters"]["type"] == "object", d["name"]
 
 
 def test_builtin_handlers_output_structure():
-    """7 个批次 4 handler 经 REST→Adapter→mock 网关链路返回关键文本。"""
-    h = builtin_tools.get_handlers()
+    """扩展 7 个批次 4 handler 经 REST→Adapter→mock 网关链路返回关键文本。"""
+    h = builtin_tools.get_extension_handlers()
     assert "已上架" in _run(h["product_shelf"](channel="taobao", sku="SKU-001", action="on"))
     assert "已下架" in _run(h["product_shelf"](channel="jd", sku="SKU-001", action="off"))
     assert "售后工单" in _run(h["service_ticket"](channel="taobao", order_id="TB-10086", issue="商品破损"))

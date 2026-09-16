@@ -16,6 +16,13 @@
 from sources import builtin_tools
 
 
+# 引擎注入字段白名单：这些字段由 agent_core 在权限检查前注入工具输入
+# （如 operation_id），不出现在模型的 JSON Schema 里，因此不要求 schema 声明。
+# 仅允许显式白名单内的字段——禁止「任意额外参数都行」，防止 handler 偷偷加参数
+# 而不经模型知晓（那会破坏「schema 与 handler 签名对齐」的契约）。
+ENGINE_INJECTED_FIELDS = {"operation_id"}
+
+
 def test_definition_names_and_handler_names_are_identical():
     """内置工具给模型的 JSON 名集合，必须与实际 handler 名集合完全一致。"""
     def_names = {d["name"] for d in builtin_tools.get_definitions()}
@@ -72,3 +79,31 @@ def test_load_skill_has_explicit_read_policy():
         "side_effect": "read",
         "requires_approval": False,
     }
+
+
+def test_engine_injected_fields_are_whitelisted():
+    """handler 签名里所有未在 schema 声明的参数，必须落在 ENGINE_INJECTED_FIELDS 白名单。
+
+    引擎会向工具输入注入 operation_id 等字段，这些字段刻意不写进模型可见的
+    JSON Schema；但除白名单外，handler 不得出现任何「模型不知道」的参数，否则
+    即是 schema 与 handler 脱节的隐患（禁止放宽成「随便多参数都行」）。
+    """
+    import inspect
+
+    for d in builtin_tools.get_definitions():
+        handler = builtin_tools.get_handlers().get(d["name"])
+        assert handler is not None, f"默认工具 {d['name']} 必须有对应 handler"
+        props = set(d["parameters"].get("properties", {}))
+        try:
+            params = set(inspect.signature(handler).parameters)
+        except (TypeError, ValueError):
+            params = set()
+        extra = params - props
+        assert extra <= ENGINE_INJECTED_FIELDS, (
+            f"工具 {d['name']} 的 handler 存在未在 schema 声明的参数 "
+            f"{extra - ENGINE_INJECTED_FIELDS}（仅允许白名单 {ENGINE_INJECTED_FIELDS}）"
+        )
+    # operation_id 必须确为白名单成员，且是 update_price 的注入字段
+    assert "operation_id" in ENGINE_INJECTED_FIELDS
+    up = builtin_tools.get_handlers()["update_price"]
+    assert "operation_id" in inspect.signature(up).parameters

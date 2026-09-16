@@ -81,6 +81,34 @@ def test_permission_request_event_default():
     assert event.tool_input == {}
 
 
+def test_permission_request_optional_operation_fields():
+    """operation_id 等上下文字段为可选；缺省为空，不破坏既有消费方。"""
+    event = PermissionRequestEvent(
+        request_id="perm_1",
+        tool_name="update_price",
+        tool_input={"sku": "BH-201", "new_price": 49.9},
+        reason="价格调整需要运营主管确认",
+        operation_id="op-9",
+        platform="taobao",
+        product_ref={"platform": "taobao", "shop_id": "s", "product_id": "p", "sku_id": "BH-201"},
+        target_price="49.9",
+        rule_summary="成本保护通过",
+    )
+    assert event.operation_id == "op-9"
+    assert event.platform == "taobao"
+    assert event.product_ref["sku_id"] == "BH-201"
+    assert event.target_price == "49.9"
+    assert event.rule_summary == "成本保护通过"
+
+    # 缺省值不破坏既有消费方
+    empty = PermissionRequestEvent()
+    assert empty.operation_id == ""
+    assert empty.platform == ""
+    assert empty.product_ref is None
+    assert empty.target_price == ""
+    assert empty.rule_summary == ""
+
+
 def test_typed_error_event():
     error = TypedError(
         code="API_ERROR",

@@ -23,6 +23,7 @@ from session.workspace import Workspace
 
 from harness.assertions import assert_step
 from harness.cases import SCENARIOS
+from harness.execution_contract import assert_execution_contract, snapshot_store
 from harness.hooks import get_after_hook, get_setup_hook
 
 
@@ -75,6 +76,12 @@ def e2e_isolate(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+_SESSION_ID = "e2e"
+
+
+_SESSION_ID = "e2e"
+
+
 def _make_session(
     workspace: Workspace,
     sid: str,
@@ -124,7 +131,7 @@ def _run_e2e(driver, scenario, permission_state=None):
             ws = _make_workspace()
             session = _make_session(
                 ws,
-                "e2e",
+                _SESSION_ID,
                 mode=getattr(PermissionMode, scenario.get("mode", "EXECUTE")),
                 role=scenario.get("role", "manager"),
             )
@@ -170,8 +177,14 @@ def test_e2e_behavior_contract_scenarios(scenario):
             hook()
         for step in scenario["steps"]:
             permission_state["step"] = step
+            # 执行契约基线：本步前的操作集合与平台副作用条数
+            before = snapshot_store(_SESSION_ID)
             events = await chat(step["message"])
+            # 两层契约：先决策（模型选了什么），再执行（真的这样跑了吗）
             assert_step(scenario["name"], step, events)
+            assert_execution_contract(
+                scenario["name"], step, events, session_id=_SESSION_ID, before=before
+            )
         after = get_after_hook(scenario.get("after"))
         if after:
             after()

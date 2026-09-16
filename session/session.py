@@ -88,6 +88,8 @@ class Session:
     tool_calls: list[dict] = field(default_factory=list)
     permission_requests: list[dict] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
+    # 调价操作上下文（可选；协调器/工具输入携带 operation_id 时登记，缺省为空）
+    price_operations: dict[str, dict] = field(default_factory=dict)
     _saved_count: int = 0
     _saved_tool_calls: int = 0
     _saved_permission_requests: int = 0

@@ -66,6 +66,10 @@ export function SkillsPage() {
                   {s.builtin && (
                     <span className="rounded bg-inset px-1.5 py-px text-[10.5px] text-ink-3">内置</span>
                   )}
+                  {/* 依赖扩展工具的技能在默认 Agent 下无法执行，别让用户以为可以直接用 */}
+                  {s.default === false && (
+                    <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">需扩展工具</span>
+                  )}
                   {!s.enabled && (
                     <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">已停用</span>
                   )}

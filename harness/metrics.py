@@ -7,6 +7,22 @@ from typing import Literal, Optional
 
 Status = Literal["passed", "failed", "timeout", "error", "not_exercised"]
 
+_STATUSES = ("passed", "failed", "timeout", "error", "not_exercised")
+
+
+def _group_by(cases: list["CaseRecord"], key) -> dict[str, dict[str, int]]:
+    """按 key(case) 分组统计各状态计数（保留未触发场景的独立计数）。"""
+    grouped: dict[str, dict[str, int]] = {}
+    for case in cases:
+        counts = grouped.setdefault(
+            key(case), {"cases": 0, "exercised": 0, **{s: 0 for s in _STATUSES}},
+        )
+        counts["cases"] += 1
+        counts[case.status] += 1
+        if case.exercised:
+            counts["exercised"] += 1
+    return grouped
+
 
 @dataclass
 class CaseRecord:
@@ -20,6 +36,7 @@ class CaseRecord:
     trace_path: Optional[str] = None
     kind: str = "gold"
     metrics: list[str] = field(default_factory=list)
+    platform: str = ""
 
     @property
     def passed(self) -> bool:
@@ -50,29 +67,26 @@ class Metrics:
     @property
     def by_kind(self) -> dict[str, dict[str, int]]:
         """按场景类型汇总，保留未触发场景的独立计数。"""
-        statuses = ("passed", "failed", "timeout", "error", "not_exercised")
-        grouped: dict[str, dict[str, int]] = {}
-        for case in self.cases:
-            counts = grouped.setdefault(
-                case.kind,
-                {"cases": 0, "exercised": 0, **{status: 0 for status in statuses}},
-            )
-            counts["cases"] += 1
-            counts[case.status] += 1
-            if case.exercised:
-                counts["exercised"] += 1
-        return grouped
+        return _group_by(self.cases, lambda c: c.kind)
+
+    @property
+    def by_platform(self) -> dict[str, dict[str, int]]:
+        """按平台汇总（both 表示一条场景横跨两个平台）。
+
+        调价闭环的契约按平台分层：同一份领域命令在淘宝与抖店上的协议形态、
+        错误码、价格精度都不同，只看总体通过率会掩盖单平台的退化。
+        """
+        return _group_by(self.cases, lambda c: c.platform or "unknown")
 
     @property
     def metric_hits(self) -> dict[str, dict[str, int]]:
         """按领域指标汇总各状态，指标只来自场景元数据。"""
-        statuses = ("passed", "failed", "timeout", "error", "not_exercised")
         hits: dict[str, dict[str, int]] = {}
         for case in self.cases:
             for metric in case.metrics:
                 counts = hits.setdefault(
                     metric,
-                    {"cases": 0, "exercised": 0, **{status: 0 for status in statuses}},
+                    {"cases": 0, "exercised": 0, **{status: 0 for status in _STATUSES}},
                 )
                 counts["cases"] += 1
                 counts[case.status] += 1
@@ -90,12 +104,14 @@ class Metrics:
             "pass_rate": round(self.pass_rate, 4),
             "duration_s": round(self.duration, 3),
             "by_kind": self.by_kind,
+            "by_platform": self.by_platform,
             "metric_hits": self.metric_hits,
             "cases": {
                 c.name: {
                     "status": c.status,
                     "attempts": c.attempts,
                     "kind": c.kind,
+                    "platform": c.platform,
                     "metrics": c.metrics,
                 }
                 for c in self.cases
