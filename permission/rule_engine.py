@@ -18,7 +18,7 @@ def price_above_cost_rule(
 ) -> PreToolUseResult:
     """价格不低于成本价规则。
 
-    拦截 update_price 工具调用中 new_price 低于 cost_price 的情况。
+    拦截 update_price 工具调用中 new_price 低于有效 cost_price 的情况。
     成本价来源：生产装配经 workspace_rules_rule 注入平台真相 cost_lookup，
     覆盖 tool_input["cost_price"]（成本保护由平台数据决定，不由模型决定）；
     无注入时保留直接调用方的低层规则语义；平台装配时必须注入
@@ -26,7 +26,7 @@ def price_above_cost_rule(
 
     Args:
         tool_name: 工具名称。
-        tool_input: 工具参数，应包含 new_price 和 cost_price。
+        tool_input: 规则参数，应包含 new_price；cost_price 由工作区规则装配的平台成本真相提供。
 
     Returns:
         PreToolUseResult: 价格合规则 ALLOW，否则 BLOCK。

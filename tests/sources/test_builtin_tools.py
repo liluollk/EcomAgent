@@ -73,3 +73,100 @@ def test_query_inventory_does_not_expose_cost_price():
 
     assert "库存 1523 件" in result
     assert "成本价" not in result
+
+
+# ----------------------------------------------------------------------
+# Task 2：默认工具收敛为调价闭环 + 扩展注册表
+# ----------------------------------------------------------------------
+
+def test_default_tool_set_is_price_loop_only():
+    """默认 get_definitions / get_handlers / tool_names 只暴露三个调价闭环工具。"""
+    assert set(builtin_tools.tool_names()) == {
+        "query_product_snapshot", "update_price", "save_skill",
+    }
+    assert {d["name"] for d in builtin_tools.get_definitions()} == set(builtin_tools.tool_names())
+    assert set(builtin_tools.get_handlers()) == set(builtin_tools.tool_names())
+
+
+def test_extension_registry_excludes_default_and_has_extension_tools():
+    """扩展注册表含其余 10 个能力；关键扩展工具不在默认表，默认工具也不在扩展表。"""
+    ext_defs = {d["name"] for d in builtin_tools.get_extension_definitions()}
+    ext_handlers = set(builtin_tools.get_extension_handlers())
+    ext = set(builtin_tools.EXTENSION_TOOL_NAMES)
+    assert ext_defs == ext_handlers == ext
+    assert len(ext) == 10
+    # 必须新增的断言：这些能力不在默认定义/处理器中，但存在于扩展注册表
+    for name in ("service_ticket", "query_knowledge_base", "query_anomalies", "query_after_sales_stats"):
+        assert name not in builtin_tools.tool_names(), f"{name} 不应出现在默认工具"
+        assert name in ext, f"{name} 应在扩展注册表"
+    # 默认工具不应泄漏进扩展表
+    for name in ("query_product_snapshot", "update_price", "save_skill"):
+        assert name not in ext
+
+
+class _FakePricePlatform:
+    """内存假调价执行面，供离线确定性测试 update_price → 协调器接线。"""
+
+    platform = "taobao"
+
+    def __init__(self, verify_consistent: bool = True) -> None:
+        self.verify_consistent = verify_consistent
+
+    async def query_snapshot(self, ref):
+        from decimal import Decimal
+
+        from integrations.commerce.price_models import ProductSnapshot
+
+        return ProductSnapshot(product_ref=ref, name="x", current_price=Decimal("100"),
+                               stock=10, status="on")
+
+    async def apply_price(self, command, *, idempotency_key=None):
+        from integrations.commerce.price_models import PriceWriteReceipt
+
+        return PriceWriteReceipt(product_ref=command.product_ref, applied_price=command.target_price)
+
+    async def verify_price(self, ref, expected_price):
+        from integrations.commerce.price_models import PriceVerification
+
+        return PriceVerification(product_ref=ref, expected_price=expected_price,
+                                observed_price=expected_price, consistent=self.verify_consistent)
+
+
+def test_update_price_success_routes_to_coordinator_and_records_operation_id(tmp_path, monkeypatch):
+    """成功路径：文本含「已更新」「回查一致」；协调器用同一 operation_id 落盘 approval_decided。"""
+    monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(builtin_tools, "get_price_platform", lambda p: _FakePricePlatform())
+    result = _run(builtin_tools.update_price(
+        platform="taobao", product_id="ITEM-1001", sku_id="SKU-001",
+        target_price=89.0, operation_id="op-fixed-1",
+    ))
+    assert "已更新" in result and "回查一致" in result
+    store = builtin_tools.OperationStore(str(tmp_path))
+    records = store.load("op-fixed-1")
+    assert any(r.get("operation_id") == "op-fixed-1" for r in records)
+    assert any(r.get("type") == "approval_decided" for r in records)
+
+
+def test_update_price_blocked_by_cost_protection(tmp_path, monkeypatch):
+    """拦截路径：低于成本价被成本保护拦截，文本含「拦截」+ 原因。"""
+    monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path))
+    # 成本价来自 MockCostProvider（mock_commerce.store）：taobao/SKU-001 成本 59
+    monkeypatch.setattr(builtin_tools, "get_price_platform", lambda p: _FakePricePlatform())
+    result = _run(builtin_tools.update_price(
+        platform="taobao", product_id="ITEM-1001", sku_id="SKU-001",
+        target_price=10.0, operation_id="op-cost-1",
+    ))
+    assert "拦截" in result
+    assert "成本" in result
+
+
+def test_update_price_rejected_when_verify_inconsistent(tmp_path, monkeypatch):
+    """回查不一致：文本含「未生效」（REJECTED），不抛异常。"""
+    monkeypatch.setenv("AGENT_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(builtin_tools, "get_price_platform",
+                        lambda p: _FakePricePlatform(verify_consistent=False))
+    result = _run(builtin_tools.update_price(
+        platform="taobao", product_id="ITEM-1001", sku_id="SKU-001",
+        target_price=89.0, operation_id="op-rej-1",
+    ))
+    assert "未生效" in result

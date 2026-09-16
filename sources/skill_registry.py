@@ -31,6 +31,9 @@ class Skill:
         body: SOP 正文（markdown）——加载时注入系统提示词，指导 LLM 按步骤执行。
         enabled: 是否启用（停用的技能不进菜单、不参与解析；内置技能恒启用）。
         builtin: 是否为内置技能（内置只读，不可编辑/删除/停用）。
+        default: 是否属于默认调价闭环。false 表示该技能依赖扩展工具集
+            （客服 / 知识库 / 经营分析等），默认 Agent 未注册这些工具，
+            因此技能正文必须显式声明「需启用扩展工具通道」。
         created_at: 创建时间戳（用户技能，内存记录）。
     """
 
@@ -41,6 +44,7 @@ class Skill:
     body: str = ""
     enabled: bool = True
     builtin: bool = False
+    default: bool = True
     created_at: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -86,6 +90,7 @@ def parse_skill_md(text: str, *, builtin: bool = False) -> Skill:
         body=parts[2].strip(),
         enabled=data.get("enabled", "true").lower() != "false",
         builtin=builtin,
+        default=data.get("default", "true").lower() != "false",
     )
 
 
@@ -98,6 +103,8 @@ def to_skill_md(skill: Skill) -> str:
         lines.append(f"prerequisites: [{', '.join(skill.prerequisites)}]")
     if not skill.enabled:
         lines.append("enabled: false")
+    if not skill.default:
+        lines.append("default: false")
     lines += ["---", "", skill.body, ""]
     return "\n".join(lines)
 
@@ -215,6 +222,15 @@ class SkillRegistry:
         """已启用技能名列表（供状态消息/错误提示）。"""
         self._maybe_reload()
         return [s.name for s in self._skills.values() if s.enabled]
+
+    def list_extension_names(self) -> list[str]:
+        """非默认（扩展能力）技能名列表。
+
+        这些技能的 SOP 依赖默认调价闭环之外的扩展工具，默认 Agent 未注册
+        对应工具，因此它们的正文必须显式声明扩展前提（见 SKILL.md 的 default 标记）。
+        """
+        self._maybe_reload()
+        return [s.name for s in self._skills.values() if s.enabled and not s.default]
 
     def get(self, skill_name: str) -> Optional[Skill]:
         """获取指定名称的技能（含 disabled，供前置条件/提示词读取）。"""

@@ -183,3 +183,32 @@ def test_permission_request_carries_operation_context():
     rec = session.permission_requests[0]
     assert rec["operation_id"] == "op-ctx"
     assert session.price_operations["op-ctx"]["operation_id"] == "op-ctx"
+
+
+def test_engine_injected_operation_id_matches_handler_received():
+    """引擎在权限检查前注入 operation_id，且 handler 收到的与 permission_request 携带的是同一个。"""
+    captured: dict = {}
+
+    def handler(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    backend = ScriptedBackend()  # 第一轮 update_price 输入不含 operation_id
+    session = make_session()
+    agent = BaseAgent(backend, session.workspace)
+    pipeline = PreToolUsePipeline()
+    pipeline.add_checker(ask_all_rule)
+    agent.set_permission_pipeline(pipeline)
+    agent.set_tool_handlers({"update_price": handler})
+
+    async def resolver(request):
+        return True
+
+    agent.set_permission_resolver(resolver)
+    events = collect(agent, session)
+
+    req = [e for e in events if e.type == "permission_request"][0]
+    assert req.operation_id, "引擎应注入非空 operation_id"
+    # 权限事件 == handler 收到的 == 会话记录，三者贯通同一 operation_id
+    assert captured.get("operation_id") == req.operation_id
+    assert session.permission_requests[0].get("operation_id") == req.operation_id

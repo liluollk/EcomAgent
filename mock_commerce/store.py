@@ -142,8 +142,19 @@ def get_product(shop_id: str, product_id: str, sku_id: str) -> dict | None:
 
     淘宝与抖店路由共享同一份状态：同一商品在两套协议形态下读写的是同一个对象，
     因此「淘宝改价 → 抖店回查」能看到一致结果（计划要求的共享商品状态）。
+
+    精确匹配 (shop_id, product_id, sku_id) 优先；未命中时退化为按
+    (product_id, sku_id) 匹配——离线网关只服务一个演示店铺，而 shop_id 来自
+    调用方渠道配置（工具层解析出的店铺标识不一定是 mock 的 SHOP-01），
+    不应因为店铺命名的差异让商品整体查不到。
     """
-    return PRODUCT_STATE.get((shop_id, product_id, sku_id))
+    exact = PRODUCT_STATE.get((shop_id, product_id, sku_id))
+    if exact is not None:
+        return exact
+    for (_, pid, sid), state in PRODUCT_STATE.items():
+        if pid == product_id and sid == sku_id:
+            return state
+    return None
 
 
 def reset_product_state() -> None:

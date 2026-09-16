@@ -211,3 +211,94 @@ def test_default_registry_has_builtin_skills():
     names = set(reg.list_menu_names())
     assert {"inventory_query", "price_management", "after_sales", "product_listing"} <= names
     assert all(s.builtin for s in reg.list())
+
+# ----------------------------------------------------------------------
+# Task 2：默认技能（调价闭环）与扩展技能（依赖扩展工具集）的边界
+# ----------------------------------------------------------------------
+
+def test_default_skill_marks_extension_boundary():
+    """内置技能的 default 标记必须与实际工具可见性一致。
+
+    默认 Agent 只注册 query_product_snapshot / update_price / save_skill，
+    因此调价闭环技能（price_management）与元技能（skill_creator）是默认技能；
+    其余 8 个技能的 SOP 依赖扩展工具集，必须标 default: false，且正文显式声明
+    「需启用扩展工具通道」——否则会引导默认 Agent 调用未注册工具。
+    """
+    from sources import builtin_tools
+    from sources.skill_registry import create_default_registry
+
+    reg = create_default_registry()
+    default_names = {n for n in reg.list_menu_names() if not reg.get(n).default}
+    assert default_names == set(reg.list_extension_names())
+
+    assert reg.get("price_management").default is True
+    assert reg.get("skill_creator").default is True
+
+    extension_skills = set(reg.list_extension_names())
+    assert len(extension_skills) == 8
+    for name in extension_skills:
+        body = reg.get(name).body
+        assert "扩展工具" in body, f"{name} 未声明它依赖扩展工具通道"
+
+    # 边界反证：这些技能点名的工具确实不在默认工具表里
+    assert "query_inventory" not in builtin_tools.tool_names()
+    assert "service_ticket" not in builtin_tools.tool_names()
+    assert "query_knowledge_base" not in builtin_tools.tool_names()
+    assert "query_anomalies" not in builtin_tools.tool_names()
+    assert "query_after_sales_stats" not in builtin_tools.tool_names()
+
+
+def test_skill_md_roundtrip_keeps_default_flag():
+    """to_skill_md / parse_skill_md 往返必须保留 default 标记（否则热加载会丢边界）。"""
+    from sources.skill_registry import Skill, parse_skill_md, to_skill_md
+
+    text = to_skill_md(Skill(name="ext_flow", description="d", body="b", default=False))
+    assert "default: false" in text
+    assert parse_skill_md(text).default is False
+    assert parse_skill_md(to_skill_md(Skill(name="core_flow", description="d", body="b"))).default is True
+
+
+# ----------------------------------------------------------------------
+# Task 2：默认技能（调价闭环）与扩展技能（依赖扩展工具集）的边界
+# ----------------------------------------------------------------------
+
+def test_default_skill_marks_extension_boundary():
+    """内置技能的 default 标记必须与实际工具可见性一致。
+
+    默认 Agent 只注册 query_product_snapshot / update_price / save_skill，
+    因此调价闭环技能（price_management）与元技能（skill_creator）是默认技能；
+    其余 8 个技能的 SOP 依赖扩展工具集，必须标 default: false，且正文显式声明
+    「需启用扩展工具通道」——否则会引导默认 Agent 调用未注册工具。
+    """
+    from sources import builtin_tools
+    from sources.skill_registry import create_default_registry
+
+    reg = create_default_registry()
+    default_names = {n for n in reg.list_menu_names() if not reg.get(n).default}
+    assert default_names == set(reg.list_extension_names())
+
+    assert reg.get("price_management").default is True
+    assert reg.get("skill_creator").default is True
+
+    extension_skills = set(reg.list_extension_names())
+    assert len(extension_skills) == 8
+    for name in extension_skills:
+        body = reg.get(name).body
+        assert "扩展工具" in body, f"{name} 未声明它依赖扩展工具通道"
+
+    # 边界反证：这些技能点名的工具确实不在默认工具表里
+    assert "query_inventory" not in builtin_tools.tool_names()
+    assert "service_ticket" not in builtin_tools.tool_names()
+    assert "query_knowledge_base" not in builtin_tools.tool_names()
+    assert "query_anomalies" not in builtin_tools.tool_names()
+    assert "query_after_sales_stats" not in builtin_tools.tool_names()
+
+
+def test_skill_md_roundtrip_keeps_default_flag():
+    """to_skill_md / parse_skill_md 往返必须保留 default 标记（否则热加载会丢边界）。"""
+    from sources.skill_registry import Skill, parse_skill_md, to_skill_md
+
+    text = to_skill_md(Skill(name="ext_flow", description="d", body="b", default=False))
+    assert "default: false" in text
+    assert parse_skill_md(text).default is False
+    assert parse_skill_md(to_skill_md(Skill(name="core_flow", description="d", body="b"))).default is True
