@@ -111,3 +111,42 @@ def get_cost_price(channel: str, sku: str) -> float | None:
     if sku not in KNOWN_SKUS:
         return None
     return (INVENTORY.get(channel) or {}).get("cost_price")
+
+
+# ---------------------------------------------------------------------------
+# 双平台调价共享商品状态（淘宝 / 抖店协议形态不同，但落到同一份价格/库存/活动）
+#
+# 价格内部统一以「分」(整数 cents) 为单位存储；淘宝以「元·两位小数字符串」收发，
+# 抖店以「分·整数」收发，两者在网关处换算，但读写的是同一份 price_fen。
+# 成本价 cost_fen 同样只来自平台数据，调用方传入的价格不参与任何成本判定。
+# ---------------------------------------------------------------------------
+
+DEFAULT_PRODUCT_STATE: dict[tuple, dict] = {
+    # SKU-001：处于促销活动、活动锁价（用于验证活动锁价拒绝改价）
+    ("SHOP-01", "ITEM-1001", "SKU-001"): {
+        "price_fen": 8900, "cost_fen": 5900, "stock": 1523,
+        "status": "on_sale", "activity_name": "双11预热 9折", "activity_locked": True,
+    },
+    # SKU-002：未锁价、未促销，可用于成功改价 + 回查一致
+    ("SHOP-01", "ITEM-1001", "SKU-002"): {
+        "price_fen": 8900, "cost_fen": 5900, "stock": 100,
+        "status": "on_sale", "activity_name": "", "activity_locked": False,
+    },
+}
+
+PRODUCT_STATE: dict[tuple, dict] = {k: dict(v) for k, v in DEFAULT_PRODUCT_STATE.items()}
+
+
+def get_product(shop_id: str, product_id: str, sku_id: str) -> dict | None:
+    """取 (店铺, 商品, SKU) 的当前商品状态。
+
+    淘宝与抖店路由共享同一份状态：同一商品在两套协议形态下读写的是同一个对象，
+    因此「淘宝改价 → 抖店回查」能看到一致结果（计划要求的共享商品状态）。
+    """
+    return PRODUCT_STATE.get((shop_id, product_id, sku_id))
+
+
+def reset_product_state() -> None:
+    """把共享商品状态恢复为出厂值（测试场景隔离用，避免改价副作用跨用例泄漏）。"""
+    PRODUCT_STATE.clear()
+    PRODUCT_STATE.update({k: dict(v) for k, v in DEFAULT_PRODUCT_STATE.items()})

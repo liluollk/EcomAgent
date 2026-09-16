@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -18,7 +19,10 @@ from mock_commerce.domain import check_channel, idempotent_call, ok_response
 from mock_commerce.fault_injection import (
     FaultOutcome,
     apply_fault_post,
+    apply_fault_post_platform,
     apply_fault_pre,
+    apply_fault_pre_platform,
+    consume_skip_write,
     request_method_var,
 )
 from mock_commerce.store import (
@@ -30,6 +34,7 @@ from mock_commerce.store import (
     ORDER_STATUS,
     PROMOTIONS,
     SALES_TREND,
+    get_product,
     match_knowledge,
     record_write,
 )
@@ -307,6 +312,164 @@ async def knowledge_base(topic: str, x_api_key: str | None = Header(None)):
         return ok_response({"topic": topic, "matched": False, "text": None, "key": None})
     key, text = matched
     return ok_response({"topic": topic, "matched": True, "text": text, "key": key})
+
+
+# ---------------------------------------------------------------------------
+# 双平台调价协议形态（Task 3/5）
+#
+# 淘宝：单端点 POST /taobao/top/api，按信封 method 分发；参数信封 + HMAC-SHA256 签名；
+#      价格以「元·两位小数字符串」收发；成功用 item_sku_*_response 信封，错误用 error_response。
+# 抖店：JSON 请求体 + access_token；价格以「分·整数」收发；成功用 {code,msg,data}，
+#      错误用 {code,msg}（code!=0）。
+# 两者共享同一份 PRODUCT_STATE（价格/库存/活动），写操作统一落 record_write 副作用日志。
+# ---------------------------------------------------------------------------
+
+
+def _tb_snapshot_data(p: dict, *, mismatch: bool = False) -> dict:
+    price_fen = p["price_fen"] + (100 if mismatch else 0)
+    return {
+        "price": f"{(Decimal(price_fen) / 100):.2f}",
+        "num": p["stock"],
+        "status": p["status"],
+        "activity": p["activity_name"],
+        "activity_locked": p["activity_locked"],
+    }
+
+
+def _tb_ok(response_key: str, data: dict, *, idempotent_replay: bool = False) -> dict:
+    body = {"code": 0, "msg": "ok", "data": data}
+    if idempotent_replay:
+        body["data"] = {**data, "idempotent_replay": True}
+    return {response_key: body}
+
+
+def _tb_error(code: int, msg: str, sub_code: str = "") -> dict:
+    return {"error_response": {"code": code, "sub_code": sub_code, "msg": msg}}
+
+
+def _dy_snapshot_data(p: dict, *, mismatch: bool = False) -> dict:
+    price_fen = p["price_fen"] + (100 if mismatch else 0)
+    return {
+        "price": price_fen,
+        "stock": p["stock"],
+        "status": p["status"],
+        "promotion": p["activity_name"],
+        "promotion_locked": p["activity_locked"],
+    }
+
+
+def _dy_ok(data: dict, *, idempotent_replay: bool = False) -> dict:
+    body = {"code": 0, "msg": "success", "data": data}
+    if idempotent_replay:
+        body["data"] = {**data, "idempotent_replay": True}
+    return body
+
+
+def _dy_error(code: int, msg: str) -> dict:
+    return {"code": code, "msg": msg}
+
+
+@app.post("/taobao/top/api")
+async def taobao_top_api(request: Request, x_idempotency_key: str | None = Header(None)):
+    body = await request.json()
+    method = body.get("method")
+    fault = await apply_fault_pre_platform("taobao")
+    if fault.http_status:
+        raise HTTPException(status_code=fault.http_status, detail={"code": fault.code, "msg": fault.msg})
+    if fault.kind == "malformed":
+        suffix = "item_sku_get_response" if method == "taobao.item.sku.get" else "item_sku_price_update_response"
+        return _tb_ok(suffix, {"price": "N/A", "num": "bad", "status": None})
+    if fault.kind == "error":
+        return _tb_error(fault.code, fault.msg)
+    if method == "taobao.item.sku.get":
+        p = get_product(body.get("shop_id"), body.get("num_iid"), body.get("sku_id"))
+        if p is None:
+            return _tb_error(27, "商品不存在")
+        data = _tb_snapshot_data(p, mismatch=(fault.kind == "verify_mismatch"))
+        await apply_fault_post_platform()
+        return _tb_ok("item_sku_get_response", data)
+    if method == "taobao.item.sku.price.update":
+        p = get_product(body.get("shop_id"), body.get("num_iid"), body.get("sku_id"))
+        if p is None:
+            return _tb_error(27, "商品不存在")
+        if consume_skip_write():
+            await apply_fault_post_platform()
+            return _tb_ok("item_sku_price_update_response", _tb_snapshot_data(p))
+        if p["activity_locked"]:
+            return _tb_error(41, "活动锁价，不可改价")
+        try:
+            new_price_fen = int((Decimal(str(body.get("price"))) * 100).to_integral_value())
+        except (InvalidOperation, TypeError, ValueError):
+            return _tb_error(15, "参数非法：价格格式错误")
+        if new_price_fen < p["cost_fen"]:
+            return _tb_error(40, "价格低于成本价，平台拒绝")
+        def _data():
+            p["price_fen"] = new_price_fen
+            record_write("taobao_price_update", {
+                "shop_id": body.get("shop_id"), "num_iid": body.get("num_iid"),
+                "sku_id": body.get("sku_id"), "price": body.get("price"),
+            })
+            return _tb_snapshot_data(p)
+        inner = idempotent_call(_data, x_idempotency_key)
+        replay = bool(inner.get("data", {}).get("idempotent_replay", False))
+        await apply_fault_post_platform()
+        return _tb_ok("item_sku_price_update_response", inner["data"], idempotent_replay=replay)
+    return _tb_error(15, f"未知 method: {method}")
+
+
+@app.post("/douyin/product/sku/get")
+async def douyin_sku_get(request: Request, x_idempotency_key: str | None = Header(None)):
+    body = await request.json()
+    fault = await apply_fault_pre_platform("douyin")
+    if fault.http_status:
+        raise HTTPException(status_code=fault.http_status, detail={"code": fault.code, "msg": fault.msg})
+    if fault.kind == "malformed":
+        return _dy_ok({"price": "oops", "stock": "bad"})
+    if fault.kind == "error":
+        return _dy_error(fault.code, fault.msg)
+    p = get_product(body.get("shop_id"), body.get("product_id"), body.get("sku_id"))
+    if p is None:
+        return _dy_error(40010, "商品不存在")
+    data = _dy_snapshot_data(p, mismatch=(fault.kind == "verify_mismatch"))
+    await apply_fault_post_platform()
+    return _dy_ok(data)
+
+
+@app.post("/douyin/product/sku/price")
+async def douyin_sku_price(request: Request, x_idempotency_key: str | None = Header(None)):
+    body = await request.json()
+    fault = await apply_fault_pre_platform("douyin")
+    if fault.http_status:
+        raise HTTPException(status_code=fault.http_status, detail={"code": fault.code, "msg": fault.msg})
+    if fault.kind == "malformed":
+        return _dy_ok({"price": "oops", "stock": "bad"})
+    if fault.kind == "error":
+        return _dy_error(fault.code, fault.msg)
+    p = get_product(body.get("shop_id"), body.get("product_id"), body.get("sku_id"))
+    if p is None:
+        return _dy_error(40010, "商品不存在")
+    if consume_skip_write():
+        await apply_fault_post_platform()
+        return _dy_ok(_dy_snapshot_data(p))
+    if p["activity_locked"]:
+        return _dy_error(30002, "活动锁价，不可改价")
+    try:
+        new_price_fen = int(body.get("price"))
+    except (TypeError, ValueError):
+        return _dy_error(40001, "参数错误：价格格式错误")
+    if new_price_fen < p["cost_fen"]:
+        return _dy_error(30001, "价格不合规：低于成本价")
+    def _data():
+        p["price_fen"] = new_price_fen
+        record_write("douyin_price_update", {
+            "shop_id": body.get("shop_id"), "product_id": body.get("product_id"),
+            "sku_id": body.get("sku_id"), "price": new_price_fen,
+        })
+        return _dy_snapshot_data(p)
+    inner = idempotent_call(_data, x_idempotency_key)
+    replay = bool(inner.get("data", {}).get("idempotent_replay", False))
+    await apply_fault_post_platform()
+    return _dy_ok(inner["data"], idempotent_replay=replay)
 
 
 def main() -> None:
