@@ -1,0 +1,39 @@
+{
+  "platform": "douyin",
+  "ref": {"shop_id": "SHOP-01", "product_id": "ITEM-1001", "sku_id": "SKU-002"},
+  "target_price": "89.00",
+  "price_unit": "fen",
+  "endpoint_snapshot": "/douyin/product/sku/get",
+  "endpoint_update": "/douyin/product/sku/price",
+  "request_envelope": {
+    "access_token": "mock_access_token",
+    "app_key": "mock_app_key",
+    "sign": "<HMAC-SHA256 十六进制大写，由 adapter 内部生成>",
+    "timestamp": "<int 秒>",
+    "shop_id": "SHOP-01",
+    "product_id": "ITEM-1001",
+    "sku_id": "SKU-002",
+    "price": 8900
+  },
+  "success_snapshot_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {"price": 8900, "stock": 200, "status": "on_sale", "promotion": "", "promotion_locked": false}
+  },
+  "success_update_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {"price": 8900, "stock": 200, "status": "on_sale", "promotion": "", "promotion_locked": false}
+  },
+  "error_response": {"code": 30001, "msg": "价格不合规：低于成本价"},
+  "error_code_mapping": [
+    {"code": 40001, "name": "参数错误", "expected": "CLIENT_ERROR"},
+    {"code": 40002, "name": "鉴权失败", "expected": "CLIENT_ERROR"},
+    {"code": 40010, "name": "商品不存在", "expected": "CLIENT_ERROR"},
+    {"code": 30001, "name": "价格不合规", "expected": "BUSINESS_ERROR"},
+    {"code": 30002, "name": "活动锁价", "expected": "BUSINESS_ERROR"},
+    {"code": 20001, "name": "系统繁忙/限流", "expected": "TRANSIENT_ERROR"},
+    {"code": 50000, "name": "系统错误", "expected": "FATAL_ERROR"},
+    {"code": 90000, "name": "能力不支持", "expected": "CAPABILITY_UNSUPPORTED"}
+  ]
+}

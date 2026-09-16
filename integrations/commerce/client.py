@@ -95,6 +95,45 @@ class ChannelRestClient:
             raise RestApiError(code, message)
         return payload.get("data", {})
 
+    async def call_raw(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        json_body: Optional[dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """执行一次平台请求，返回平台「原始 JSON」（信封/错误都在 body 内）。
+
+        与 call() 的区别：call() 强解 {code,message,data} 信封并抛出 RestApiError，
+        无法解析 TOP 风格的 item_sku_*_response / error_response。call_raw 不做任何
+        解包，把信封解析与错误映射交给各 Adapter。
+
+        网络/传输错误（超时、连接失败）与 HTTP >= 400 会以 httpx 异常透传，
+        交由 adapter 做平台特定的错误分类（如写超时需要 side_effect_possible）。
+        平台业务错误（错误码在 body 内、HTTP 200）不会在此抛错——那是 adapter 职责。
+        """
+        if method.upper() == "POST" and idempotency_key is None:
+            idempotency_key = uuid.uuid4().hex
+        headers = dict(self._headers)
+        if idempotency_key:
+            headers["X-Idempotency-Key"] = idempotency_key
+
+        try:
+            resp = await self._client.request(
+                method, path, params=params, json=json_body, headers=headers
+            )
+        except httpx.HTTPError:
+            raise  # 超时 / 连接失败等直接透传给 adapter
+
+        if resp.status_code >= 400:
+            resp.raise_for_status()  # 触发 httpx.HTTPStatusError，交由 adapter 分类
+
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise RestApiError(10001, f"平台响应非 JSON：{resp.status_code}") from e
+
 
 DEFAULT_PLATFORM_URL = "http://127.0.0.1:18080"
 
