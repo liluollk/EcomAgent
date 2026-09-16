@@ -41,6 +41,34 @@ from integrations.commerce.price_models import (
     as_price,
 )
 
+# 调价路径的请求在 HTTP 层无法区分读写：快照、回查、写入都是 POST
+# （淘宝单端点按信封 method 分发、抖店是 JSON body）。故障脚本若只看方法，
+# 场景里第一次快照预检就会把唯一的写故障步吃掉，重试/超时契约全成假阴性。
+# 因此 Adapter 在发起请求前，把「本次请求属于哪个调价操作」告诉 mock 网关，
+# 由 mock 侧的故障路由决定这一步该不该被消费（见 mock_commerce/fault_injection.py
+# 的 request_operation_var / _FAULT_OPERATIONS）。
+#
+# 定向消费只对「mock 与 Adapter 同进程」的离线演练有意义；真实 HTTP transport 下
+# mock 不在本进程，这里静默降级为不做定向——此时故障脚本退化为对任意请求生效，
+# 与旧语义一致（静态故障本来就全程生效）。
+def _enter_fault_operation(operation: str):
+    """进入指定调价操作作用域，返回可用于复位的作用域令牌（无 mock 时返回 None）。"""
+    if not operation:
+        return None
+    try:
+        from mock_commerce.fault_injection import request_operation_var
+    except Exception:  # pragma: no cover - 真实部署下 mock 不在本进程
+        return None
+    return request_operation_var, request_operation_var.set(operation)
+
+
+def _exit_fault_operation(scope) -> None:
+    if scope is None:
+        return
+    var, token = scope
+    var.reset(token)
+
+
 PLATFORM_KINDS = ["mock", "taobao", "jd", "douyin", "open"]
 
 PLATFORM_LABELS = {
@@ -158,8 +186,18 @@ class _BasePriceAdapter(PlatformAdapter):
 
     # --- PricePlatform 接缝（调价闭环依赖） ---
     async def query_snapshot(self, ref: ProductRef) -> "ProductSnapshot":
+        return await self._read_snapshot(ref, operation="snapshot")
+
+    async def _read_snapshot(self, ref: ProductRef, *, operation: str) -> "ProductSnapshot":
+        """读快照。同一个读接口服务两种语义：用户查询（snapshot）与结果回查（verify）。
+
+        两者协议形态相同，但语义不同——故障脚本要能分别命中（回查超时 ≠ 查询超时），
+        所以操作语义必须一路传到请求层。
+        """
         env = self._build_envelope(self._method_snapshot, self._ref_params(ref))
-        raw = await self._call_raw("POST", self._endpoint_for("snapshot"), env)
+        raw = await self._call_raw(
+            "POST", self._endpoint_for("snapshot"), env, operation=operation
+        )
         data = self._unwrap(raw, self._snapshot_response_key)
         return self._parse_snapshot(ref, data)
 
@@ -170,14 +208,15 @@ class _BasePriceAdapter(PlatformAdapter):
             "price": self._price_out(command.target_price),
         })
         raw = await self._call_raw(
-            "POST", self._endpoint_for("apply_price"), env, idempotency_key=idempotency_key, writing=True
+            "POST", self._endpoint_for("apply_price"), env,
+            idempotency_key=idempotency_key, writing=True, operation="apply_price",
         )
         data = self._unwrap(raw, self._update_response_key)
         return self._parse_write_receipt(ref, data)
 
     async def verify_price(self, ref: ProductRef, expected_price) -> PriceVerification:
         expected = as_price(expected_price)
-        snapshot = await self.query_snapshot(ref)
+        snapshot = await self._read_snapshot(ref, operation="verify")
         consistent = snapshot.current_price == expected
         return PriceVerification(
             product_ref=ref, expected_price=expected,
@@ -234,11 +273,14 @@ class _BasePriceAdapter(PlatformAdapter):
         ]
         return min(candidates) if candidates else None
 
-    async def _call_raw(self, method, path, envelope, *, idempotency_key=None, writing=False):
+    async def _call_raw(
+        self, method, path, envelope, *, idempotency_key=None, writing=False, operation=""
+    ):
         # 在 adapter 边界强制「请求超时」：ASGI transport（离线测试）不会替我们触发
         # httpx 的读超时，这里用 asyncio.wait_for 统一把超时翻译成 PriceError，
         # 写超时必须标记 side_effect_possible=True（服务端可能已生效，必须回查而非重试写）。
         timeout = self._timeout_seconds(writing)
+        scope = _enter_fault_operation(operation)
         coro = self._client.call_raw(
             method, path, json_body=envelope, idempotency_key=idempotency_key
         )
@@ -270,6 +312,8 @@ class _BasePriceAdapter(PlatformAdapter):
             raise PriceError(
                 PriceErrorCode.TRANSIENT_ERROR, f"{self.platform} 连接失败: {e}", platform=self.platform
             ) from e
+        finally:
+            _exit_fault_operation(scope)
         return raw
 
     @staticmethod

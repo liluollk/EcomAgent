@@ -76,15 +76,49 @@ _script_steps: list[FaultScenario] = []
 _script_pos = 0
 _script_timeout_seconds = 60.0
 _script_methods: frozenset[str] | None = None  # 定向消费：仅匹配的 HTTP 方法消费故障步
+_script_operations: frozenset[str] | None = None  # 定向消费：仅匹配的调价操作消费故障步
 _pending_timeout = False
 _skip_next_write = False  # TIMEOUT_PRE 期间置位：路由据此跳过副作用落库
 
 # 当前请求的 HTTP 方法（FastAPI 中间件写入，供定向消费判定）
 request_method_var: ContextVar[str] = ContextVar("mock_fault_request_method", default="")
 
+# 每个脚本自带的「目标操作」：只有目标操作语义的请求才消费故障步。
+#
+# 为什么必须有这一层：调价路径的快照、回查与写入**都是 POST**
+# （淘宝单端点按信封 method 分发、抖店是 JSON body），按 HTTP 方法已经
+# 无法区分读写——若不加约束，场景里第一次快照预检就会把唯一的写故障步
+# 吃掉，重试/超时契约全部假阴性。
+#
+# 操作语义由调价 Adapter 在发起请求前写入（integrations/commerce/adapter.py
+# 的 PRICE_OPERATION_VAR），桌面/离线演练时二者在同一进程内，因此可以读到；
+# 独立进程演练（真实 HTTP transport）下该变量为空 → 脚本对任意请求生效，
+# 退化为旧语义（此时故障脚本本来就是全程生效的静态故障）。
+_FAULT_OPERATIONS: dict[str, frozenset[str] | None] = {
+    # 与操作无关的通用脚本：任意请求都可以消费
+    "timeout_once_then_success": None,
+    "internal_error_once_then_success": None,
+    "malformed_once_then_success": None,
+    "permanent_500": None,
+    # 调价闭环专用脚本：必须落在对应的操作上
+    "rate_limit_once_then_success": frozenset({"apply_price"}),
+    "platform_rate_limit_once_then_success": frozenset({"apply_price"}),
+    "platform_malformed_once_then_success": frozenset({"apply_price"}),
+    "write_timeout_before_commit": frozenset({"apply_price"}),
+    "write_timeout_after_commit": frozenset({"apply_price"}),
+    "business_error_permanent": frozenset({"apply_price"}),
+    "capability_refused": frozenset({"apply_price"}),
+    "verify_mismatch": frozenset({"verify"}),
+    "verify_timeout": frozenset({"verify"}),
+}
+
+# 当前请求的调价操作语义：snapshot / verify / apply_price / ""（非调价请求）
+request_operation_var: ContextVar[str] = ContextVar("mock_fault_request_operation", default="")
+
 
 def load_script(name: str, *, timeout_seconds: float | None = None,
-                methods: set[str] | None = None) -> None:
+                methods: set[str] | None = None,
+                operations: set[str] | None = None) -> None:
     """装载确定性故障脚本（重置进度从头消费）。
 
     Args:
@@ -93,23 +127,31 @@ def load_script(name: str, *, timeout_seconds: float | None = None,
             策略层短超时；独立进程演练缺省 60s）。
         methods: 定向消费的 HTTP 方法集合（如 {"PUT"}）；为 None 时不限方法
             （保持旧语义：任意请求消费一步）。
+        operations: 定向消费的调价操作集合（snapshot / verify / apply_price）；
+            为 None 时取脚本自带的目标操作（见 _FAULT_OPERATIONS），
+            仍是 None 表示对任意请求生效。
     """
-    global _script_steps, _script_pos, _script_timeout_seconds, _script_methods, _pending_timeout
+    global _script_steps, _script_pos, _script_timeout_seconds, _script_methods
+    global _script_operations, _pending_timeout
     if name not in _FAULT_SCRIPTS:
         raise ValueError(f"未知故障脚本: {name}（可选: {sorted(_FAULT_SCRIPTS)}）")
     _script_steps = list(_FAULT_SCRIPTS[name])
     _script_pos = 0
     _script_timeout_seconds = float(timeout_seconds) if timeout_seconds is not None else 60.0
     _script_methods = frozenset(methods) if methods else None
+    resolved_operations = operations if operations is not None else _FAULT_OPERATIONS.get(name)
+    _script_operations = frozenset(resolved_operations) if resolved_operations else None
     _pending_timeout = False
 
 
 def reset_fault() -> None:
     """清除脚本与挂起状态，恢复正常响应。"""
-    global _script_steps, _script_pos, _script_methods, _pending_timeout, _skip_next_write
+    global _script_steps, _script_pos, _script_methods, _script_operations
+    global _pending_timeout, _skip_next_write
     _script_steps = []
     _script_pos = 0
     _script_methods = None
+    _script_operations = None
     _pending_timeout = False
     _skip_next_write = False
 
@@ -131,6 +173,13 @@ def _next_fault() -> FaultScenario | None:
     """
     global _script_pos
     if _script_steps:
+        if _script_operations is not None:
+            # 只有在「本次请求的操作语义已知」时才定向：直接打 mock 路由
+            # （dashboard / 平台契约测试 / 旧 /v1 通道）时该语义为空，
+            # 此时保持旧语义（任意请求消费一步），不改变既有行为。
+            current_operation = request_operation_var.get()
+            if current_operation and current_operation not in _script_operations:
+                return None  # 非目标调价操作（如写故障遇到快照预检）：不消费
         if _script_methods is not None:
             method = request_method_var.get().upper()
             if method not in _script_methods:
@@ -274,6 +323,9 @@ async def apply_fault_pre_platform(platform: str) -> PlatformFault:
     """
     global _pending_timeout, _skip_next_write
     _skip_next_write = False
+    # 挂起标记是「单次请求」的状态：上一次请求被客户端取消时可能留下残留，
+    # 每次前置阶段先清干净，避免污染下一个请求的后置阶段。
+    _pending_timeout = False
     fault = _next_fault()
     if fault is None or fault in (FaultScenario.NORMAL, FaultScenario.DUPLICATED, FaultScenario.DELAYED):
         return PlatformFault("proceed")
