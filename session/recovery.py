@@ -1,9 +1,8 @@
 """
 会话恢复 — 从 JSONL 持久化文件中恢复 Session 的消息历史。
 
-的会话恢复功能。
-当 Session 因异常中断后，可通过 JSONL 文件恢复消息历史，
-继续执行未完成的 turn。
+当 Session 因异常中断后，可通过 JSONL 文件恢复已落盘的消息、工具调用结构
+和审计记录；当前不会续跑未完成的 turn。
 """
 
 from __future__ import annotations

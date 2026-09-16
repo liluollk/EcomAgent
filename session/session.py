@@ -31,9 +31,10 @@ class PermissionMode(Enum):
 class SessionStatus(Enum):
     """会话状态枚举。
 
-    ACTIVE: 活跃状态，可以接收新消息。
-    COMPLETED: 已完成状态，不再接受新消息。
-    ABORTED: 已中断状态，用户主动终止。
+    这是会话记录状态；是否接收新消息由上层传输/编排逻辑决定。
+    ACTIVE: 活跃状态。
+    COMPLETED: 已完成状态。
+    ABORTED: 已中断状态，用户主动终止；单个 turn 的执行状态另见 ExecutionState。
     """
 
     ACTIVE = auto()

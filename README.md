@@ -8,7 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?style=flat&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Vite-3178C6?style=flat&logo=typescript&logoColor=white)
-![pytest](https://img.shields.io/badge/pytest-394%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-409%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
 <img src="docs/images/agent-chat.png" width="72%" alt="会话演示"/>
@@ -118,7 +118,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | 技能体系 | SKILL.md 知识包，渐进式披露控制上下文；内置 10 技能 + `save_skill` 元技能热加载创建（经 HITL 确认） |
 | 长期记忆 | `MEMORY.md` 索引 + 独立记忆文件，写入经矛盾整合（新增 / 覆盖 / 废弃 / 跳过），跨会话保留经营决策 |
 | 上下文压缩 | 超过「模型窗口 − 安全边际」自动压缩为结构化摘要，摘要沉淀为长期记忆 |
-| 会话持久化 | Workspace 配置 JSON + Session JSONL 增量落盘，多会话并行、中断后完整恢复（含工具调用链） |
+| 会话持久化 | Workspace 配置 JSON + Session JSONL 增量落盘，多会话并行，可恢复已落盘消息、工具调用结构和审计记录；不续跑未完成的 turn |
 | 渠道管理 | 渠道注册表配置化（base_url / 鉴权 / 启停），设置页操作即时生效；敏感字段掩码 |
 | 审批中心 | 跨会话聚合待审批写操作，对话内权限卡与审批页双入口，REST 决定唤醒挂起中的 Agent |
 | 运营看板 | 跨渠道聚合：近 7 天 GMV 趋势、渠道构成、库存水位与经营预警 |
@@ -155,7 +155,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 | `events/` | 八类 AgentEvent 事件模型 |
 | `harness/` | 行为验证 Harness：场景数据表、运行器、断言、指纹基线 |
 | `frontend/` | React + TS 控制台（对话流、工具活动行、权限卡、看板） |
-| `tests/` | 394 个测试，按模块分目录，全部离线运行 |
+| `tests/` | 409 个测试，按模块分目录，全部离线运行 |
 
 </details>
 
@@ -184,7 +184,7 @@ cd frontend && npm run build
 ## ✅ 质量与验证
 
 ```bash
-python -m pytest tests/ -q     # 394 个单元 / 集成 / E2E 测试，全离线
+python -m pytest tests/ -q     # 409 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条行为契约场景 + 基线验收，退化即非零退出
 python -m harness --list                                                # 查看场景类型与领域指标
 python -m harness --backend openai --provider deepseek --repeat 3        # 真实模型评测（18 条执行契约场景 ×3，三态统计）

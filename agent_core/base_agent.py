@@ -47,9 +47,6 @@ from .memory_store import DEFAULT_MEMORY_STORE
 # 最大工具调用轮数，防止无限循环
 MAX_TOOL_ROUNDS = 10
 
-# 只读工具前缀，与权限层 mode_gate 的只读判定保持一致
-READONLY_TOOL_PREFIXES = ("query_", "get_", "list_", "search_")
-
 # 权限解析器签名：接收权限请求，返回用户是否批准
 PermissionResolver = Callable[[PermissionRequestEvent], Awaitable[bool]]
 

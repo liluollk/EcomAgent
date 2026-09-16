@@ -42,7 +42,8 @@ class ToolStartEvent:
     """LLM 决定调用工具时发送的事件。
 
     包含工具名称、调用 ID（用于匹配 tool_result）和参数。
-    调用方收到此事件后应执行对应工具，然后发送 ToolResultEvent。
+    事件消费者可据此展示或记录工具调用；实际工具由 Agent 执行编排层执行，
+    并由执行层产出对应的 ToolResultEvent。
 
     可观测性字段（引擎回填，缺省不破坏既有消费方）：
     trace_id  一次 turn 的执行轨迹 ID（Trace 从事件流上自然生长）

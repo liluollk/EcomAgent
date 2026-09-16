@@ -1,8 +1,8 @@
 """
 API 请求/响应模型 — Pydantic BaseModel。
 
-FastAPI 自动完成 body 解析、字段校验与 400 错误返回，并在 /docs 暴露。
-非法 role 由 Literal 约束直接拒绝（400），替代手写 payload 解析 + 静默回退。
+FastAPI 自动完成 body 解析、字段校验与 422 错误返回，并在 /docs 暴露。
+非法 role 由 Literal 约束直接拒绝（422），替代手写 payload 解析 + 静默回退。
 """
 
 from __future__ import annotations

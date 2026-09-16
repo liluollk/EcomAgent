@@ -9,7 +9,7 @@ import type { Skill } from '../types';
  * 渐进式披露：菜单常驻，load_skill 命中才注入正文。
  * 内置技能只读；用户技能可新增/编辑/启停/删除。
  *
- * 独立组件：设置弹窗「技能管理」tab 与侧边栏「技能」页共用。
+ * 设置弹窗「技能管理」tab 使用本组件执行用户技能 CRUD；侧边栏「技能」页是只读查看器。
  */
 export function SkillManager() {
   const [skills, setSkills] = useState<Skill[]>([]);

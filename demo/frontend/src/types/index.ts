@@ -1,4 +1,4 @@
-/** 后端 WebSocket 事件类型定义，对应 Python 的 AgentEvent 六类事件 */
+/** WebSocket 事件类型：Python 核心 AgentEvent 8 类，另包含 3 类传输层事件。 */
 
 /** 文本增量：LLM 流式输出的 token 片段 */
 export interface TextDeltaEvent {
@@ -32,6 +32,17 @@ export interface PermissionRequestEvent {
   reason: string;
 }
 
+/** 结构化错误：对应 Python 核心 AgentEvent。 */
+export interface TypedErrorEvent {
+  type: 'typed_error';
+  error?: {
+    code: string;
+    title: string;
+    message: string;
+    can_retry?: boolean;
+  } | null;
+}
+
 /** 状态事件：Agent 当前执行阶段 */
 export interface StatusEvent {
   type: 'status';
@@ -41,7 +52,7 @@ export interface StatusEvent {
 /** 完成事件：当前 turn 正常结束 */
 export interface CompleteEvent {
   type: 'complete';
-  stop_reason: string;
+  stop_reason?: string;
 }
 
 /** 中断事件：当前 turn 被用户或系统中断 */
@@ -50,29 +61,30 @@ export interface AbortEvent {
   reason?: string;
 }
 
-/** 错误事件 */
+/** WebSocket 传输层错误（不属于核心 AgentEvent） */
 export interface ErrorEvent {
   type: 'error';
   message: string;
 }
 
-/** turn 完成标记 */
+/** WebSocket 传输层 turn 完成标记 */
 export interface TurnCompleteEvent {
   type: 'turn_complete';
 }
 
-/** 权限模式变更 */
+/** WebSocket 传输层权限模式广播 */
 export interface ModeChangeEvent {
   type: 'mode_change';
   mode: PermissionModeType;
 }
 
-/** 所有事件类型的联合 */
+/** WebSocket 事件联合：核心 AgentEvent + 传输层包装事件 */
 export type AgentEvent =
   | TextDeltaEvent
   | ToolStartEvent
   | ToolResultEvent
   | PermissionRequestEvent
+  | TypedErrorEvent
   | StatusEvent
   | CompleteEvent
   | AbortEvent

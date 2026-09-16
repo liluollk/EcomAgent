@@ -3,7 +3,7 @@ import { api } from '../../lib/api';
 import type { Skill } from '../../types';
 
 /** 技能页 — 只读查看器（展示版）：技能即知识包（SOP / 平台规则）。
- *  创建入口与真实版一致：对话中让 Agent 用 skill_creator 沉淀，管理界面只读。 */
+ *  创建入口与真实版一致：对话中让 Agent 用 skill_creator 沉淀；用户技能 CRUD 由设置页管理。 */
 export function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [openName, setOpenName] = useState<string | null>(null);
