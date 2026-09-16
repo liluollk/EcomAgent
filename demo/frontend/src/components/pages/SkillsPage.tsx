@@ -3,7 +3,7 @@ import { api } from '../../lib/api';
 import type { Skill } from '../../types';
 
 /** 技能页 — 只读查看器（展示版）：技能即知识包（SOP / 平台规则）。
- *  创建入口与真实版一致：对话中让 Agent 用 skill_creator 沉淀，管理界面只读。 */
+ *  创建入口与真实版一致：对话中让 Agent 用 skill_creator 沉淀；用户技能 CRUD 由设置页管理。 */
 export function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [openName, setOpenName] = useState<string | null>(null);
@@ -62,6 +62,10 @@ export function SkillsPage() {
                   <span className="font-mono text-[12.5px] font-medium text-ink">{s.name}</span>
                   {s.builtin && (
                     <span className="rounded bg-inset px-1.5 py-px text-[10.5px] text-ink-3">内置</span>
+                  )}
+                  {/* 依赖扩展工具的技能在默认 Agent 下无法执行，别让用户以为可以直接用 */}
+                  {s.default === false && (
+                    <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">需扩展工具</span>
                   )}
                   {!s.enabled && (
                     <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">已停用</span>

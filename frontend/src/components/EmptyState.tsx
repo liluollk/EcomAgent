@@ -1,31 +1,35 @@
 import { TOOL_META } from '../lib/format';
 import BlurText from './reactbits/BlurText';
 
-/** 空状态快捷指令：点击直接发送（对应后端四类真实工具） */
+/** 空状态快捷指令：点击直接发送（对应默认调价闭环的模型可见工具）
+ *
+ * 只放主流程：查快照 → 提交目标价（含两个平台各一条）→ 沉淀技能。
+ * 扩展工具（工单 / 知识库 / 经营分析）不在默认注册表里，不作为入口示例。
+ */
 const QUICK_PROMPTS: { tool: string; label: string; desc: string; prompt: string }[] = [
   {
-    tool: 'query_inventory',
-    label: '查询库存',
-    desc: '淘宝防晒霜 SKU-001 还有多少货',
-    prompt: '查询淘宝渠道 SKU-001 防晒霜的库存',
+    tool: 'query_product_snapshot',
+    label: '查商品快照',
+    desc: '淘宝 ITEM-1001/SKU-002 现在什么价、还有多少货',
+    prompt: '查一下淘宝 ITEM-1001/SKU-002 的当前价和库存',
   },
   {
     tool: 'update_price',
-    label: '调整价格',
-    desc: '把京东无线耳机的价格调到 299 元',
-    prompt: '把京东渠道 SKU-002 无线蓝牙耳机的价格调整为 299 元',
+    label: '淘宝调价',
+    desc: '把淘宝 ITEM-1001/SKU-002 的价格调到 99 元',
+    prompt: '把淘宝 ITEM-1001/SKU-002 的价格调到 99',
   },
   {
-    tool: 'create_promotion',
-    label: '创建促销',
-    desc: '在抖音上线一个限时 8 折活动',
-    prompt: '在抖音渠道为 SKU-003 创建一个限时 8 折的促销活动',
+    tool: 'update_price',
+    label: '抖店调价',
+    desc: '把抖店 ITEM-1001/SKU-002 的价格调到 95 元',
+    prompt: '把抖店 ITEM-1001/SKU-002 的价格调到 95',
   },
   {
-    tool: 'query_order_status',
-    label: '跟踪订单',
-    desc: '查询订单 TB-10086 的最新状态',
-    prompt: '查询淘宝渠道订单 TB-10086 的状态',
+    tool: 'save_skill',
+    label: '沉淀技能',
+    desc: '把刚才的调价流程做成一个技能',
+    prompt: '把刚才的调价流程做成一个叫 price_flow 的技能',
   },
 ];
 
@@ -41,13 +45,13 @@ export function EmptyState({ onPrompt }: { onPrompt: (text: string) => void }) {
           className="mt-0 justify-center text-[20px] font-semibold tracking-tight text-ink"
         />
         <p className="mx-auto mt-2 max-w-[420px] text-[13px] leading-relaxed text-ink-2">
-          已接入淘宝、京东、抖音三个渠道。用一句话就能查库存、调价格、创建促销、跟踪订单，我来执行并汇报结果。
+          支持淘宝、抖店两个平台的商品调价：先查快照，再提交目标价，经审批后执行，最后以平台回查确认结果。
         </p>
 
         <div className="mt-7 grid grid-cols-2 gap-3 text-left">
           {QUICK_PROMPTS.map((p, i) => (
             <button
-              key={p.tool}
+              key={p.prompt}
               onClick={() => onPrompt(p.prompt)}
               style={{ animationDelay: `${120 + i * 60}ms` }}
               className="stagger-item group rounded-xl bg-elevated p-3.5 text-left shadow-card transition-all hover:shadow-pop"
@@ -65,7 +69,7 @@ export function EmptyState({ onPrompt }: { onPrompt: (text: string) => void }) {
           ))}
         </div>
 
-        <p className="mt-6 text-[11.5px] text-ink-3">输入运营指令开始 · 例如：查询淘宝防晒霜 SKU-001 的库存</p>
+        <p className="mt-6 text-[11.5px] text-ink-3">输入运营指令开始 · 例如：把淘宝 ITEM-1001/SKU-002 的价格调到 99</p>
       </div>
     </div>
   );

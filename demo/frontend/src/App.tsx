@@ -265,6 +265,11 @@ export default function App() {
               toolName: event.tool_name,
               toolInput: event.tool_input,
               reason: event.reason,
+              operationId: event.operation_id,
+              platform: event.platform,
+              productRef: event.product_ref,
+              targetPrice: event.target_price,
+              ruleSummary: event.rule_summary,
             },
           });
           break;

@@ -4,8 +4,8 @@ import type { Skill } from '../../types';
 /** 技能页 — 只读查看器：技能即知识包（SOP / 平台规则），展示菜单与正文。
  *
  * 创建不走表单：在对话里让 Agent 用 skill_creator 沉淀（"把刚才的操作做成技能"），
- * save_skill 经 HITL 落盘并热加载进 load_skill 菜单——管理界面只读，避免与
- * Agent 化的创建路径形成两套事实源。
+ * save_skill 经 HITL 落盘并热加载进 load_skill 菜单——侧边栏保持只读；用户技能
+ * 的 CRUD 由设置页 SkillManager 负责，与 Agent 共用后端 skill 注册表。
  */
 export function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -65,6 +65,10 @@ export function SkillsPage() {
                   <span className="font-mono text-[12.5px] font-medium text-ink">{s.name}</span>
                   {s.builtin && (
                     <span className="rounded bg-inset px-1.5 py-px text-[10.5px] text-ink-3">内置</span>
+                  )}
+                  {/* 依赖扩展工具的技能在默认 Agent 下无法执行，别让用户以为可以直接用 */}
+                  {s.default === false && (
+                    <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">需扩展工具</span>
                   )}
                   {!s.enabled && (
                     <span className="rounded bg-[#F7E8B8] px-1.5 py-px text-[10.5px] text-[#92610A]">已停用</span>

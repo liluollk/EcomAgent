@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { PermissionInfo } from '../types';
-import { prettyJSON, toolLabel } from '../lib/format';
+import { CHANNEL_META, prettyJSON, toolLabel, type ChannelId } from '../lib/format';
 
 interface PermissionCardProps {
   permission: PermissionInfo;
@@ -16,6 +16,17 @@ export function PermissionCard({ permission, onRespond }: PermissionCardProps) {
     setDecision(approved ? 'approved' : 'denied');
     onRespond(permission.requestId, approved);
   };
+
+  // 调价审批的上下文：批之前得看清「改哪个平台的哪个商品、改成多少、触发了哪条规则」。
+  // 非调价工具的审批没有这些字段（可选），卡片退化回原有的「工具名 + 入参」形态。
+  const platformLabel = permission.platform
+    ? (CHANNEL_META[permission.platform as ChannelId]?.label ?? permission.platform)
+    : null;
+  const productRefLabel = permission.productRef
+    ? [permission.productRef.product_id, permission.productRef.sku_id].filter(Boolean).join(' / ')
+    : null;
+  const hasPriceContext =
+    Boolean(platformLabel || productRefLabel || permission.operationId) || permission.targetPrice != null;
 
   return (
     <div
@@ -57,6 +68,33 @@ export function PermissionCard({ permission, onRespond }: PermissionCardProps) {
           </span>
         )}
       </div>
+      {hasPriceContext && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ink-2">
+          {platformLabel && (
+            <span>
+              平台 <span className="font-medium text-ink">{platformLabel}</span>
+            </span>
+          )}
+          {productRefLabel && (
+            <span>
+              商品 <span className="font-mono text-[11.5px] text-ink">{productRefLabel}</span>
+            </span>
+          )}
+          {permission.targetPrice != null && (
+            <span>
+              目标价 <span className="font-medium text-ink">¥{permission.targetPrice}</span>
+            </span>
+          )}
+          {permission.operationId && (
+            <span className="break-all text-ink-3">
+              操作 <span className="font-mono text-[11px]">{permission.operationId}</span>
+            </span>
+          )}
+        </div>
+      )}
+      {permission.ruleSummary && (
+        <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">规则校验：{permission.ruleSummary}</p>
+      )}
       {permission.reason && <p className="mt-2 text-[12.5px] leading-relaxed text-ink-2">{permission.reason}</p>}
       <pre className="mt-2 overflow-x-auto rounded-lg bg-white/70 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-2">
         {prettyJSON(permission.toolInput)}
