@@ -47,9 +47,6 @@ from .memory_store import DEFAULT_MEMORY_STORE
 # 最大工具调用轮数，防止无限循环
 MAX_TOOL_ROUNDS = 10
 
-# 只读工具前缀，与权限层 mode_gate 的只读判定保持一致
-READONLY_TOOL_PREFIXES = ("query_", "get_", "list_", "search_")
-
 # 权限解析器签名：接收权限请求，返回用户是否批准
 PermissionResolver = Callable[[PermissionRequestEvent], Awaitable[bool]]
 
@@ -568,19 +565,38 @@ class BaseAgent:
     ) -> AsyncGenerator[AgentEvent, None]:
         """ASK 权限模式：发起权限请求 -> 等待用户决定 -> 批准执行 / 拒绝。"""
         yield event  # 先展示工具预览卡
+        # 调价操作上下文贯通：工具输入携带 operation_id 时，将其与平台/商品引用/
+        # 目标价/规则摘要一并带进权限请求，便于审批与执行状态审计关联。
+        op_ctx = {
+            key: event.input.get(key)
+            for key in ("operation_id", "platform", "product_ref", "target_price", "rule_summary")
+            if event.input.get(key) is not None
+        }
         request = PermissionRequestEvent(
             request_id=f"perm_{event.tool_use_id}",
             tool_name=event.tool_name,
             tool_input=event.input,
             reason=perm_result.reason or "该操作将产生业务副作用，需要用户确认",
+            **op_ctx,
         )
-        session.permission_requests.append({
+        perm_record = {
             "request_id": request.request_id,
             "tool_name": event.tool_name,
             "input": event.input,
             "user": session.user,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        perm_record.update(op_ctx)
+        session.permission_requests.append(perm_record)
+        if op_ctx.get("operation_id"):
+            session.price_operations[op_ctx["operation_id"]] = {
+                "operation_id": op_ctx["operation_id"],
+                "platform": op_ctx.get("platform", ""),
+                "product_ref": op_ctx.get("product_ref"),
+                "target_price": op_ctx.get("target_price", ""),
+                "rule_summary": op_ctx.get("rule_summary", ""),
+                "tool_use_id": event.tool_use_id,
+            }
         session.execution_state = ExecutionState.WAITING_PERMISSION
         yield request
 

@@ -42,7 +42,8 @@ class ToolStartEvent:
     """LLM 决定调用工具时发送的事件。
 
     包含工具名称、调用 ID（用于匹配 tool_result）和参数。
-    调用方收到此事件后应执行对应工具，然后发送 ToolResultEvent。
+    事件消费者可据此展示或记录工具调用；实际工具由 Agent 执行编排层执行，
+    并由执行层产出对应的 ToolResultEvent。
 
     可观测性字段（引擎回填，缺省不破坏既有消费方）：
     trace_id  一次 turn 的执行轨迹 ID（Trace 从事件流上自然生长）
@@ -93,6 +94,10 @@ class PermissionRequestEvent:
 
     包含请求 ID、工具名、参数和原因。
     调用方需响应该请求（allow/deny），随后 Agent 才能继续执行。
+
+    调价操作上下文字段（operation_id / platform / product_ref / target_price /
+    rule_summary）为可选，仅在工具输入携带 operation_id 时填充，缺省不破坏
+    既有消费方。
     """
 
     type: Literal["permission_request"] = "permission_request"
@@ -100,6 +105,13 @@ class PermissionRequestEvent:
     tool_name: str = ""
     tool_input: dict[str, Any] = None
     reason: str = ""
+    # 调价操作上下文（可选；由 update_price 工具输入携带 operation_id 时贯通，
+    # 缺省不破坏既有消费方）
+    operation_id: str = ""
+    platform: str = ""
+    product_ref: Optional[dict[str, str]] = None
+    target_price: str = ""
+    rule_summary: str = ""
 
     def __post_init__(self):
         if self.tool_input is None:

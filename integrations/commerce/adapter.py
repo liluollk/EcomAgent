@@ -213,17 +213,37 @@ class _BasePriceAdapter(PlatformAdapter):
         raise NotImplementedError
 
     # --- 共享请求通道 ---
+    def _timeout_seconds(self, writing: bool) -> float | None:
+        """单次请求的超时：取 Execution Policy 的读写分级与客户端传输超时中更紧的一个。
+
+        Execution Policy 是统一旋钮——评测把默认策略换成快配置（读 0.5s / 写 0.8s）
+        即可确定性地触发超时；客户端的 httpx 超时是传输层兜底。离线 ASGITransport
+        不会自己触发 httpx 超时，所以下面的 wait_for 是超时语义的实际来源。
+        """
+        from execution import policy as _ep
+
+        policy_seconds = _ep.DEFAULT_EXECUTION_POLICY.timeout.timeout_for(
+            "update_price" if writing else "query_snapshot"
+        )
+        client_timeout = getattr(getattr(self._client, "_client", None), "timeout", None)
+        client_seconds = getattr(client_timeout, "read", None)
+        candidates = [
+            float(seconds)
+            for seconds in (policy_seconds, client_seconds)
+            if isinstance(seconds, (int, float)) and seconds
+        ]
+        return min(candidates) if candidates else None
+
     async def _call_raw(self, method, path, envelope, *, idempotency_key=None, writing=False):
         # 在 adapter 边界强制「请求超时」：ASGI transport（离线测试）不会替我们触发
         # httpx 的读超时，这里用 asyncio.wait_for 统一把超时翻译成 PriceError，
         # 写超时必须标记 side_effect_possible=True（服务端可能已生效，必须回查而非重试写）。
-        transport = getattr(self._client, "_client", None)
-        read_timeout = getattr(getattr(transport, "timeout", None), "read", None)
+        timeout = self._timeout_seconds(writing)
         coro = self._client.call_raw(
             method, path, json_body=envelope, idempotency_key=idempotency_key
         )
         try:
-            raw = await asyncio.wait_for(coro, timeout=read_timeout) if read_timeout else await coro
+            raw = await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
         except asyncio.TimeoutError as e:
             raise PriceError(
                 PriceErrorCode.TRANSIENT_ERROR, f"{self.platform} 请求超时",
