@@ -70,6 +70,8 @@ _FAULT_SCRIPTS: dict[str, list[FaultScenario]] = {
     "verify_mismatch": [FaultScenario.VERIFY_MISMATCH],
     # 回查超时（复用 TIMEOUT：副作用落库后挂起，对只读回查即为「回查超时」）
     "verify_timeout": [FaultScenario.TIMEOUT],
+    # 回查持续超时：写入已生效但永远确认不了 → 只能如实报告「结果未确认」
+    "verify_timeout_permanent": [FaultScenario.TIMEOUT] * 100,
 }
 
 _script_steps: list[FaultScenario] = []
@@ -110,6 +112,7 @@ _FAULT_OPERATIONS: dict[str, frozenset[str] | None] = {
     "capability_refused": frozenset({"apply_price"}),
     "verify_mismatch": frozenset({"verify"}),
     "verify_timeout": frozenset({"verify"}),
+    "verify_timeout_permanent": frozenset({"verify"}),
 }
 
 # 当前请求的调价操作语义：snapshot / verify / apply_price / ""（非调价请求）
@@ -142,6 +145,16 @@ def load_script(name: str, *, timeout_seconds: float | None = None,
     resolved_operations = operations if operations is not None else _FAULT_OPERATIONS.get(name)
     _script_operations = frozenset(resolved_operations) if resolved_operations else None
     _pending_timeout = False
+
+
+def default_operations(name: str) -> frozenset[str] | None:
+    """某个脚本自带的目标调价操作集合（None = 对任意请求生效）。
+
+    评测装配（harness/faults.py）据此决定是否再把目标操作显式传给 load_script：
+    带语义的脚本（写超时 / 回查超时 / 平台限流 / 能力拒绝）自己声明目标操作，
+    通用脚本则不限，保证「场景表 + 脚本表」是定向消费的单一事实源。
+    """
+    return _FAULT_OPERATIONS.get(name)
 
 
 def reset_fault() -> None:

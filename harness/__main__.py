@@ -98,6 +98,7 @@ def _run_real_mode(args, runner: Runner, scenarios: list, recorder: Recorder, ru
                      "triggers": triggers, "verdict": verdict, "mean_duration_s": round(mean_dur, 2),
                      "usage": usage, "last_fail": last_fail,
                      "kind": scenario.get("kind", "gold"),
+                     "platform": scenario.get("platform", ""),
                      "metrics": list(scenario.get("metrics", []))})
         mark = verdict if verdict == "PASS" else ("NOT-EX" if verdict == "NOT-EXERCISED" else "FAIL")
         print(f"  [{idx}/{len(scenarios)}] {scenario['name']:34s} {passes}/{n} "
@@ -153,7 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         for s in SCENARIOS:
             metrics = ",".join(s.get("metrics", [])) or "-"
-            print(f"  {s['name']:32s} kind={s.get('kind', 'gold'):11s} "
+            print(f"  {s['name']:36s} kind={s.get('kind', 'gold'):11s} "
+                  f"platform={s.get('platform', '-'):7s} "
                   f"metrics={metrics} steps={len(s['steps'])}"
                   f"{'  [real]' if s.get('real') else ''}")
         return 0

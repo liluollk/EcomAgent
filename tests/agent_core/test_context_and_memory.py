@@ -228,7 +228,7 @@ def _make_session(ws, sid="s1"):
 def _run_chat(agent, session, text):
     async def _run():
         events = []
-        async for ev in agent.chat(session, text, [{"name": "query_inventory", "description": "", "parameters": {}}]):
+        async for ev in agent.chat(session, text, [{"name": "query_product_snapshot", "description": "", "parameters": {}}]):
             events.append(ev)
         return events
     return asyncio.run(_run())
@@ -246,7 +246,7 @@ def test_chat_writes_memory(monkeypatch, tmp_path):
     session = _make_session(ws)
     _run_chat(agent, session, "查一下库存")
     section = store.recall_section("default")
-    assert "query_inventory" in section
+    assert "query_product_snapshot" in section
     assert os.path.exists(os.path.join(str(tmp_path / "memory"), "default", "MEMORY.md"))
 
 

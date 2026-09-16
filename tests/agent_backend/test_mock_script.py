@@ -67,11 +67,15 @@ def test_mock_script_batch4_branches():
 
 
 def test_mock_script_existing_branches_unchanged():
-    """既有分支不受影响：促销 / 价格 / 订单 / 默认库存。"""
+    """既有分支不受影响：促销 / 价格 / 订单 / 默认快照。
+
+    默认调价闭环只注册 query_product_snapshot 与 update_price，
+    因此「没识别出任何意图」时的兜底从 query_inventory 改为 query_product_snapshot。
+    """
     assert _collect_domain_tool("创建促销活动") == "create_promotion"
     assert _collect_domain_tool("改一下价格") == "update_price"
     assert _collect_domain_tool("查订单") == "query_order_status"
-    assert _collect_domain_tool("随便聊聊") == "query_inventory"
+    assert _collect_domain_tool("随便聊聊") == "query_product_snapshot"
 
 
 def test_mock_script_skill_creator_branch():

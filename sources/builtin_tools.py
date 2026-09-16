@@ -377,6 +377,13 @@ def _format_coordinator_result(op: Any) -> str:
         return f"{label} 价格已更新为 {target} 元（平台回查一致）"
     if state == PriceChangeState.BLOCKED:
         # 拦截：含「拦截」+ 原因（成本保护 / 平台不支持 / 平台错误）
+        if op.receipt is not None:
+            # 写入已被平台接受（有回执）但后续回查没能确认：
+            # 这时说「未执行」是错的——价格很可能已经生效，必须如实报告为「未确认」。
+            return (
+                f"调价结果未确认：平台写入已返回，但回查未完成"
+                f"（{op.error or '回查失败'}）。建议重新查询当前价确认实际状态。"
+            )
         return f"拦截：调价未执行。原因：{op.error or '不满足调价前置条件'}"
     if state == PriceChangeState.REJECTED:
         # 拒绝 / 未生效：含「未执行」或「未生效」

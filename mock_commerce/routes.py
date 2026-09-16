@@ -107,7 +107,7 @@ async def update_price(
         record_write("update_price", {"channel": channel, "sku": body.sku, "new_price": body.new_price})
         return {"channel": channel, "sku": body.sku, "new_price": body.new_price}
 
-    resp = idempotent_call(_data, x_idempotency_key)
+    resp = idempotent_call(_data, x_idempotency_key, namespace=f"{channel}:update_price")
     await apply_fault_post()
     return resp
 
@@ -145,7 +145,7 @@ async def create_promotion(
         record_write("create_promotion", payload)
         return payload
 
-    resp = idempotent_call(_data, x_idempotency_key)
+    resp = idempotent_call(_data, x_idempotency_key, namespace=f"{channel}:create_promotion")
     await apply_fault_post()
     return resp
 
@@ -256,7 +256,7 @@ async def shelf(
         record_write("product_shelf", payload)
         return payload
 
-    resp = idempotent_call(_data, x_idempotency_key)
+    resp = idempotent_call(_data, x_idempotency_key, namespace=f"{channel}:product_shelf")
     await apply_fault_post()
     return resp
 
@@ -293,7 +293,7 @@ async def service_ticket(
         record_write("service_ticket", payload)
         return payload
 
-    resp = idempotent_call(_data, x_idempotency_key)
+    resp = idempotent_call(_data, x_idempotency_key, namespace=f"{channel}:service_ticket")
     await apply_fault_post()
     return resp
 
@@ -410,7 +410,7 @@ async def taobao_top_api(request: Request, x_idempotency_key: str | None = Heade
                 "sku_id": body.get("sku_id"), "price": body.get("price"),
             })
             return _tb_snapshot_data(p)
-        inner = idempotent_call(_data, x_idempotency_key)
+        inner = idempotent_call(_data, x_idempotency_key, namespace="taobao:item.sku.price.update")
         replay = bool(inner.get("data", {}).get("idempotent_replay", False))
         await apply_fault_post_platform()
         return _tb_ok("item_sku_price_update_response", inner["data"], idempotent_replay=replay)
@@ -466,7 +466,7 @@ async def douyin_sku_price(request: Request, x_idempotency_key: str | None = Hea
             "sku_id": body.get("sku_id"), "price": new_price_fen,
         })
         return _dy_snapshot_data(p)
-    inner = idempotent_call(_data, x_idempotency_key)
+    inner = idempotent_call(_data, x_idempotency_key, namespace="douyin:product.sku.price")
     replay = bool(inner.get("data", {}).get("idempotent_replay", False))
     await apply_fault_post_platform()
     return _dy_ok(inner["data"], idempotent_replay=replay)

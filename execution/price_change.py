@@ -80,7 +80,9 @@ _ALLOWED_TRANSITIONS: dict[PriceChangeState, frozenset[PriceChangeState]] = {
         PriceChangeState.VERIFYING, PriceChangeState.RETRYING,
         PriceChangeState.UNKNOWN_OUTCOME, PriceChangeState.BLOCKED,
     }),
-    PriceChangeState.RETRYING: frozenset({PriceChangeState.EXECUTING, PriceChangeState.BLOCKED}),
+    PriceChangeState.RETRYING: frozenset({
+        PriceChangeState.EXECUTING, PriceChangeState.VERIFYING, PriceChangeState.BLOCKED,
+    }),
     PriceChangeState.UNKNOWN_OUTCOME: frozenset({PriceChangeState.VERIFYING, PriceChangeState.BLOCKED}),
     PriceChangeState.VERIFYING: frozenset({
         PriceChangeState.SUCCEEDED, PriceChangeState.REJECTED,
@@ -396,12 +398,19 @@ class PriceChangeCoordinator:
     async def verify(self, op: PriceChangeOperation) -> None:
         """VERIFYING → 回查价格是否生效。
 
-        一致 → SUCCEEDED；不一致 → REJECTED；回查瞬态错误在限额内 RETRYING。
+        一致 → SUCCEEDED；不一致 → REJECTED；回查瞬态错误在限额内 RETRYING → 再回查。
+
+        回查重试沿用写入侧的同构写法：每轮开头把 RETRYING 显式推回 VERIFYING 再发请求。
+        不能停在 RETRYING 里直接重发——状态机不允许 RETRYING→SUCCEEDED 这类跨步转移，
+        也不允许 RETRYING→RETRYING，否则第二次回查超时会被判成「回查异常：非法状态转移」，
+        把「回查重试后成功」误报成拦截。
         """
-        if op.state != PriceChangeState.VERIFYING:
-            return
         attempts = 0
         while True:
+            if op.state not in (PriceChangeState.VERIFYING, PriceChangeState.RETRYING):
+                break
+            if op.state == PriceChangeState.RETRYING:
+                self._record_state(op, PriceChangeState.VERIFYING, reason="回查重试")
             attempts += 1
             try:
                 verification = await self.platform.verify_price(

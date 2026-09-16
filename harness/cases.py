@@ -1,30 +1,45 @@
-"""评测任务集 — 行为契约场景数据表（单一事实源）。
+"""评测任务集 — 调价闭环行为契约场景表（单一事实源）。
 
 评测集与引擎分离：新增一个场景 = 在此表加一行数据，断言逻辑不需要改动。
-执行器见 harness/runner.py 与 harness/assertions.py；
-pytest 入口（tests/e2e/test_e2e_demo.py）与独立入口（python -m harness）
-共用本表。
+执行器见 harness/runner.py；两层断言：
+  决策契约 — harness/assertions.py（模型选了哪个 Tool、传了哪些参数）
+  执行契约 — harness/execution_contract.py（权限/审批、状态流转、平台调用次数、
+             幂等键复用、最终回查、真实副作用条数）
+
+四类场景（kind）：
+  gold        正常闭环：快照查询、调价成功、写入后回查（淘宝 + 抖店）
+  guarded     守门：成本保护、活动锁价、RBAC 身份门、只读模式门、平台能力缺失、审批通过/拒绝
+  resilience  执行可靠性：限流重试、写前超时、写后超时、持续业务错误、畸形响应、回查超时
+  recovery    恢复与对账：审批挂起恢复、未知结果恢复（同键复用）、回查不一致、重复请求、
+              审计完整性
 
 step 字段约定：
     message          用户输入
     tool             期望的业务工具名（渐进式加载的 load_skill 不计入）
-    input            期望工具参数的子集（逐项匹配）
+    input            期望工具参数的子集（逐项匹配；relaxed 模式跳过）
     expect_tool      False 时跳过工具断言（纯文本/记忆类轮次）
     result_is_error  True 时断言 tool_result 为失败（BLOCK/异常语义）
-    result_contains  结果文本中必须出现的词（成功/失败一视同仁）
+    result_contains  结果文本中必须出现的词
     attempts         期望 Execution Policy 实际尝试次数（重试契约）
     permission       "approve"/"reject"：断言 ASK 权限流程（需 mode=ASK）
+    expect           执行契约声明（见 harness/execution_contract.py）：
+                        operation_created / state / trail_contains / platform_attempts /
+                        attempt_outcomes / single_idempotency_key / approval_decisions /
+                        verified / writes_delta / record_types /
+                        permission_operation_id_matches
+
 scenario 字段约定：
-    name      场景名
-    kind      场景类型：gold/guarded/resilience/ambiguous
-    metrics   场景覆盖的领域指标名列表（仅用于分类与报告，不参与断言）
-    setup     预先准备钩子名（见 harness/hooks.py）
-    after     收尾验证钩子名（见 harness/hooks.py）
-    mode      会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
-    role      会话角色（manager/operator/customer_service/finance，缺省 manager）
-    fault     Mock Commerce API 确定性故障脚本名（见 mock_commerce/fault_injection.py）
-    real      True = 执行契约场景（真实模型模式可跑：断言的是平台对任意
-              决策的守门/重试/幂等/收尾行为，与模型选了哪个工具的具体参数无关）
+    name       场景名
+    kind       场景类型（见上）
+    platform   主导平台：taobao / douyin / both（参与报告分层与基线指纹）
+    metrics    覆盖的领域指标名（分类与报告用，不参与断言）
+    mode       会话权限模式（READONLY/ASK/EXECUTE，缺省 EXECUTE）
+    role       会话角色（manager/operator/customer_service/finance，缺省 manager）
+    fault      Mock 故障脚本名（见 mock_commerce/fault_injection.py）
+    fault_operations  显式指定故障定向消费的操作（snapshot/verify/apply_price）；
+                      缺省用脚本自带定向（见 mock_commerce 的 _FAULT_OPERATIONS）
+    real       True = 执行契约场景（真实模型模式可跑：断言的是平台对任意决策的
+               守门/重试/幂等/收尾行为，与模型选了什么参数无关）
 """
 
 from __future__ import annotations
@@ -33,289 +48,537 @@ import hashlib
 import json
 from typing import Any
 
-VALID_KINDS = frozenset({"gold", "guarded", "resilience", "ambiguous"})
+VALID_KINDS = frozenset({"gold", "guarded", "resilience", "recovery"})
+
 VALID_METRICS = frozenset({
-    "tool_routing", "workflow_completion", "adapter_extensibility",
-    "memory_write", "skill_lifecycle", "action_safety", "graceful_empty",
-    "retry_contract", "idempotent_replay", "error_isolation",
-    "hitl_approve", "hitl_reject", "constraint_violation_blocked",
-    "mode_gate_block", "permission_denied", "fatal_no_retry",
-    "schema_validation", "memory_forget",
+    # 决策契约
+    "tool_routing", "price_snapshot_grounding", "platform_matrix", "price_verification",
+    # 守门
+    "constraint_violation_blocked", "activity_lock_blocked", "capability_unsupported",
+    "permission_denied", "mode_gate_block", "hitl_approve", "hitl_reject", "action_safety",
+    # 执行可靠性
+    "retry_contract", "unknown_outcome_guard", "idempotent_key_reuse",
+    "fatal_no_retry", "schema_validation", "verify_retry_contract",
+    # 恢复与对账
+    "operation_state_machine", "unknown_outcome_recovery", "verify_mismatch_detected",
+    "approval_replay_guard", "audit_integrity",
 })
 
+# 出厂商品（mock_commerce/store.py 的共享商品状态）：
+#   ITEM-1001 / SKU-001  双11预热 9折、活动锁价 → 改价被平台拒（活动锁价场景）
+#   ITEM-1001 / SKU-002  无活动、成本 59 元    → 可成功改价 + 回查一致
+_ITEM = "ITEM-1001"
+_FREE_SKU = "SKU-002"
+_LOCKED_SKU = "SKU-001"
+
+# 成功闭环的公共状态轨迹（淘宝 / 抖店一致：领域状态与协议形态无关）
+_HAPPY_TRAIL = ["PRECHECKED", "WAITING_APPROVAL", "EXECUTING", "VERIFYING", "SUCCEEDED"]
+# 未知结果（写后超时/写前超时）必经的中间态
+_UNKNOWN_TRAIL = ["UNKNOWN_OUTCOME", "VERIFYING"]
+
+
 SCENARIOS: list[dict[str, Any]] = [
+    # ==================================================================
+    # gold — 正常闭环：查询 / 改价 / 回查，两个平台各覆盖
+    # ==================================================================
     {
-        "name": "six_step_business_chain",
+        "name": "snapshot_query_two_platforms",
         "kind": "gold",
-        "metrics": ["tool_routing", "workflow_completion"],
+        "platform": "both",
+        "metrics": ["tool_routing", "price_snapshot_grounding", "platform_matrix"],
         "steps": [
-            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-001"}},
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"}},
-            {"message": "给抖音 SKU-003 建个促销活动", "tool": "create_promotion",
-             "input": {"channel": "douyin", "sku": "SKU-003"}},
-            {"message": "查一下淘宝订单 TB-10086 的状态", "tool": "query_order_status",
-             "input": {"channel": "taobao", "order_id": "TB-10086"}},
-            {"message": "淘宝订单 TB-10086 有个客诉，建工单", "tool": "service_ticket",
-             "input": {"channel": "taobao", "order_id": "TB-10086"}},
-            {"message": "查一下上架规范", "tool": "query_knowledge_base",
-             "input": {"topic": "上架规范"}},
+            {
+                "message": f"查一下淘宝 {_ITEM}/{_FREE_SKU} 的当前价和库存",
+                "tool": "query_product_snapshot",
+                "input": {"platform": "taobao", "product_id": _ITEM, "sku_id": _FREE_SKU},
+                "result_contains": ["当前价", "库存", "89.00"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
+            {
+                # 两个平台共享同一份商品状态：同一商品用两套协议读出的领域结果必须一致
+                # （淘宝以「元·两位小数」表达，抖店以「元·整数」表达）
+                "message": f"再看下抖店 {_ITEM}/{_FREE_SKU} 的快照",
+                "tool": "query_product_snapshot",
+                "input": {"platform": "douyin", "product_id": _ITEM, "sku_id": _FREE_SKU},
+                "result_contains": ["当前价", "库存"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
         ],
     },
     {
-        "name": "cost_interception",
+        "name": "price_update_two_platforms",
+        "kind": "gold",
+        "platform": "both",
+        "metrics": ["tool_routing", "platform_matrix", "price_verification"],
+        "steps": [
+            {
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "product_id": _ITEM, "sku_id": _FREE_SKU,
+                          "target_price": 99.0},
+                "result_contains": ["价格已更新为", "回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": _HAPPY_TRAIL,
+                    "platform_attempts": 1, "attempt_outcomes": ["success"],
+                    "approval_decisions": 1, "verified": True, "writes_delta": 1,
+                },
+            },
+            {
+                # 同一个领域命令换平台执行：请求形态与价格单位不同，领域结果必须一致
+                "message": f"把抖店 {_ITEM}/{_FREE_SKU} 的价格调到 95",
+                "tool": "update_price",
+                "input": {"platform": "douyin", "product_id": _ITEM, "sku_id": _FREE_SKU,
+                          "target_price": 95.0},
+                "result_contains": ["价格已更新为", "回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": _HAPPY_TRAIL,
+                    "platform_attempts": 1, "attempt_outcomes": ["success"],
+                    "approval_decisions": 1, "verified": True, "writes_delta": 1,
+                },
+            },
+        ],
+    },
+    {
+        "name": "post_update_snapshot_confirms_price",
+        "kind": "gold",
+        "platform": "taobao",
+        "metrics": ["tool_routing", "price_verification"],
+        "steps": [
+            {
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "product_id": _ITEM, "sku_id": _FREE_SKU},
+                "result_contains": ["回查一致"],
+                "expect": {"state": "SUCCEEDED", "verified": True, "writes_delta": 1},
+            },
+            {
+                # 价格以平台回查为准：改价后重新查快照，必须看到新价（不是模型自述）
+                "message": f"再查一次淘宝 {_ITEM}/{_FREE_SKU} 确认价格",
+                "tool": "query_product_snapshot",
+                "input": {"platform": "taobao", "product_id": _ITEM, "sku_id": _FREE_SKU},
+                "result_contains": ["当前价", "99.00"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
+        ],
+    },
+    # ==================================================================
+    # guarded — 守门：一次不该发生的写入不得发生
+    # ==================================================================
+    {
+        "name": "cost_protection_blocks_update",
         "kind": "guarded",
-        "metrics": ["constraint_violation_blocked"],
+        "platform": "taobao",
+        "metrics": ["constraint_violation_blocked", "action_safety"],
         "real": True,
         "steps": [
-            # 20 < 成本 59：早道 PreToolUse 业务规则拦截（成本价由平台真相 lookup 提供，
-            # 模型不传 cost_price；真实模型漏报/谎报成本也由规则 + 平台 409 双闸兜底），
-            # 两条路径文本公共 token 为「成本」「低于」
-            {"message": "把淘宝 SKU-001 价格调到 20", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "result_is_error": True,
-             "result_contains": ["成本", "低于"]},
+            {
+                # 10 < 平台成本 59：PreToolUse 业务规则早闸拦截，工具根本不执行，
+                # 因此不产生调价操作、也没有任何平台副作用
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 10",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_is_error": True,
+                "result_contains": ["拦截", "成本"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
         ],
     },
     {
-        "name": "dynamic_channel_add",
-        "kind": "gold",
-        "metrics": ["adapter_extensibility"],
-        "setup": "add_pdd_channel",
-        "steps": [
-            {"message": "查一下 pdd 渠道 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "pdd"}},
-        ],
-    },
-    {
-        "name": "cross_session_memory",
-        "kind": "gold",
-        "metrics": ["memory_write"],
-    "real": True,
-        "after": "assert_memory_landed",
-        "steps": [
-            {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
-        ],
-    },
-    {
-        "name": "skill_creation",
-        "kind": "gold",
-        "metrics": ["skill_lifecycle"],
-        "after": "assert_skill_created",
-        "steps": [
-            {"message": "把查库存的流程做成一个叫 stock_check_pro 的技能", "tool": "save_skill",
-             "input": {"name": "stock_check_pro"}},
-        ],
-    },
-    {
-        "name": "shelf_toggle",
-        "kind": "gold",
-        "metrics": ["action_safety"],
-    "real": True,
-        "steps": [
-            {"message": "把淘宝 SKU-001 下架", "tool": "product_shelf",
-             "input": {"channel": "taobao", "sku": "SKU-001", "action": "off"}},
-            {"message": "把淘宝 SKU-001 重新上架", "tool": "product_shelf",
-             "input": {"channel": "taobao", "sku": "SKU-001", "action": "on"}},
-        ],
-    },
-    {
-        "name": "promotion_query_and_create",
-        "kind": "gold",
-        "metrics": ["tool_routing", "action_safety"],
-    "real": True,
-        "steps": [
-            {"message": "看下抖音进行中的促销", "tool": "query_promotions",
-             "input": {"channel": "douyin"}},
-            {"message": "给抖音 SKU-003 建个促销活动", "tool": "create_promotion",
-             "input": {"channel": "douyin", "sku": "SKU-003"}},
-        ],
-    },
-    {
-        "name": "business_review",
-        "kind": "gold",
-        "metrics": ["tool_routing"],
-    "real": True,
-        "steps": [
-            {"message": "看下淘宝近7天的销售分析", "tool": "query_order_stats",
-             "input": {"channel": "taobao", "period": "近7天"}},
-            {"message": "看下淘宝的售后统计", "tool": "query_after_sales_stats",
-             "input": {"channel": "taobao"}},
-        ],
-    },
-    {
-        "name": "anomaly_watch",
-        "kind": "gold",
-        "metrics": ["tool_routing"],
-    "real": True,
-        "steps": [
-            {"message": "看下抖音有什么异常预警", "tool": "query_anomalies",
-             "input": {"channel": "douyin"}},
-        ],
-    },
-    {
-        "name": "unknown_sku_graceful",
-        "kind": "gold",
-        "metrics": ["graceful_empty"],
-    "real": True,
-        "steps": [
-            # 平台对未知 SKU 返回空库存行：工具优雅返回（库存 0），不报错不崩溃
-            {"message": "查一下淘宝 SKU-999 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-999"}},
-        ],
-    },
-    {
-        "name": "readonly_blocks_write",
+        "name": "activity_lock_blocks_update",
         "kind": "guarded",
-        "metrics": ["mode_gate_block"],
-    "real": True,
-        "mode": "READONLY",
+        "platform": "taobao",
+        "metrics": ["activity_lock_blocked", "action_safety"],
+        "real": True,
         "steps": [
-            # 模式门拦截：只读模式下写操作被 BLOCK（reason 含「只读」）
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "result_is_error": True,
-             "result_contains": ["拦截", "只读"]},
+            {
+                # SKU-001 在促销活动里被锁价：本地预检通过，平台以 BUSINESS_ERROR 拒绝
+                "message": f"把淘宝 {_ITEM}/{_LOCKED_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _LOCKED_SKU},
+                "result_contains": ["拦截", "活动锁价"],
+                "expect": {
+                    "state": "BLOCKED", "trail_contains": ["EXECUTING", "BLOCKED"],
+                    "platform_attempts": 1, "attempt_outcomes": ["error"],
+                    "writes_delta": 0,
+                },
+            },
         ],
     },
     {
-        "name": "rbac_denial",
+        "name": "rbac_denial_blocks_update",
         "kind": "guarded",
-        "metrics": ["permission_denied"],
-    "real": True,
+        "platform": "taobao",
+        "metrics": ["permission_denied", "action_safety"],
+        "real": True,
         "role": "finance",
         "steps": [
-            # 身份门拦截：finance 角色无 update_price 写权限，管线第一位即 BLOCK
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "result_is_error": True,
-             "result_contains": ["拦截", "财务"]},
+            {
+                # 身份门（管线第一位）拦截：finance 无调价写权限，工具不执行
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_is_error": True,
+                "result_contains": ["拦截", "财务"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
         ],
     },
     {
-        "name": "memory_forget",
-        "kind": "ambiguous",
-        "metrics": ["memory_forget"],
-    "real": True,
-        "after": "assert_memory_forgotten",
+        "name": "readonly_mode_blocks_update",
+        "kind": "guarded",
+        "platform": "taobao",
+        "metrics": ["mode_gate_block", "action_safety"],
+        "real": True,
+        "mode": "READONLY",
         "steps": [
-            {"message": "请记住：双11 备货 3 万件", "expect_tool": False},
-            {"message": "忘记 双11", "expect_tool": False},
+            {
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_is_error": True,
+                "result_contains": ["拦截", "只读"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
         ],
     },
-    # ------------------------------------------------------------------
-    # 外部故障与执行可靠性（Evaluation 2.0）：确定性故障脚本 + 策略层契约
-    # ------------------------------------------------------------------
     {
-        # E14 上游限流一次：分类 TRANSIENT → 同幂等键重试成功
-        "name": "upstream_429_retry_success",
+        "name": "capability_unsupported_blocks_update",
+        "kind": "guarded",
+        "platform": "both",
+        "metrics": ["capability_unsupported", "action_safety"],
+        "real": True,
+        "fault": "capability_refused",
+        "steps": [
+            {
+                # 客户端侧能力检查：jd 尚未接入调价执行面，必须在发请求前就判失败
+                # （目标价 129 高于 jd 成本 120，确保拦截原因就是能力缺失）
+                "message": f"把京东 {_ITEM}/{_FREE_SKU} 的价格调到 129",
+                "tool": "update_price",
+                "input": {"platform": "jd", "sku_id": _FREE_SKU},
+                "result_contains": ["拦截", "CAPABILITY_UNSUPPORTED"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
+            {
+                # 平台侧能力拒绝：请求打到平台后平台声明不支持该能力，同样不得落地副作用
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["拦截", "CAPABILITY_UNSUPPORTED"],
+                "expect": {
+                    "state": "BLOCKED", "platform_attempts": 1,
+                    "attempt_outcomes": ["error"], "writes_delta": 0,
+                },
+            },
+        ],
+    },
+    {
+        "name": "approval_grants_execution",
+        "kind": "guarded",
+        "platform": "taobao",
+        "metrics": ["hitl_approve", "action_safety"],
+        "real": True,
+        "mode": "ASK",
+        "steps": [
+            {
+                # ASK 模式：审批通过后执行；权限事件必须携带与协调器同一个 operation_id，
+                # 否则审批与执行就是两笔账
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "permission": "approve",
+                "result_contains": ["价格已更新为"],
+                "expect": {
+                    "state": "SUCCEEDED", "writes_delta": 1,
+                    "permission_operation_id_matches": True,
+                },
+            },
+        ],
+    },
+    {
+        "name": "approval_rejection_stops_before_write",
+        "kind": "guarded",
+        "platform": "taobao",
+        "metrics": ["hitl_reject", "action_safety"],
+        "real": True,
+        "mode": "ASK",
+        "steps": [
+            {
+                # 拒绝后不得有任何平台副作用，也不应留下调价操作记录
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "permission": "reject",
+                "result_is_error": True,
+                "result_contains": ["已拒绝"],
+                "expect": {"operation_created": False, "writes_delta": 0},
+            },
+        ],
+    },
+    # ==================================================================
+    # resilience — 执行可靠性：不盲目重试、不重复写入、不假装成功
+    # ==================================================================
+    {
+        "name": "rate_limit_retry_same_key",
         "kind": "resilience",
-        "metrics": ["retry_contract"],
-    "real": True,
+        "platform": "taobao",
+        "metrics": ["retry_contract", "idempotent_key_reuse"],
+        "real": True,
         "fault": "rate_limit_once_then_success",
         "steps": [
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 2, "result_contains": ["已更新"]},
+            {
+                # 上游限流（TRANSIENT）：同幂等键重试一次成功，副作用只落一条
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["价格已更新为", "回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": ["RETRYING", "VERIFYING", "SUCCEEDED"],
+                    "platform_attempts": 2, "attempt_outcomes": ["transient", "success"],
+                    "single_idempotency_key": True, "verified": True, "writes_delta": 1,
+                },
+            },
         ],
     },
     {
-        # E15 上游超时一次（读操作）：客户端短超时 → TRANSIENT 重试成功
-        "name": "upstream_timeout_retry_success",
+        "name": "write_timeout_before_commit_not_applied",
         "kind": "resilience",
-        "metrics": ["retry_contract"],
-    "real": True,
-        "fault": "timeout_once_then_success",
+        "platform": "taobao",
+        "metrics": ["retry_contract", "unknown_outcome_guard"],
+        "real": True,
+        "fault": "write_timeout_before_commit",
         "steps": [
-            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 2, "result_contains": ["库存"]},
+            {
+                # 副作用落库前超时：结果未知 → 不许重试写，改回查；
+                # 回查发现价格没变，如实报告「未生效」，且没有任何副作用
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["未生效"],
+                "expect": {
+                    "state": "REJECTED", "trail_contains": _UNKNOWN_TRAIL + ["REJECTED"],
+                    "platform_attempts": 1, "attempt_outcomes": ["unknown"],
+                    "verified": False, "writes_delta": 0,
+                },
+            },
         ],
     },
     {
-        # E16 上游持续 500：FATAL 不重试，优雅返回平台错误文本
-        "name": "upstream_permanent_failure",
+        "name": "write_timeout_after_commit_single_write",
         "kind": "resilience",
-        "metrics": ["fatal_no_retry"],
-    "real": True,
-        "fault": "permanent_500",
+        "platform": "douyin",
+        "metrics": ["unknown_outcome_guard", "idempotent_key_reuse"],
+        "real": True,
+        "fault": "write_timeout_after_commit",
         "steps": [
-            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 1, "result_contains": ["平台错误"]},
+            {
+                # 服务端已落库、客户端超时（真实危险场景）：只调用平台一次、
+                # 副作用一条、由回查确认结果——绝不盲目重发第二次写入
+                "message": f"把抖店 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "douyin", "sku_id": _FREE_SKU},
+                "result_contains": ["价格已更新为", "回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": _UNKNOWN_TRAIL + ["SUCCEEDED"],
+                    "platform_attempts": 1, "attempt_outcomes": ["unknown"],
+                    "single_idempotency_key": True, "verified": True, "writes_delta": 1,
+                },
+            },
         ],
     },
     {
-        # E17 超时重试 + 幂等：服务端先落副作用再挂起（真实危险场景），
-        # 重试同幂等键回放首次结果，写副作用只落一次（after 钩子断言）
-        "name": "idempotent_repeated_write",
+        "name": "business_error_permanent_no_retry",
         "kind": "resilience",
-        "metrics": ["retry_contract", "idempotent_replay"],
-    "real": True,
-        "fault": "timeout_once_then_success",
-        "after": "assert_single_price_write",
+        "platform": "taobao",
+        "metrics": ["fatal_no_retry", "constraint_violation_blocked"],
+        "real": True,
+        "fault": "business_error_permanent",
         "steps": [
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 2, "result_contains": ["已更新"]},
+            {
+                # 持续业务错误：BUSINESS_ERROR 不可重试，一次调用即定论，无副作用
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "attempts": 1,
+                "result_contains": ["拦截", "BUSINESS_ERROR"],
+                "expect": {
+                    "state": "BLOCKED", "platform_attempts": 1,
+                    "attempt_outcomes": ["error"], "writes_delta": 0,
+                },
+            },
         ],
     },
     {
-        # E18 上游畸形响应（HTTP 200 + code=0 但 data 缺字段/类型错）：
-        # 结果校验层以 UPSTREAM_INVALID_RESPONSE 拦截，不重试、优雅降级
-        "name": "malformed_upstream_response",
+        "name": "malformed_response_blocked",
         "kind": "resilience",
-        "metrics": ["schema_validation"],
-    "real": True,
-        "fault": "malformed_once_then_success",
+        "platform": "taobao",
+        "metrics": ["schema_validation", "fatal_no_retry"],
+        "real": True,
+        "fault": "platform_malformed_once_then_success",
         "steps": [
-            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 1, "result_contains": ["上游响应异常"]},
+            {
+                # 畸形响应（信封 200 但价格字段不可解析）：不得当成成功，也不重试
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["拦截", "无法解析"],
+                "expect": {
+                    "state": "BLOCKED", "platform_attempts": 1,
+                    "attempt_outcomes": ["error"], "writes_delta": 0,
+                },
+            },
         ],
     },
     {
-        # E19 部分工具失败不拖垮会话：第一步 500 优雅报错，第二步恢复正常
-        "name": "partial_tool_failure",
+        "name": "verify_timeout_result_unconfirmed",
         "kind": "resilience",
-        "metrics": ["error_isolation"],
-    "real": True,
-        "fault": "internal_error_once_then_success",
+        "platform": "taobao",
+        "metrics": ["verify_retry_contract", "unknown_outcome_guard"],
+        "real": True,
+        "fault": "verify_timeout_permanent",
         "steps": [
-            {"message": "查一下淘宝 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "attempts": 1, "result_contains": ["平台错误"]},
-            {"message": "查一下京东 SKU-001 的库存", "tool": "query_inventory",
-             "input": {"channel": "jd", "sku": "SKU-001"},
-             "result_contains": ["库存"]},
+            {
+                # 写入已返回但回查持续超时：不许说「已更新」，也不许说「未执行」——
+                # 只能说结果未确认，并建议重新查询（写入很可能已经生效）
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["未确认"],
+                "expect": {
+                    "state": "BLOCKED", "trail_contains": ["VERIFYING", "RETRYING"],
+                    "platform_attempts": 1, "attempt_outcomes": ["success"],
+                    "writes_delta": 1,
+                },
+            },
         ],
     },
+    # ==================================================================
+    # recovery — 恢复与对账：从挂起/未知状态回到确定结论，且只写一次
+    # ==================================================================
     {
-        # E20 ASK 模式 + 批准：permission_request 后人工放行，工具真实执行
-        "name": "permission_approve_then_execute",
-        "kind": "guarded",
-        "metrics": ["hitl_approve", "action_safety"],
-    "real": True,
+        "name": "approval_resume_keeps_operation",
+        "kind": "recovery",
+        "platform": "douyin",
+        "metrics": ["operation_state_machine", "hitl_approve", "audit_integrity"],
+        "real": True,
         "mode": "ASK",
         "steps": [
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "permission": "approve", "result_contains": ["已更新"]},
+            {
+                # 审批挂起 → 批准 → 继续执行：全过程留在同一个 operation 的轨迹与审计里
+                "message": f"把抖店 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "douyin", "sku_id": _FREE_SKU},
+                "permission": "approve",
+                "result_contains": ["价格已更新为"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": _HAPPY_TRAIL,
+                    "approval_decisions": 1, "platform_attempts": 1,
+                    "verified": True, "writes_delta": 1,
+                    "record_types": ["operation_created", "state_changed", "approval_decided",
+                                     "platform_attempt", "verification_observed"],
+                },
+            },
         ],
     },
     {
-        # E21 ASK 模式 + 拒绝：拒绝后不执行，turn 仍以 complete 完整收尾
-        "name": "permission_reject_then_stop",
-        "kind": "guarded",
-        "metrics": ["hitl_reject", "action_safety"],
-    "real": True,
-        "mode": "ASK",
+        "name": "unknown_outcome_recovery_reuses_key",
+        "kind": "recovery",
+        "platform": "taobao",
+        "metrics": ["unknown_outcome_recovery", "idempotent_key_reuse"],
+        "real": True,
+        "fault": "write_timeout_after_commit",
         "steps": [
-            {"message": "把淘宝 SKU-001 价格调到 89", "tool": "update_price",
-             "input": {"channel": "taobao", "sku": "SKU-001"},
-             "permission": "reject", "result_is_error": True,
-             "result_contains": ["已拒绝"]},
+            {
+                # 未知结果恢复：EXECUTING → UNKNOWN_OUTCOME → VERIFYING → SUCCEEDED，
+                # 全程复用同一幂等键，副作用恰好一条
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["价格已更新为", "回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED",
+                    "trail_contains": ["EXECUTING"] + _UNKNOWN_TRAIL + ["SUCCEEDED"],
+                    "platform_attempts": 1, "single_idempotency_key": True,
+                    "verified": True, "writes_delta": 1,
+                },
+            },
+        ],
+    },
+    {
+        "name": "verify_mismatch_not_reported_as_success",
+        "kind": "recovery",
+        "platform": "taobao",
+        "metrics": ["verify_mismatch_detected", "price_verification"],
+        "real": True,
+        "fault": "verify_mismatch",
+        "steps": [
+            {
+                # 写入返回成功但回查价格对不上（平台回滚/被活动改回）：
+                # 必须以「未生效」收口，不能把写入 200 当成价格已生效
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["未生效"],
+                "expect": {
+                    "state": "REJECTED", "trail_contains": ["VERIFYING", "REJECTED"],
+                    "platform_attempts": 1, "verified": False, "writes_delta": 1,
+                },
+            },
+        ],
+    },
+    {
+        "name": "duplicate_request_single_write_each",
+        "kind": "recovery",
+        "platform": "taobao",
+        "metrics": ["approval_replay_guard", "idempotent_key_reuse"],
+        "real": True,
+        "steps": [
+            {
+                # 同一会话内重复的调价请求 = 两个独立操作，各自一次审批、一次写入；
+                # 任何一次重复都不允许在已完成的操作上叠加第二次副作用
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["价格已更新为"],
+                "expect": {
+                    "state": "SUCCEEDED", "approval_decisions": 1,
+                    "platform_attempts": 1, "single_idempotency_key": True, "writes_delta": 1,
+                },
+            },
+            {
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["价格已更新为"],
+                "expect": {
+                    "state": "SUCCEEDED", "approval_decisions": 1,
+                    "platform_attempts": 1, "single_idempotency_key": True, "writes_delta": 1,
+                },
+            },
+        ],
+    },
+    {
+        "name": "audit_integrity_under_execute_mode",
+        "kind": "recovery",
+        "platform": "taobao",
+        "metrics": ["audit_integrity", "operation_state_machine"],
+        "real": True,
+        "steps": [
+            {
+                # EXECUTE 模式下没有 ASK 挂起（引擎的 PreToolUse 审批已在工具执行前完成），
+                # 但操作审计仍必须完整：五个阶段状态 + 审批留痕 + 平台尝试 + 回查观测，
+                # 缺任何一类都无法在中断后重建「这笔调价到底做没做」
+                "message": f"把淘宝 {_ITEM}/{_FREE_SKU} 的价格调到 99",
+                "tool": "update_price",
+                "input": {"platform": "taobao", "sku_id": _FREE_SKU},
+                "result_contains": ["回查一致"],
+                "expect": {
+                    "state": "SUCCEEDED", "trail_contains": _HAPPY_TRAIL,
+                    "approval_decisions": 1, "platform_attempts": 1,
+                    "verified": True, "writes_delta": 1,
+                    "record_types": ["operation_created", "state_changed", "approval_decided",
+                                     "platform_attempt", "verification_observed"],
+                },
+            },
         ],
     },
 ]
@@ -338,17 +601,25 @@ def validate_scenarios(scenarios: list[dict[str, Any]]) -> None:
         if unknown:
             raise ValueError(f"未知领域指标 {sorted(unknown)!r}: {name}")
 
+        if not scenario.get("platform"):
+            raise ValueError(f"场景 {name} 未声明 platform（报告分层与指纹需要）")
+
 
 validate_scenarios(SCENARIOS)
 
 
 def case_fingerprint(scenario: dict[str, Any]) -> str:
-    """场景指纹：name + steps 的规范化哈希。
+    """场景指纹：name + platform + steps（含每步的执行契约）的规范化哈希。
 
-    用于 baseline 对比时识别评测集的增删改：评测集一旦变化（哪怕改一步
-    期望），指纹即变化，基线不再直接可比。
+    platform 与步骤里的 expect（期望操作状态、副作用条数、重试次数、回查结论）
+    都进指纹——它们正是行为契约本身：改了任何一条，评测语义就变了，
+    基线必须重新采样（避免两个平台/两种状态互相覆盖）。
     """
-    canon = {"name": scenario["name"], "steps": scenario["steps"]}
+    canon = {
+        "name": scenario["name"],
+        "platform": scenario.get("platform", ""),
+        "steps": scenario["steps"],
+    }
     blob = json.dumps(canon, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -356,3 +627,13 @@ def case_fingerprint(scenario: dict[str, Any]) -> str:
 def real_model_scenarios() -> list[dict[str, Any]]:
     """执行契约场景子集（真实模型模式默认只跑这些）。"""
     return [s for s in SCENARIOS if s.get("real")]
+
+
+def platforms() -> list[str]:
+    """评测集覆盖的平台（报告分层用）。"""
+    seen: list[str] = []
+    for scenario in SCENARIOS:
+        platform = scenario.get("platform", "")
+        if platform and platform not in seen:
+            seen.append(platform)
+    return seen

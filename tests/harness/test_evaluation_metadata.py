@@ -10,15 +10,32 @@ def test_all_scenarios_have_valid_metadata():
         "gold",
         "guarded",
         "resilience",
-        "ambiguous",
+        "recovery",
     }
 
 
 def test_metadata_does_not_change_baseline_fingerprint():
-    scenario = {"name": "x", "steps": [{"message": "m"}]}
-    tagged = {**scenario, "kind": "guarded", "metrics": ["permission_denied"]}
+    scenario = {"name": "x", "platform": "taobao", "steps": [{"message": "m"}]}
+    tagged = {**scenario, "kind": "guarded", "metrics": ["permission_denied"],
+              "real": True, "mode": "ASK", "fault": "verify_timeout"}
 
     assert cases.case_fingerprint(scenario) == cases.case_fingerprint(tagged)
+
+
+def test_platform_and_expect_change_baseline_fingerprint():
+    """平台与每步的执行契约期望都属于行为契约：改了就必须重新采样基线。
+
+    否则「淘宝改成抖店」「副作用 1 条改成 2 条」这类语义变化会被指纹漏掉，
+    两个平台的状态互相覆盖。
+    """
+    base = {"name": "x", "platform": "taobao",
+            "steps": [{"message": "m", "expect": {"state": "SUCCEEDED"}}]}
+
+    other_platform = {**base, "platform": "douyin"}
+    other_state = {**base, "steps": [{"message": "m", "expect": {"state": "BLOCKED"}}]}
+
+    assert cases.case_fingerprint(base) != cases.case_fingerprint(other_platform)
+    assert cases.case_fingerprint(base) != cases.case_fingerprint(other_state)
 
 
 def test_metrics_group_by_kind_and_domain_metric():

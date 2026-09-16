@@ -142,8 +142,18 @@ def workspace_rules_rule(rules: list[dict], cost_lookup: Optional[Callable[[Any,
                 continue
             effective = tool_input
             if rtype == "price_above_cost" and tool_name == "update_price":
+                # update_price 有两种入参形态：扩展工具集的历史形态
+                # （channel / sku / new_price）与默认调价闭环的形态
+                # （platform / product_id / sku_id / target_price）。
+                # 早闸必须在两种形态下都能取到「平台 + SKU」与「目标价」，
+                # 否则默认工具会因为取不到 SKU 而拿不到成本价，被失败关闭规则
+                # 一律拦成「无法确认平台成本价」——那样成本保护就变成了全量拦截。
+                # 成本真相始终来自 cost_lookup（平台数据），不回退到调用方传值。
+                eff_platform = tool_input.get("platform") or tool_input.get("channel")
+                eff_sku = tool_input.get("sku_id") or tool_input.get("sku")
+                eff_price = tool_input.get("target_price", tool_input.get("new_price", 0))
                 try:
-                    platform_cost = cost_lookup(tool_input.get("channel"), tool_input.get("sku"))
+                    platform_cost = cost_lookup(eff_platform, eff_sku)
                 except Exception as exc:
                     return PreToolUseResult(
                         action=PreToolUseAction.BLOCK,
@@ -154,7 +164,7 @@ def workspace_rules_rule(rules: list[dict], cost_lookup: Optional[Callable[[Any,
                         action=PreToolUseAction.BLOCK,
                         reason="无法确认平台成本价，已拦截调价",
                     )
-                effective = {**tool_input, "cost_price": platform_cost}
+                effective = {**tool_input, "new_price": eff_price, "cost_price": platform_cost}
             result = impl(tool_name, effective)
             if result.action != PreToolUseAction.ALLOW:
                 return result

@@ -32,6 +32,7 @@ def idempotent_call(
     data_factory: Callable[[], dict],
     x_idempotency_key: Optional[str],
     record: Optional[Callable[[dict], None]] = None,
+    namespace: str = "",
 ) -> dict:
     """幂等写语义：同键重复请求回放首次结果，真实副作用只落一次。
 
@@ -39,18 +40,23 @@ def idempotent_call(
         data_factory: 首次请求时构造响应 data（副作用随构造发生）。
         x_idempotency_key: 幂等键（缺失时退化为普通一次性写）。
         record: 首次副作用落库回调（写审计日志）。
+        namespace: 幂等命名空间（通常传「端点/操作」）。真实平台的幂等键
+            只在同一个接口内唯一；若网关把全局键当成同一个命名空间，
+            调用方在淘宝与抖店用了同一个键时，抖店会收到淘宝的响应体
+            （协议信封完全不同，直接解析失败）。默认空串保持旧调用语义。
     """
-    if not x_idempotency_key:
+    scoped = f"{namespace}|{x_idempotency_key}" if namespace else x_idempotency_key
+    if not scoped:
         result = data_factory()
         if record:
             record(result)
         return ok_response(result)
-    if x_idempotency_key in _idempotency:
-        return ok_response(_idempotency[x_idempotency_key], idempotent_replay=True)
+    if scoped in _idempotency:
+        return ok_response(_idempotency[scoped], idempotent_replay=True)
     result = data_factory()
     if record:
         record(result)
-    _idempotency[x_idempotency_key] = result
+    _idempotency[scoped] = result
     return ok_response(result, idempotent_replay=False)
 
 

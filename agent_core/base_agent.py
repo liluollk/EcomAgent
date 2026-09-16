@@ -115,6 +115,7 @@ class BaseAgent:
         self._tool_handlers: dict[str, Callable] = {}
         self._tool_sources: dict[str, str] = {}  # 工具名 → 来源通道（commerce/mcp）
         self._turn_number: int = 0  # 当前 turn 序号（用于 operation_id 生成）
+        self._operation_seq: int = 0  # 调价操作序号（保证「一次工具调用 = 一个操作 ID」）
         self._current_session: Optional[Session] = None  # 当前 turn 的会话（供调价工具审计）
         self._permission_resolver: Optional[PermissionResolver] = None
         self._permission_canceller: Optional[Callable[[], None]] = None
@@ -788,12 +789,18 @@ class BaseAgent:
             return False
 
     def _make_operation_id(self, session: Session, tool_use_id: str) -> str:
-        """生成引擎侧的 operation_id：op-{session_id}-{turn}-{tool_use_id}。
+        """生成引擎侧的 operation_id：op-{session_id}-{seq}-{tool_use_id}。
 
-        同一 turn 内同一 tool call 得到同一个值，因此权限事件、工具执行与
-        操作审计记录引用的是同一次调价操作；跨 turn 不会撞号。
+        必须保证「一次工具调用 = 一个操作」：这个 ID 同时决定操作审计的落盘
+        主键与派生出的平台幂等键。早先的方案是 op-{session_id}-{turn}-{tool_use_id}，
+        它默认 tool_use_id 每次调用都不同——但后端并不保证这一点（离线剧本后端
+        对同类调用复用同一个 tool_use_id，同一 turn 内多次调用也会重号）。
+        一撞号就会出两类实际事故：审计记录被两次操作混写、幂等键相同导致平台把
+        第二次请求当成第一次的重放（跨商品、甚至跨平台读到上一次的响应）。
+        因此改用进程内自增序号：不依赖后端如何取 ID，且仍然是可读、可追溯的确定值。
         """
-        return f"op-{session.session_id}-{self._turn_number}-{tool_use_id}"
+        self._operation_seq += 1
+        return f"op-{session.session_id}-{self._operation_seq}-{tool_use_id}"
 
     def _check_permission(self, event: ToolStartEvent) -> PreToolUseResult:
         """通过 PreToolUsePipeline 检查工具调用权限。
