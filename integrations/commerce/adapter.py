@@ -5,10 +5,11 @@
   - PlatformAdapter：抽象接缝。工具层只调 `_exec(channel, operation, params)`，
     由 adapter 负责 build_request（出 method/path/http_kwargs）与
     parse_response（归一到 mock 同款字段名，保证工具文本模板逐字不变）。
-  - MockAdapter：把原本散在 11 个工具里的 (method, path, body) 映射收拢到这里，
+  - MockAdapter：把原本散在各工具里的 (method, path, body) 映射收拢到这里，
     是「第一个 adapter」，也是默认行为（platform=mock 时字节级不变）。
-  - Taobao / Jd / Douyin / GenericOpen adapter：**stub 占位**。真实签名与字段
-    映射需平台资质后在各 adapter 里补，此处只留接口与诚实提示。
+  - Taobao / Douyin adapter：调价执行面的离线契约实现（TOP 参数信封 / JSON body，
+    签名与 token 都收在 Adapter 内，不进入领域对象）。Jd / GenericOpen：**stub 占位**，
+    真实签名与字段映射需平台资质后在各 adapter 里补，此处只留接口与诚实提示。
 
 契约（关键）：parse_response 返回的 dict，字段名必须与 mock 平台返回一致
 （stock/name/status/orders/items/refund_rate/ticket_id/idempotent_replay 等），
@@ -107,7 +108,7 @@ class PlatformAdapter(ABC):
 
 
 class MockAdapter(PlatformAdapter):
-    """Mock 平台适配器 — 承载原本散在 11 个工具里的 (method, path, body) 映射。"""
+    """Mock 平台适配器 — 承载扩展工具通道的 (method, path, body) 映射。"""
 
     kind = "mock"
 

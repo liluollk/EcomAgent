@@ -68,7 +68,7 @@ export function durationText(ms?: number): string | null {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-/** 工具关键参数摘要：一行内联展示（craft 式 muted input summary），无关键参数返回 null */
+/** 工具关键参数摘要：一行内联展示；无关键参数时返回 null */
 export function paramSummary(toolName: string, input: Record<string, unknown> | undefined): string | null {
   if (!input) return null;
   const s = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);

@@ -404,13 +404,14 @@ export function McpPage() {
                   </div>
                 ))}
                 {status.tools.length === 0 && (
-                  <div className="px-4 py-10 text-center text-[12.5px] text-ink-3">未发现工具（电商运营工具为内置通道，不在此列）</div>
+                  <div className="px-4 py-10 text-center text-[12.5px] text-ink-3">未发现工具（内置电商工具不在此列）</div>
                 )}
               </div>
 
               <p className="text-[11.5px] leading-relaxed text-ink-3">
                 MCP server 以 stdio 子进程连接，工具经 JSON-RPC 真实协议发现后注入执行链路；
-                新增/修改配置后可用「测连通」验证。电商运营工具（查库存 / 改价 / 上下架等）为内置平台 API 通道，
+                新增/修改配置后可用「测连通」验证。内置电商工具（默认 query_product_snapshot / update_price /
+                save_skill 三个，库存、促销、上下架等属扩展工具通道）不在此列，
                 本页面管理的是外部第三方工具。
               </p>
             </>

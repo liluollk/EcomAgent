@@ -34,7 +34,7 @@
   --ch-douyin: #12b7bf;
   /* 气泡：用户消息中性弱底（结构不沾彩色，颜色只留给语义） */
   --bubble: rgba(28, 30, 27, 0.05);
-  /* 阴影：1px 前景描环（craft 式 shadow-minimal）+ 两层微 blur，取代 border+shadow 双线 */
+  /* 阴影：1px 前景描环 + 两层微 blur，取代 border+shadow 双线 */
   --shadow-card:
     0 0 0 1px rgba(28, 30, 27, 0.07),
     0 1px 1px -0.5px rgba(28, 30, 27, 0.05),
@@ -46,7 +46,7 @@
     0 0 0 4px rgba(28, 30, 27, 0.045);
 }
 
-/* 徽章：语义色只做 4~9% 的底 + 同色文字（craft 的 color-mix 手法，明暗主题皆适配） */
+/* 徽章：语义色只做 4~9% 的底 + 同色文字，明暗主题皆适配 */
 .badge {
   display: inline-flex;
   align-items: center;

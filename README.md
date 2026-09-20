@@ -11,10 +11,6 @@
 ![pytest](https://img.shields.io/badge/pytest-515%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
-<img src="docs/images/agent-chat.png" width="72%" alt="会话演示"/>
-
-*一次真实会话：用户指令 → 技能加载与工具调用（渠道徽章 + 执行耗时）→ 敏感写操作人工批准（HITL）→ 基于真实工具结果的收尾汇报*
-
 </div>
 
 ---
@@ -143,7 +139,7 @@ CREATED → PRECHECKED → WAITING_APPROVAL → EXECUTING → VERIFYING → SUCC
 
 </details>
 
-**⑦ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景全部是商品调价场景，按 `gold / guarded / resilience / recovery` 四类组织；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具、传的 SKU 与目标价对不对，剧本专属）与**执行契约**（权限、状态流转、平台调用次数、幂等回放、最终回查、副作用数，模型无关）；换 `--backend openai --provider deepseek` 即进入真实模型评测模式，只跑执行契约子集。
+**⑦ 行为验证体系（Evaluation Harness）——用例是数据，不是代码。** 21 条端到端场景全部是商品调价场景，按 `gold / guarded / resilience / recovery` 四类组织；剧本后端 + 确定性故障保证同输入同轨迹；与 baseline 指纹对比，行为退化即非零退出。契约分两档——**决策契约**（模型选哪个工具、传的 SKU 与目标价对不对，剧本专属）与**执行契约**（权限、状态流转、平台调用次数、幂等回放、最终回查、副作用数，模型无关）；换 `--backend openai --provider <providers.json 中的供应商名>` 即进入真实模型评测模式，只跑执行契约子集。
 
 <details>
 <summary>展开细节</summary>
@@ -164,6 +160,8 @@ CREATED → PRECHECKED → WAITING_APPROVAL → EXECUTING → VERIFYING → SUCC
 
 ## 📦 功能全景
 
+> 当前默认注册表以**调价闭环**工具为主（快照查询 / 提交改价 / 技能保存）；库存、促销、上下架等属扩展工具通道或 Mock 测试数据，不在默认 Agent 的已验证主链路内（见文末边界声明）。
+
 | 能力 | 说明 |
 |---|---|
 | 模型后端抽象 | OpenAI 兼容 / Anthropic / Mock 统一 `AgentBackend` 契约，流式增量解析与消息归一化在 adapter 内消化 |
@@ -182,9 +180,7 @@ CREATED → PRECHECKED → WAITING_APPROVAL → EXECUTING → VERIFYING → SUCC
 
 ## 🏗️ 架构
 
-<p align="center">
-  <img src="docs/images/architecture.svg" width="58%" alt="EcomAgent 总体架构：前端 → FastAPI → Agent 执行编排 → PreToolUse 权限管线 → Execution Policy → 工具源 → Commerce Adapter → Mock / 真实平台；AgentEvent 事件流贯穿全链"/>
-</p>
+链路：前端（React / WebSocket）→ FastAPI → Agent 执行编排（会话与上下文、模型调用、工具循环）→ PreToolUse 权限管线 → Execution Policy（错误分类 / 重试 / 幂等 / 结果校验）→ 工具源 → Commerce Adapter → 离线 Mock 渠道网关。AgentEvent 事件流贯穿前端展示、审计与行为评测。
 
 **第一原则：执行编排不感知「淘宝」。** 平台地址、字段名、签名、错误码语义全部收进 Adapter——接入真实电商平台 = 新增一个 Adapter 实现，上层编排流程不改。
 
@@ -241,12 +237,12 @@ cd frontend && npm run build
 python -m pytest tests/ -q     # 515 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条调价场景（gold 3 / guarded 7 / resilience 6 / recovery 5）+ 基线验收，退化即非零退出
 python -m harness --list                                                # 查看场景类型与领域指标
-python -m harness --backend openai --provider deepseek --repeat 3        # 真实模型评测（18 条执行契约场景 ×3，三态统计）
+python -m harness --backend openai --provider <name> --repeat 3   # 真实模型评测（18 条执行契约场景 ×3，三态统计）
 ```
 
 端到端场景全部走真实执行链：剧本后端替代真实 LLM，Mock API 注入确定性故障，断言到「事件序列 + 工具参数 + 副作用审计」粒度（如：超时重试场景会校验平台写操作日志只有一条）。
 
-**历史真实模型基准样例（DeepSeek-chat，2026-09-07，18 场景 ×3 = 54 轮）**：稳定通过 **17/18**，not-exercised 1，FLAKY/FAIL **0**（exit 0）——契约触发的轮次**全部正确**（触发通过率 100%）。该结果用于展示评测流程，不代表每次运行结果完全固定。not-exercised 的 1 条（`promotion_query_and_create`）与 3 条各 1 轮，是模型选择不发起写尝试，平台守门/重试/幂等/权限契约在每次被触发时均按预期工作。同一模型在旧口径（要求第一个业务工具即期望工具）下仅 12/18——6 条假阳性全部源于「先查库存再调价」的合理行为被误判，佐证执行契约必须与决策契约分档。
+**真实模型评测说明：** 当前行为基线以 `harness/cases.py` 中 **21 条调价契约场景** 与 `baseline.json` 为准。真实模型模式只跑其中标注为执行契约的子集（约 18 条 × `--repeat`），结果用 **PASS / NOT-EXERCISED / FAIL** 三态统计：模型未触发期望业务工具时不计为执行失败。不同供应商、不同提示下的触发率与通过率会变化，请以本机 `python -m harness --backend openai --provider <name>` 的报告为准；历史报告仅用于说明评测流程，不代表每次运行数字固定。
 
 ---
 

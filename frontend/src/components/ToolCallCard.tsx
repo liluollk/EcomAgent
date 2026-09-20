@@ -3,7 +3,7 @@ import type { ToolCallInfo } from '../types';
 import { CHANNEL_META, TOOL_META, durationText, inferChannel, paramSummary, prettyJSON } from '../lib/format';
 
 /**
- * 工具调用组（craft 式 activity rows）：一次回复的全部工具调用折叠进一个
+ * 工具调用组：一次回复的全部工具调用折叠进一个活动行列表，
  * ring 容器，行间 hairline 分隔。每行 = 状态图标 + 中文工具名 + 内联参数摘要
  * + 执行徽章（渠道 / 重试 / 幂等回放 / 耗时），点击展开输入输出与 Trace 元数据。
  * 对话是叙事，工具活动是折叠的行——不再一张一张浮卡打断阅读。

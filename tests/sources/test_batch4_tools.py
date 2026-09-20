@@ -25,7 +25,7 @@ def _run(coro):
 
 
 def test_default_registry_exposes_price_loop_and_extension_has_rest():
-    """默认注册表只暴露调价闭环 3 工具；其余 11 个老操作经由扩展注册表提供。"""
+    """默认注册表只暴露调价闭环 3 工具；其余 10 个老操作经由扩展注册表提供。"""
     default_names = set(builtin_tools.tool_names())
     assert default_names == {"query_product_snapshot", "update_price", "save_skill"}
     ext_names = set(builtin_tools.EXTENSION_TOOL_NAMES)

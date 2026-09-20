@@ -23,6 +23,38 @@ from pathlib import Path
 from typing import Any, Optional
 
 from harness.assertions import NotExercisedError, assert_step
+
+
+def _model_user_message(step: dict, scenario: dict, real_mode: bool) -> str:
+    """真实模型模式下强化写指令，降低「SOP 先确认」导致的 NOT-EXERCISED。
+
+    离线剧本后端按关键词 scripted，不依赖本改写；仅 backend!=mock 时启用。
+    断言仍使用 step 原文与期望工具，不改变契约本身。
+    """
+    msg = str(step.get("message") or "")
+    if not real_mode:
+        return msg
+    if str(step.get("tool") or "") != "update_price":
+        return msg
+    mode = str(step.get("mode") or scenario.get("mode") or "EXECUTE")
+    role = str(step.get("role") or scenario.get("role") or "manager")
+    if mode == "READONLY" or role == "finance":
+        tail = (
+            "请调用 update_price 尝试提交该目标价；"
+            "是否放行由系统权限与模式门决定，不要仅查询后结束。"
+        )
+    elif mode == "ASK":
+        tail = (
+            "请直接调用 update_price 提交目标价；"
+            "人工审批由系统处理，不要只查询、不要等待用户再次确认。"
+        )
+    else:
+        tail = (
+            "请直接调用 update_price 提交目标价，"
+            "不要只查询、不要等待用户再次确认。"
+        )
+    # /price_management 预加载 SOP，避免模型只 load_skill 不写
+    return f"/price_management {msg}。{tail}"
 from harness.execution_contract import assert_execution_contract, snapshot_store
 from harness.hooks import get_after_hook, get_setup_hook
 from harness.metrics import CaseRecord
@@ -224,13 +256,15 @@ class Runner:
 
                 raw_events: list[Any] = []
                 case_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+                real_mode = self.backend != "mock"
                 for step in scenario["steps"]:
                     current_step.clear()
                     current_step.update(step)
                     tools = _build_tools()
                     # 执行契约基线：本步开始前的操作集合与平台副作用条数
                     before = snapshot_store(session.session_id)
-                    events = [ev async for ev in agent.chat(session, step["message"], tools)]
+                    model_message = _model_user_message(step, scenario, real_mode)
+                    events = [ev async for ev in agent.chat(session, model_message, tools)]
                     # 成本维度：每轮 chat 后立即累计（断言失败也要计入 token）
                     u = getattr(agent.backend, "usage", None)
                     if u:
