@@ -26,13 +26,13 @@ async def _client():
 
 
 async def test_overview_aggregates_default_channels():
-    """内置三渠道全部聚合成功：核心指标 + 促销/异常列表 + 商品。"""
+    """内置渠道全部聚合成功：核心指标 + 促销/异常列表 + 商品。"""
     async with await _client() as client:
         resp = await client.get("/workspace/overview")
         assert resp.status_code == 200
         data = resp.json()
         names = {c["name"] for c in data["channels"]}
-        assert names == {"taobao", "jd", "douyin"}
+        assert names == {"taobao", "jd", "douyin", "pinduoduo"}
 
         for ch in data["channels"]:
             assert ch["connected"] is True
@@ -44,7 +44,7 @@ async def test_overview_aggregates_default_channels():
             assert ch["product"] and ch["product"]["name"] and ch["product"]["stock"] > 0
 
         s = data["summary"]
-        assert s["connected_channels"] == 3
+        assert s["connected_channels"] == 4
         assert s["total_orders"] == sum(c["orders"] for c in data["channels"])
         assert s["total_promotions"] == sum(len(c["promotions"]) for c in data["channels"])
 
@@ -60,9 +60,15 @@ async def test_overview_disabled_channel_excluded():
 
 
 async def test_overview_real_platform_channel_marked_not_connected():
-    """真实平台渠道：适配层未接入，返回占位 + 诚实说明，不误报连通。"""
+    """配置了凭证/base_url 的真实平台渠道：聚合层诚实占位，不误报连通。"""
     async with await _client() as client:
-        resp = await client.post("/sources", json={"name": "pdd", "label": "拼多多", "platform": "taobao"})
+        resp = await client.post("/sources", json={
+            "name": "pdd",
+            "label": "拼多多店",
+            "platform": "taobao",
+            "base_url": "https://example.invalid/openapi",
+            "options": {"app_key": "k", "app_secret": "s"},
+        })
         assert resp.status_code == 200
         data = (await client.get("/workspace/overview")).json()
         pdd = next(c for c in data["channels"] if c["name"] == "pdd")

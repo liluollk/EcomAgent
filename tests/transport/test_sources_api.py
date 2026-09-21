@@ -28,7 +28,7 @@ async def test_list_sources_default_three():
         resp = await client.get("/sources")
         data = resp.json()
         names = {c["name"] for c in data}
-        assert names == {"taobao", "jd", "douyin"}
+        assert names == {"taobao", "jd", "douyin", "pinduoduo"}
 
 
 async def test_add_and_list_source():

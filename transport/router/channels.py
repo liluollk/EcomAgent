@@ -72,7 +72,13 @@ async def test_source(name: str) -> JSONResponse:
         )
     platform = str(cfg.get("platform") or "mock")
     if platform != "mock":
-        adapter = DEFAULT_CHANNEL_REGISTRY.executor_for(name)
+        # 按配置的 platform 路由 probe（而非 effective_platform）：
+        # 未填凭证时仍由该平台 Adapter 如实说明「离线契约 / 待配置凭证」
+        from integrations.commerce.adapter import get_adapter
+
+        adapter = get_adapter(platform)
+        if hasattr(adapter, "configure"):
+            adapter.configure(cfg)
         try:
             result = await adapter.probe(cfg)
         except NotImplementedError as exc:

@@ -70,15 +70,32 @@ def _exit_fault_operation(scope) -> None:
     var.reset(token)
 
 
-PLATFORM_KINDS = ["mock", "taobao", "jd", "douyin", "open"]
+PLATFORM_KINDS = ["mock", "taobao", "jd", "douyin", "pinduoduo", "open"]
 
 PLATFORM_LABELS = {
     "mock": "本地 Mock（免费离线）",
     "taobao": "淘宝开放平台 TOP",
     "jd": "京东宙斯 JOS",
     "douyin": "抖音电商开放平台",
+    "pinduoduo": "拼多多开放平台",
     "open": "自定义开放平台（generic）",
 }
+
+
+def channel_has_live_credentials(cfg: dict[str, Any] | None) -> bool:
+    """渠道是否已配置可用于真实 HTTP 的凭证或 base_url。"""
+    if not cfg:
+        return False
+    opts = cfg.get("options") or {}
+    if not isinstance(opts, dict):
+        opts = {}
+    return bool(
+        str(cfg.get("base_url") or "").strip()
+        or str(cfg.get("api_key") or "").strip()
+        or str(opts.get("access_token") or "").strip()
+        or str(opts.get("app_key") or "").strip()
+        or str(opts.get("app_secret") or "").strip()
+    )
 
 
 class PlatformAdapter(ABC):
@@ -88,6 +105,26 @@ class PlatformAdapter(ABC):
     """
 
     kind: str
+    # 渠道配置注入的凭证（app_key/app_secret/access_token/base_url）；空则用协议内离线默认值
+    _creds: dict[str, str] = {}
+
+    def configure(self, cfg: dict[str, Any] | None) -> None:
+        """从渠道配置注入凭证与 base_url（前端「渠道连接」保存后调用）。"""
+        cfg = cfg or {}
+        opts = cfg.get("options") or {}
+        if not isinstance(opts, dict):
+            opts = {}
+        self._creds = {
+            "app_key": str(opts.get("app_key") or cfg.get("api_key") or ""),
+            "app_secret": str(opts.get("app_secret") or ""),
+            "access_token": str(opts.get("access_token") or ""),
+            "api_key": str(cfg.get("api_key") or ""),
+            "base_url": str(cfg.get("base_url") or ""),
+        }
+
+    def cred(self, name: str, fallback: str = "") -> str:
+        val = str((self._creds or {}).get(name) or "")
+        return val or fallback
 
     @abstractmethod
     def build_request(
@@ -178,11 +215,50 @@ class _BasePriceAdapter(PlatformAdapter):
         method = self._method_for(operation)
         return "POST", self._endpoint_for(operation), {"json_body": self._build_envelope(method, params)}
 
+    def configure(self, cfg: dict[str, Any] | None) -> None:
+        """注入渠道凭证；若配置了 base_url 则改走渠道 REST 客户端以便真实联调。"""
+        super().configure(cfg)
+        base_url = self.cred("base_url")
+        channel_name = str((cfg or {}).get("name") or self.platform or "")
+        if base_url and channel_name:
+            try:
+                from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
+
+                client = DEFAULT_CHANNEL_REGISTRY.client_for(channel_name)
+                if client is not None:
+                    self._client = client
+            except Exception:
+                pass
+
     async def probe(self, cfg):
+        self.configure(cfg)
+        opts = (cfg or {}).get("options") or {}
+        has_cred = bool(
+            self.cred("access_token")
+            or self.cred("app_key")
+            or self.cred("api_key")
+            or (isinstance(opts, dict) and opts.get("app_secret"))
+        )
+        base_url = self.cred("base_url")
+        if base_url and has_cred:
+            return {
+                "ok": True,
+                "message": (
+                    f"{self.kind} 离线契约实现；已配置 base_url 与凭证，将请求 {base_url}"
+                    "（非生产接入声明，请以平台联调环境验证签名与权限，未经真实平台资质）"
+                ),
+                "data": {"platform": self.platform, "mode": "live_configured", "base_url": base_url},
+            }
         return {
             "ok": True,
-            "message": f"{self.kind} 调价执行面就绪（离线契约实现，未经真实平台资质）",
-            "data": {"platform": self.platform},
+            "message": (
+                f"{self.kind} 调价执行面就绪（离线契约实现，未经真实平台资质）；"
+                "未配置生产凭证时走本地 Mock / 离线契约，填 base_url 与凭证后可切换真实请求"
+            ),
+            "data": {
+                "platform": self.platform,
+                "mode": "offline_contract",
+            },
         }
 
     # --- PricePlatform 接缝（调价闭环依赖） ---
@@ -351,8 +427,8 @@ class TaobaoAdapter(_BasePriceAdapter):
     def _build_envelope(self, method, params) -> dict:
         base = {
             "method": method,
-            "app_key": self._APP_KEY,
-            "session": self._SESSION,
+            "app_key": self.cred("app_key", self._APP_KEY),
+            "session": self.cred("access_token", self._SESSION),
             "timestamp": str(int(time.time())),
             "format": "json",
             "v": "2.0",
@@ -363,9 +439,10 @@ class TaobaoAdapter(_BasePriceAdapter):
         return {**base, **params}
 
     def _sign(self, params) -> str:
+        secret = self.cred("app_secret", self._APP_SECRET)
         items = sorted((str(k), str(v)) for k, v in params.items())
-        raw = self._APP_SECRET + "".join(f"{k}{v}" for k, v in items) + self._APP_SECRET
-        return hmac.new(self._APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
+        raw = secret + "".join(f"{k}{v}" for k, v in items) + secret
+        return hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
 
     def _price_out(self, price: Decimal) -> str:
         return f"{Decimal(price).quantize(Decimal('0.01'))}"
@@ -457,17 +534,18 @@ class DouyinAdapter(_BasePriceAdapter):
 
     def _build_envelope(self, method, params) -> dict:
         base = {
-            "access_token": self._ACCESS_TOKEN,
-            "app_key": self._APP_KEY,
+            "access_token": self.cred("access_token", self._ACCESS_TOKEN),
+            "app_key": self.cred("app_key", self._APP_KEY),
             "sign": self._sign(params),
             "timestamp": int(time.time()),
         }
         return {**base, **params}
 
     def _sign(self, params) -> str:
+        secret = self.cred("app_secret", self._APP_SECRET)
         items = sorted((str(k), str(v)) for k, v in params.items())
-        raw = self._APP_SECRET + "".join(f"{k}{v}" for k, v in items) + self._APP_SECRET
-        return hmac.new(self._APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
+        raw = secret + "".join(f"{k}{v}" for k, v in items) + secret
+        return hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
 
     def _price_out(self, price: Decimal) -> int:
         return int((Decimal(price) * 100).to_integral_value())
@@ -523,6 +601,124 @@ class DouyinAdapter(_BasePriceAdapter):
         }.get(code, PriceErrorCode.FATAL_ERROR)
 
 
+class PinduoduoAdapter(_BasePriceAdapter):
+    """拼多多开放平台调价 Adapter。
+
+    协议形态：JSON body + client_id/access_token + sign；价格以「分」整数收发。
+    未配置 base_url 与凭证时 probe 提示走离线契约；配置后请求渠道 base_url。
+    具体接口路径以申请资质后的官方文档为准，此处契约字段与本地 Mock/联调对齐。
+    """
+
+    kind = "pinduoduo"
+    platform = "pinduoduo"
+    price_scale = 0
+    _endpoint_snapshot = "/pdd/product/sku/get"
+    _endpoint_update = "/pdd/product/sku/price"
+    _APP_KEY = "mock_client_id"
+    _APP_SECRET = "mock_client_secret"
+    _ACCESS_TOKEN = "mock_access_token"
+
+    def _endpoint_for(self, operation):
+        return self._endpoint_snapshot if operation in ("snapshot", "verify") else self._endpoint_update
+
+    def _ref_params(self, ref: ProductRef) -> dict:
+        return {"goods_id": ref.product_id, "sku_id": ref.sku_id, "mall_id": ref.shop_id}
+
+    def _build_envelope(self, method, params) -> dict:
+        secret = self.cred("app_secret", self._APP_SECRET)
+        client_id = self.cred("app_key", self._APP_KEY)
+        token = self.cred("access_token", self._ACCESS_TOKEN)
+        payload = {
+            "type": method,
+            "client_id": client_id,
+            "access_token": token,
+            "timestamp": str(int(time.time())),
+            "data_type": "JSON",
+        }
+        all_params = {**payload, "params": params}
+        payload["sign"] = self._sign_pdd(secret, {**payload, "params": params})
+        return {**all_params, "sign": payload["sign"]}
+
+    @staticmethod
+    def _sign_pdd(secret: str, params: dict) -> str:
+        """简化签名：secret + 排序拼接（联调时按官方 sign 规则替换）。"""
+        flat = []
+        for k in sorted(params.keys()):
+            v = params[k]
+            if k == "sign":
+                continue
+            if isinstance(v, dict):
+                import json as _json
+
+                v = _json.dumps(v, ensure_ascii=False, sort_keys=True)
+            flat.append(f"{k}{v}")
+        raw = secret + "".join(flat) + secret
+        return hashlib.md5(raw.encode()).hexdigest().upper()
+
+    def _price_out(self, price: Decimal) -> int:
+        return int((Decimal(price) * 100).to_integral_value())
+
+    def _price_in(self, raw) -> Decimal:
+        return Decimal(int(raw)) / 100
+
+    def _unwrap(self, raw, response_key) -> dict:
+        if not isinstance(raw, dict):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多返回结构异常", platform="pinduoduo")
+        code = raw.get("error_response", {}).get("code") if "error_response" in raw else raw.get("code", 0)
+        if code not in (0, None):
+            msg = (
+                raw.get("error_response", {}).get("error_msg")
+                if "error_response" in raw
+                else str(raw.get("msg", "拼多多错误"))
+            )
+            raise PriceError(
+                self._map_code(code), str(msg), platform="pinduoduo", platform_code=code
+            )
+        data = raw.get("data") or raw.get(response_key) or {}
+        if isinstance(data, dict) and "goods_sn" in data and "price" not in data:
+            data = data.get("goods_sn") or data
+        if "price" not in data:
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多响应缺少 price 字段", platform="pinduoduo")
+        try:
+            self._price_in(data["price"])
+        except (InvalidOperation, ValueError, TypeError):
+            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多返回价格无法解析", platform="pinduoduo")
+        return data
+
+    def _parse_snapshot(self, ref, data) -> "ProductSnapshot":
+        return ProductSnapshot(
+            product_ref=ref,
+            name=str(data.get("goods_name", "")),
+            current_price=self._price_in(data.get("price", 0)),
+            stock=int(data.get("stock", 0)),
+            status=str(data.get("status", "")),
+            activity_name=str(data.get("promotion", "")),
+            activity_locked=bool(data.get("promotion_locked", False)),
+            observed_at="",
+        )
+
+    def _parse_write_receipt(self, ref, data) -> PriceWriteReceipt:
+        return PriceWriteReceipt(
+            product_ref=ref,
+            applied_price=self._price_in(data.get("price", 0)),
+            idempotent_replay=bool(data.get("idempotent_replay", False)),
+            attempts=1,
+        )
+
+    @staticmethod
+    def _map_code(code) -> PriceErrorCode:
+        return {
+            10001: PriceErrorCode.CLIENT_ERROR,
+            10002: PriceErrorCode.CLIENT_ERROR,
+            10003: PriceErrorCode.CLIENT_ERROR,
+            20001: PriceErrorCode.BUSINESS_ERROR,
+            20002: PriceErrorCode.BUSINESS_ERROR,
+            30001: PriceErrorCode.TRANSIENT_ERROR,
+            50000: PriceErrorCode.FATAL_ERROR,
+            90000: PriceErrorCode.CAPABILITY_UNSUPPORTED,
+        }.get(code, PriceErrorCode.FATAL_ERROR)
+
+
 class _StubAdapter(PlatformAdapter):
     """真实平台（京东 / 自定义开放平台）adapter 的 stub：诚实声明尚未接入。"""
 
@@ -533,6 +729,7 @@ class _StubAdapter(PlatformAdapter):
         )
 
     async def probe(self, cfg):
+        self.configure(cfg)
         return {
             "ok": False,
             "message": f"平台 {self.kind} 尚未接入：需平台资质与 base_url/签名配置后再测连通",
@@ -556,6 +753,7 @@ ADAPTER_REGISTRY: dict[str, type[PlatformAdapter]] = {
     "taobao": TaobaoAdapter,
     "jd": JdAdapter,
     "douyin": DouyinAdapter,
+    "pinduoduo": PinduoduoAdapter,
     "open": GenericOpenAdapter,
 }
 
@@ -564,7 +762,17 @@ def get_adapter(platform: str) -> PlatformAdapter:
     cls = ADAPTER_REGISTRY.get(platform or "mock")
     if cls is None:
         cls = MockAdapter
-    return cls()
+    adapter = cls()
+    # 从渠道注册表绑定同名渠道的凭证（taobao/douyin/pinduoduo 等）
+    try:
+        from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
+
+        cfg = DEFAULT_CHANNEL_REGISTRY.get(str(platform or "mock"))
+        if cfg is not None and hasattr(adapter, "configure"):
+            adapter.configure(cfg)
+    except Exception:
+        pass
+    return adapter
 
 
 def platform_is_real(platform: str) -> bool:
@@ -578,10 +786,12 @@ __all__ = [
     "TaobaoAdapter",
     "JdAdapter",
     "DouyinAdapter",
+    "PinduoduoAdapter",
     "GenericOpenAdapter",
     "PLATFORM_KINDS",
     "PLATFORM_LABELS",
     "ADAPTER_REGISTRY",
     "get_adapter",
     "platform_is_real",
+    "channel_has_live_credentials",
 ]

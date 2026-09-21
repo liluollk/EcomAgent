@@ -29,6 +29,7 @@ from integrations.commerce.adapter import (
     PLATFORM_KINDS,
     get_adapter,
     platform_is_real,
+    channel_has_live_credentials,
 )
 
 # mock 平台模拟鉴权 key（真实平台：各渠道 OAuth token）
@@ -63,6 +64,16 @@ _DEFAULT_CHANNELS: list[dict[str, Any]] = [
         "platform": "mock",
         "auth_type": "mock",
         "enabled": True,
+    },
+    {
+        # 拼多多：无凭证时 effective_platform 回退 mock；填 base_url+凭证后走 pinduoduo Adapter
+        "name": "pinduoduo",
+        "label": "拼多多",
+        "base_url": "",
+        "platform": "pinduoduo",
+        "auth_type": "mock",
+        "enabled": True,
+        "options": {},
     },
 ]
 
@@ -173,8 +184,8 @@ class ChannelRegistry:
 
     def remove(self, name: str) -> None:
         """删除渠道（内置三渠道不可删，用于保留演示基线）。"""
-        if name in {"taobao", "jd", "douyin"}:
-            raise ValueError("内置渠道（淘宝/京东/抖音）不可删除")
+        if name in {"taobao", "jd", "douyin", "pinduoduo"}:
+            raise ValueError("内置渠道（淘宝/京东/抖音/拼多多）不可删除")
         channels = [c for c in _store.load() if c["name"] != name]
         if len(channels) == len(_store.load()):
             raise KeyError(name)
@@ -185,20 +196,36 @@ class ChannelRegistry:
     # per-channel REST client
     # ------------------------------------------------------------------
 
+    def effective_platform(self, channel: Optional[str]) -> str:
+        """解析渠道当前应使用的平台类型。
+
+        真实平台仅在配置了 base_url 或凭证时生效；否则回退 mock，
+        避免无密钥时误打真实域名或错误 base_url。
+        """
+        if channel is None:
+            return "mock"
+        cfg = self.get(channel)
+        if cfg is None:
+            return "mock"
+        platform = str(cfg.get("platform") or "mock")
+        if not platform_is_real(platform):
+            return "mock"
+        return platform if channel_has_live_credentials(cfg) else "mock"
+
     def client_for(self, channel: str) -> Optional[ChannelRestClient]:
         """按渠道配置返回对应 REST client；渠道不存在/未启用返回 None。
 
         每渠道按 (platform, base_url, auth_header) 缓存；配置变更后自动重建。
-        离线 ASGI 兜底仅对 platform=mock 生效：真实平台（taobao/jd/douyin/open）
-        一律走真实 TCP，且不注入 mock 默认鉴权头。
+        未配置凭证时 effective_platform 回退 mock，走离线 ASGI；
+        真实平台（有 base_url 或凭证）一律真实 TCP，且不注入 mock 默认鉴权头。
         """
         cfg = self.get(channel)
         if cfg is None or not cfg.get("enabled", True):
             return None
 
-        platform = str(cfg.get("platform") or "mock")
+        platform = self.effective_platform(channel)
         base_url = (cfg.get("base_url") or "").strip()
-        headers = self._auth_headers(cfg)
+        headers = self._auth_headers({**cfg, "platform": platform})
 
         key = (platform, base_url, tuple(sorted(headers.items())))
         cached = self._clients.get(channel)
@@ -206,16 +233,13 @@ class ChannelRegistry:
             return cached[1]
 
         is_mock = not platform_is_real(platform)
-        # 真实平台绝不携带 mock 默认鉴权头（default_headers={} 抑制）；
-        # mock 平台沿用默认头即可（auth_header 已含 X-Api-Key，合并后一致）。
         default_headers = {} if not is_mock else None
-        if not base_url:
+        if is_mock or not base_url:
             from os import environ
 
-            url = environ.get("CHANNEL_API_URL") or DEFAULT_PLATFORM_URL
+            url = base_url or environ.get("CHANNEL_API_URL") or DEFAULT_PLATFORM_URL
             transport = None
-            # 只有 mock 平台才能走离线 ASGI 兜底；真实平台缺 base_url 时也试真实 TCP
-            if is_mock and not environ.get("CHANNEL_API_URL"):
+            if is_mock and not base_url and not environ.get("CHANNEL_API_URL"):
                 from httpx import ASGITransport
                 from mock_commerce.routes import app as _api_app
 
@@ -236,17 +260,15 @@ class ChannelRegistry:
         return client
 
     def executor_for(self, channel: Optional[str]):
-        """按渠道 platform 字段返回对应的 PlatformAdapter 实例。
-
-        channel 为 None（平台级操作，如知识库）时返回 mock 适配器。
-        未知平台回退 mock，保证默认行为不因配置异常而退化。
-        """
+        """按 effective platform 返回 Adapter，并注入渠道凭证（若有）。"""
         if channel is None:
             return get_adapter("mock")
+        platform = self.effective_platform(channel)
+        adapter = get_adapter(platform)
         cfg = self.get(channel)
-        if cfg is None:
-            return get_adapter("mock")
-        return get_adapter(str(cfg.get("platform") or "mock"))
+        if cfg is not None and hasattr(adapter, "configure"):
+            adapter.configure(cfg)
+        return adapter
 
     def _auth_headers(self, cfg: dict[str, Any]) -> dict[str, str]:
         """构造该渠道的鉴权头。

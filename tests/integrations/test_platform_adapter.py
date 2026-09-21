@@ -9,6 +9,7 @@ from integrations.commerce.adapter import (
     TaobaoAdapter,
     JdAdapter,
     DouyinAdapter,
+    PinduoduoAdapter,
     GenericOpenAdapter,
     get_adapter,
     platform_is_real,
@@ -16,7 +17,7 @@ from integrations.commerce.adapter import (
 
 
 def test_platform_kinds():
-    assert PLATFORM_KINDS == ["mock", "taobao", "jd", "douyin", "open"]
+    assert PLATFORM_KINDS == ["mock", "taobao", "jd", "douyin", "pinduoduo", "open"]
 
 
 def test_get_adapter_known_and_unknown():
@@ -24,6 +25,7 @@ def test_get_adapter_known_and_unknown():
     assert isinstance(get_adapter("taobao"), TaobaoAdapter)
     assert isinstance(get_adapter("jd"), JdAdapter)
     assert isinstance(get_adapter("douyin"), DouyinAdapter)
+    assert isinstance(get_adapter("pinduoduo"), PinduoduoAdapter)
     assert isinstance(get_adapter("open"), GenericOpenAdapter)
     # 未知平台回退 mock，保证默认行为不退化
     assert isinstance(get_adapter("nope"), MockAdapter)
@@ -37,6 +39,7 @@ def test_platform_is_real():
     assert platform_is_real("taobao")
     assert platform_is_real("jd")
     assert platform_is_real("douyin")
+    assert platform_is_real("pinduoduo")
     assert platform_is_real("open")
     # 未知字符串按真实处理会导致 base_url 缺失时仍走真实 TCP —— 但 normalize 已约束取值
     assert platform_is_real("nope") is False

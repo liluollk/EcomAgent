@@ -220,6 +220,12 @@ pip install -e ".[dev]"
 # 启动后端（mock 模式）
 AGENT_BACKEND=mock python -m uvicorn transport.server:app --port 8000
 
+# 可选：Agent 可见工具集
+#   default — 调价闭环 + save_skill（默认，与 Harness 一致）
+#   ops     — 另加库存/促销/订单查询与上下架、创建促销
+#   full    — 默认 ∪ 全部扩展工具
+# AGENT_TOOL_SET=ops AGENT_BACKEND=mock python -m uvicorn transport.server:app --port 8000
+
 # 前端开发
 cd frontend && npm install && npm run dev   # http://localhost:5173
 
@@ -228,6 +234,17 @@ cd frontend && npm run build
 ```
 
 > 真实模型模式：设置 `AGENT_BACKEND=openai`（或 `anthropic`）并配置对应的 `*_API_KEY` / `*_BASE_URL` 环境变量即可。
+
+### 渠道凭证与真实平台接入
+
+「设置 → 渠道连接」可配置 `base_url`、`api_key`、`app_key` / `app_secret` / `access_token`：
+
+- **未填凭证**：`platform=taobao|douyin|pinduoduo` 时请求层回退本地 Mock / 离线契约，免费可跑。
+- **已填凭证 + base_url**：Adapter 使用渠道配置发起真实 HTTP；签名算法以各平台官方文档为准，联调前请在测试环境验证。
+- 内置渠道：`taobao` / `jd` / `douyin` / `pinduoduo`；`jd` 仍为 stub（`probe` 返回尚未接入）。
+- 工具层不感知平台差异：调价走领域三动作（快照 / 提交 / 回查），扩展运营工具走 `CommerceProvider`。
+
+> 真实平台资质与生产凭证需自行申请；仓库不附带任何生产密钥。Mock 验证通过不等于生产可用。
 
 ---
 

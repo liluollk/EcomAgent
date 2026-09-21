@@ -290,8 +290,20 @@ def _restore_from_disk() -> None:
 
 
 def _build_tools() -> list[dict]:
-    """工具定义合并：内置平台 API 工具 + MCP 外部工具（同名内置优先）。"""
-    defs = builtin_tools.get_definitions()
+    """工具定义合并：内置平台 API 工具 + MCP 外部工具（同名内置优先）。
+
+    AGENT_TOOL_SET：
+      default — 仅调价闭环 + save_skill（Harness / 默认 Agent）
+      ops     — 调价 + 库存/促销/订单读 + 上下架/建促
+      full    — 默认 ∪ 全部扩展工具
+    """
+    mode = os.environ.get("AGENT_TOOL_SET", "default").strip().lower()
+    if mode == "full":
+        defs = builtin_tools.get_definitions() + builtin_tools.get_extension_definitions()
+    elif mode == "ops":
+        defs = builtin_tools.get_ops_definitions()
+    else:
+        defs = builtin_tools.get_definitions()
     builtin_names = {d["name"] for d in defs}
     defs.extend(
         d for d in mcp_pool.get_all_tool_definitions() if d.get("name") not in builtin_names
@@ -350,7 +362,7 @@ def _build_agent(session: Session) -> BaseAgent:
     # 模式以 callable 传入：每次工具调用实时读取 session.permission_mode，
     # 使同一条 WS 连接上的模式切换即时生效（不需要重建 agent / 管线）。
     pipeline = PreToolUsePipeline()
-    tool_policies = {**mcp_pool.get_all_tool_policies(), **builtin_tools.get_tool_policies()}
+    tool_policies = {**mcp_pool.get_all_tool_policies(), **builtin_tools.get_builtin_tool_policies()}
     policy_lookup = lambda tool_name: tool_policies.get(tool_name)
     pipeline.add_checker(role_gate_rule(session.user["role"], policy_lookup=policy_lookup))
     pipeline.add_checker(workspace_rules_rule(session.workspace.rules, cost_lookup=_platform_cost_lookup))
@@ -362,10 +374,22 @@ def _build_agent(session: Session) -> BaseAgent:
     )
     agent.set_permission_pipeline(pipeline)
 
-    # handler 合并：内置平台 API 工具优先，MCP 外部工具补充；
-    # 来源通道映射随 handler 一并注入（事件 source 字段 = commerce/mcp）
+    # handler 与 AGENT_TOOL_SET 对齐（default / ops / full）
+    tool_set = os.environ.get("AGENT_TOOL_SET", "default").strip().lower()
+    if tool_set == "full":
+        builtin_handlers = {
+            **builtin_tools.get_handlers(),
+            **builtin_tools.get_extension_handlers(),
+        }
+    elif tool_set == "ops":
+        builtin_handlers = builtin_tools.get_ops_handlers()
+    else:
+        builtin_handlers = builtin_tools.get_handlers()
     mcp_handlers = mcp_pool.get_all_handlers()
-    handlers = {**mcp_handlers, **builtin_tools.get_handlers()}
-    sources = {**{n: "mcp" for n in mcp_handlers}, **{n: "commerce" for n in builtin_tools.get_handlers()}}
+    handlers = {**mcp_handlers, **builtin_handlers}
+    sources = {
+        **{n: "mcp" for n in mcp_handlers},
+        **{n: "commerce" for n in builtin_handlers},
+    }
     agent.set_tool_handlers(handlers, sources)
     return agent

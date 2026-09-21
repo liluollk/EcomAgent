@@ -23,8 +23,8 @@ def registry(tmp_path, monkeypatch):
 
 def test_default_three_channels(registry):
     names = {c["name"] for c in registry.list()}
-    assert names == {"taobao", "jd", "douyin"}
-    assert registry.enabled_names() == {"taobao", "jd", "douyin"}
+    assert names == {"taobao", "jd", "douyin", "pinduoduo"}
+    assert registry.enabled_names() == {"taobao", "jd", "douyin", "pinduoduo"}
 
 
 def test_add_channel_and_mask(registry):
@@ -96,8 +96,13 @@ def test_real_base_url_uses_tcp_not_asgi(registry):
 
 
 def test_default_channels_have_platform_mock(registry):
+    """默认渠道在无凭证时 effective_platform 为 mock；pinduoduo 配置类型可为 pinduoduo。"""
     for c in registry.list():
-        assert c["platform"] == "mock"
+        if c["name"] == "pinduoduo":
+            assert c["platform"] == "pinduoduo"
+            assert registry.effective_platform("pinduoduo") == "mock"
+        else:
+            assert c["platform"] == "mock"
 
 
 def test_platform_field_normalize_and_invalid_fallback(registry):
@@ -179,9 +184,16 @@ def test_drop_client_closes_async_client_without_running_loop(registry):
 def test_executor_for_dispatches_by_platform(registry):
     from integrations.commerce.adapter import MockAdapter, TaobaoAdapter, JdAdapter
 
-    assert isinstance(registry.executor_for("taobao"), MockAdapter)  # 内置默认 mock
+    assert isinstance(registry.executor_for("taobao"), MockAdapter)  # 内置默认无凭证 → mock
     assert isinstance(registry.executor_for(None), MockAdapter)
-    registry.add({"name": "real", "label": "真实", "platform": "taobao"})
+    # 配置 base_url 后才切换到真实平台 Adapter（并注入凭证）
+    registry.add({
+        "name": "real",
+        "label": "真实",
+        "platform": "taobao",
+        "base_url": "https://example.invalid/openapi",
+        "options": {"app_key": "k", "app_secret": "s"},
+    })
     assert isinstance(registry.executor_for("real"), TaobaoAdapter)
     registry.update("real", {"platform": "jd"})
     assert isinstance(registry.executor_for("real"), JdAdapter)

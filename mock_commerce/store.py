@@ -6,36 +6,42 @@ INVENTORY = {
     "taobao": {"name": "海洋之风法式泡泡袖连衣裙", "stock": 1523, "cost_price": 59.0, "channel_cn": "淘宝"},
     "jd": {"name": "海洋之风高腰 A 字半身裙", "stock": 890, "cost_price": 120.0, "channel_cn": "京东", "warehouse": "北京仓"},
     "douyin": {"name": "海洋之风复古针织开衫", "stock": 2340, "cost_price": 45.0, "channel_cn": "抖音"},
+    "pinduoduo": {"name": "海洋之风轻薄防晒外套", "stock": 1680, "cost_price": 39.0, "channel_cn": "拼多多"},
 }
 
 ORDER_STATUS = {
     "taobao": "已发货",
     "jd": "派送中",
     "douyin": "待发货",
+    "pinduoduo": "待发货",
 }
 
 ORDER_STATS = {
     "taobao": {"orders": 1280, "gmv": 85600.0, "avg": 66.9},
     "jd": {"orders": 642, "gmv": 51360.0, "avg": 80.0},
     "douyin": {"orders": 2310, "gmv": 120800.0, "avg": 52.3},
+    "pinduoduo": {"orders": 3050, "gmv": 97600.0, "avg": 32.0},
 }
 
 ANOMALIES = {
     "taobao": ["价格低于成本价（SKU-009）", "库存预警（SKU-017 低于安全水位）"],
     "jd": ["无限 SKU 差评集中（SKU-003）"],
     "douyin": [],
+    "pinduoduo": ["低价引流 SKU 需复核成本（SKU-002）"],
 }
 
 PROMOTIONS = {
     "taobao": [{"name": "双11预热 9折", "discount": 0.9}, {"name": "满300减50", "discount": 0.83}],
     "jd": [{"name": "Plus 会员价 95折", "discount": 0.95}],
     "douyin": [{"name": "直播间秒杀 7折", "discount": 0.7}],
+    "pinduoduo": [{"name": "百亿补贴价", "discount": 0.85}, {"name": "多人团 8 折", "discount": 0.8}],
 }
 
 AFTER_SALES_STATS = {
     "taobao": {"refund_rate": 0.021, "tickets": 27},
     "jd": {"refund_rate": 0.015, "tickets": 9},
     "douyin": {"refund_rate": 0.038, "tickets": 88},
+    "pinduoduo": {"refund_rate": 0.042, "tickets": 120},
 }
 
 KNOWLEDGE = {
@@ -45,7 +51,7 @@ KNOWLEDGE = {
     "发货时效": "现货 24 小时内发货，预售按页面承诺时效，超时自动赔付。",
 }
 
-VALID_CHANNELS = frozenset({"taobao", "jd", "douyin"})
+VALID_CHANNELS = frozenset({"taobao", "jd", "douyin", "pinduoduo"})
 
 # 已知 SKU：未知 SKU 的库存查询返回空行（优雅降级契约，对应 harness 场景 unknown_sku_graceful）
 KNOWN_SKUS = frozenset({"SKU-001", "SKU-002", "SKU-003"})
@@ -92,6 +98,7 @@ SALES_TREND = {
     "taobao": _sales_trend(ORDER_STATS["taobao"]["gmv"], ORDER_STATS["taobao"]["orders"], 0.30),
     "jd": _sales_trend(ORDER_STATS["jd"]["gmv"], ORDER_STATS["jd"]["orders"], 0.20),
     "douyin": _sales_trend(ORDER_STATS["douyin"]["gmv"], ORDER_STATS["douyin"]["orders"], 0.45),
+    "pinduoduo": _sales_trend(ORDER_STATS["pinduoduo"]["gmv"], ORDER_STATS["pinduoduo"]["orders"], 0.35),
 }
 
 

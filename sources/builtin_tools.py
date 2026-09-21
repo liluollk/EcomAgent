@@ -590,6 +590,35 @@ def get_definitions() -> list[dict[str, Any]]:
     return [dict(d) for d in _DEFAULT_DEFINITIONS]
 
 
+# 运营常用工具集：默认调价闭环 + 库存/促销/订单读 + 高风险写（上下架/建促）
+# 由环境变量 AGENT_TOOL_SET=ops 启用（见 transport.state._build_tools）
+OPS_TOOL_NAMES: list[str] = [
+    "query_product_snapshot",
+    "update_price",
+    "save_skill",
+    "query_inventory",
+    "query_promotions",
+    "query_order_status",
+    "product_shelf",
+    "create_promotion",
+]
+
+
+def get_ops_definitions() -> list[dict[str, Any]]:
+    """运营工具集定义（默认 ∪ 扩展中被 OPS_TOOL_NAMES 命中的子集）。"""
+    wanted = set(OPS_TOOL_NAMES)
+    out = [dict(d) for d in _DEFAULT_DEFINITIONS if d["name"] in wanted]
+    out.extend(dict(d) for d in _EXTENSION_DEFINITIONS if d["name"] in wanted)
+    return out
+
+
+def get_ops_handlers() -> dict[str, Callable[..., Any]]:
+    """运营工具集 handler 映射。"""
+    wanted = set(OPS_TOOL_NAMES)
+    merged = {**_DEFAULT_HANDLERS, **_EXTENSION_HANDLERS}
+    return {k: v for k, v in merged.items() if k in wanted}
+
+
 def get_handlers() -> dict[str, Callable[..., Any]]:
     """默认内置工具 handler 映射（**kwargs → str，async 安全）。"""
     return dict(_DEFAULT_HANDLERS)
@@ -598,6 +627,13 @@ def get_handlers() -> dict[str, Callable[..., Any]]:
 def get_tool_policies() -> dict[str, ToolPolicy]:
     """返回默认工具的平台安全策略（query_product_snapshot / update_price / save_skill / load_skill）。"""
     return get_default_tool_policies()
+
+
+def get_builtin_tool_policies() -> dict[str, ToolPolicy]:
+    """默认 ∪ 扩展策略（供权限管线在启用 ops/full 工具集时使用）。"""
+    from permission.tool_policy import get_builtin_tool_policies as _all
+
+    return _all()
 
 
 def get_extension_definitions() -> list[dict[str, Any]]:

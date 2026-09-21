@@ -69,11 +69,13 @@ async def workspace_overview() -> JSONResponse:
     channels_out: list[dict] = []
     for name in sorted(DEFAULT_CHANNEL_REGISTRY.enabled_names()):
         cfg = DEFAULT_CHANNEL_REGISTRY.get(name) or {}
-        platform = str(cfg.get("platform") or "mock")
+        # 无凭证时 effective_platform 回退 mock：本地仍可聚合演示数据
+        platform = DEFAULT_CHANNEL_REGISTRY.effective_platform(name)
         row: dict = {
             "name": name,
             "label": cfg.get("label") or name,
             "platform": platform,
+            "configured_platform": str(cfg.get("platform") or "mock"),
             "enabled": bool(cfg.get("enabled", True)),
             "connected": False,
             "error": None,
