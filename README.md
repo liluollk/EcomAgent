@@ -8,7 +8,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?style=flat&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Vite-3178C6?style=flat&logo=typescript&logoColor=white)
-![pytest](https://img.shields.io/badge/pytest-515%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-498%20passed-0A9EDC?style=flat&logo=pytest&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Client%20Channel-8A2BE2?style=flat)
 
 </div>
@@ -94,7 +94,7 @@ PreToolUse 管线 = **RBAC 身份门**（店长 / 运营 / 客服 / 财务四角
 
 **成本是内部真相，不由模型提供。** 成本价不属于任何 Tool 入参或领域命令，只能经内部 `CostProvider`（`integrations/commerce/cost_provider.py`）从平台侧数据取得；成本缺失或查询异常时高风险调价默认拦截。Workspace 的成本保护开关经 `PATCH /workspaces/{workspace_id}` 规范化后保存到独立 JSON，设置页只负责配置，不构成安全边界。
 
-**边界如实说明**：淘宝与抖店的协议形态、签名、错误码映射，以及两套平台的 Mock 网关（`mock_commerce/`，in-process 运行）都是**离线契约实现**，用来验证跨平台抽象是否真的成立。`jd` / `open` 仍是 stub，`probe()` 诚实返回「尚未接入」。本版本**没有**接入任何真实电商平台的凭证或生产流量，Mock 通过不等于生产可用。
+**边界如实说明**：淘宝与抖店的协议形态、签名、错误码映射，以及两套平台的 Mock 网关（`mock_commerce/`，in-process 运行）都是**离线契约实现**，用来验证跨平台抽象是否真的成立。`open` 仍为自定义平台 stub，`probe()` 诚实返回「尚未接入」。本版本**没有**接入任何真实电商平台的凭证或生产流量，Mock 通过不等于生产可用。
 
 接口面也划清楚：本版本的调价控制面只覆盖**商品调价**。客服工单、知识库、经营统计、上下架这些能力要么属于扩展工具通道（不在默认注册表里），要么只是 Mock 网关提供的测试数据，**都不属于调价控制面的能力主张**；对外描述时不把它们算进这套抽象的覆盖范围。
 
@@ -205,7 +205,7 @@ CREATED → PRECHECKED → WAITING_APPROVAL → EXECUTING → VERIFYING → SUCC
 | `events/` | 八类 AgentEvent 事件模型 |
 | `harness/` | 行为验证 Harness：21 条调价场景数据表、决策 / 执行契约、指纹基线 |
 | `frontend/` | React + TS 控制台（对话流、工具活动行、权限卡、看板） |
-| `tests/` | 515 个测试，按模块分目录，全部离线运行 |
+| `tests/` | 498 个测试，按模块分目录，全部离线运行 |
 
 </details>
 
@@ -239,9 +239,9 @@ cd frontend && npm run build
 
 「设置 → 渠道连接」可配置 `base_url`、`api_key`、`app_key` / `app_secret` / `access_token`：
 
-- **未填凭证**：`platform=taobao|douyin|pinduoduo` 时请求层回退本地 Mock / 离线契约，免费可跑。
+- **未填凭证**：`platform=taobao|douyin` 时请求层回退本地 Mock / 离线契约，免费可跑。
 - **已填凭证 + base_url**：Adapter 使用渠道配置发起真实 HTTP；签名算法以各平台官方文档为准，联调前请在测试环境验证。
-- 内置渠道：`taobao` / `jd` / `douyin` / `pinduoduo`；`jd` 仍为 stub（`probe` 返回尚未接入）。
+- 内置渠道：`taobao` / `douyin`（可新增自定义渠道）。
 - 工具层不感知平台差异：调价走领域三动作（快照 / 提交 / 回查），扩展运营工具走 `CommerceProvider`。
 
 > 真实平台资质与生产凭证需自行申请；仓库不附带任何生产密钥。Mock 验证通过不等于生产可用。
@@ -251,7 +251,7 @@ cd frontend && npm run build
 ## ✅ 质量与验证
 
 ```bash
-python -m pytest tests/ -q     # 515 个单元 / 集成 / E2E 测试，全离线
+python -m pytest tests/ -q     # 498 个单元 / 集成 / E2E 测试，全离线
 python -m harness              # 21 条调价场景（gold 3 / guarded 7 / resilience 6 / recovery 5）+ 基线验收，退化即非零退出
 python -m harness --list                                                # 查看场景类型与领域指标
 python -m harness --backend openai --provider <name> --repeat 3   # 真实模型评测（18 条执行契约场景 ×3，三态统计）
@@ -265,7 +265,7 @@ python -m harness --backend openai --provider <name> --repeat 3   # 真实模型
 
 ## ⚠️ 边界声明
 
-1. **业务数据为模拟，平台接入为离线契约实现**：协议层（REST / 认证 / 错误码 / 幂等 / TOP 签名）是真实实现，模拟的是平台返回的数据。淘宝与抖店的 Adapter 与对应 Mock 网关都是离线契约实现，`jd` / `open` 仍是 stub；接入真实电商平台需要平台资质 + 各平台字段映射与签名适配层（真实多平台系统的固有成本），上层编排与评测体系原样复用。**Mock 全绿不等于生产可用。**
+1. **业务数据为模拟，平台接入为离线契约实现**：协议层（REST / 认证 / 错误码 / 幂等 / TOP 签名）是真实实现，模拟的是平台返回的数据。淘宝与抖店的 Adapter 与对应 Mock 网关都是离线契约实现，`open` 仍为 stub；接入真实电商平台需要平台资质 + 各平台字段映射与签名适配层（真实多平台系统的固有成本），上层编排与评测体系原样复用。**Mock 全绿不等于生产可用。**
 2. **本版本的能力面只覆盖商品调价**：客服工单、知识库、经营统计、上下架不属于调价控制面——它们是扩展工具通道里的能力或 Mock 网关的测试数据，默认 Agent 不可见，也不计入这套跨平台抽象的覆盖范围。
 3. 摘要与记忆检索当前为规则 / 关键词实现，LLM 摘要与向量检索的升级路径已预留。
 4. MCP 通道保留但冻结：已验证平台作为 MCP Client 接入外部工具；调价主链路走 `integrations/commerce` 的调价领域契约与平台 Adapter，两个方向互不污染。

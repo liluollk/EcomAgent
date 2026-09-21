@@ -53,7 +53,7 @@ class CredentialStore:
 def create_default_credential_store() -> CredentialStore:
     """预置三渠道演示凭据（Mock token，无真实密钥）。"""
     store = CredentialStore()
-    for channel in ("taobao", "jd", "douyin"):
+    for channel in ("taobao", "douyin"):
         store.register(Credential(
             name=f"{channel}_oauth",
             credential_type="oauth_token",

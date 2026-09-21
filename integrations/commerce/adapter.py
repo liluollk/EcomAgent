@@ -70,14 +70,12 @@ def _exit_fault_operation(scope) -> None:
     var.reset(token)
 
 
-PLATFORM_KINDS = ["mock", "taobao", "jd", "douyin", "pinduoduo", "open"]
+PLATFORM_KINDS = ["mock", "taobao", "douyin", "open"]
 
 PLATFORM_LABELS = {
     "mock": "本地 Mock（免费离线）",
     "taobao": "淘宝开放平台 TOP",
-    "jd": "京东宙斯 JOS",
     "douyin": "抖音电商开放平台",
-    "pinduoduo": "拼多多开放平台",
     "open": "自定义开放平台（generic）",
 }
 
@@ -601,126 +599,8 @@ class DouyinAdapter(_BasePriceAdapter):
         }.get(code, PriceErrorCode.FATAL_ERROR)
 
 
-class PinduoduoAdapter(_BasePriceAdapter):
-    """拼多多开放平台调价 Adapter。
-
-    协议形态：JSON body + client_id/access_token + sign；价格以「分」整数收发。
-    未配置 base_url 与凭证时 probe 提示走离线契约；配置后请求渠道 base_url。
-    具体接口路径以申请资质后的官方文档为准，此处契约字段与本地 Mock/联调对齐。
-    """
-
-    kind = "pinduoduo"
-    platform = "pinduoduo"
-    price_scale = 0
-    _endpoint_snapshot = "/pdd/product/sku/get"
-    _endpoint_update = "/pdd/product/sku/price"
-    _APP_KEY = "mock_client_id"
-    _APP_SECRET = "mock_client_secret"
-    _ACCESS_TOKEN = "mock_access_token"
-
-    def _endpoint_for(self, operation):
-        return self._endpoint_snapshot if operation in ("snapshot", "verify") else self._endpoint_update
-
-    def _ref_params(self, ref: ProductRef) -> dict:
-        return {"goods_id": ref.product_id, "sku_id": ref.sku_id, "mall_id": ref.shop_id}
-
-    def _build_envelope(self, method, params) -> dict:
-        secret = self.cred("app_secret", self._APP_SECRET)
-        client_id = self.cred("app_key", self._APP_KEY)
-        token = self.cred("access_token", self._ACCESS_TOKEN)
-        payload = {
-            "type": method,
-            "client_id": client_id,
-            "access_token": token,
-            "timestamp": str(int(time.time())),
-            "data_type": "JSON",
-        }
-        all_params = {**payload, "params": params}
-        payload["sign"] = self._sign_pdd(secret, {**payload, "params": params})
-        return {**all_params, "sign": payload["sign"]}
-
-    @staticmethod
-    def _sign_pdd(secret: str, params: dict) -> str:
-        """简化签名：secret + 排序拼接（联调时按官方 sign 规则替换）。"""
-        flat = []
-        for k in sorted(params.keys()):
-            v = params[k]
-            if k == "sign":
-                continue
-            if isinstance(v, dict):
-                import json as _json
-
-                v = _json.dumps(v, ensure_ascii=False, sort_keys=True)
-            flat.append(f"{k}{v}")
-        raw = secret + "".join(flat) + secret
-        return hashlib.md5(raw.encode()).hexdigest().upper()
-
-    def _price_out(self, price: Decimal) -> int:
-        return int((Decimal(price) * 100).to_integral_value())
-
-    def _price_in(self, raw) -> Decimal:
-        return Decimal(int(raw)) / 100
-
-    def _unwrap(self, raw, response_key) -> dict:
-        if not isinstance(raw, dict):
-            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多返回结构异常", platform="pinduoduo")
-        code = raw.get("error_response", {}).get("code") if "error_response" in raw else raw.get("code", 0)
-        if code not in (0, None):
-            msg = (
-                raw.get("error_response", {}).get("error_msg")
-                if "error_response" in raw
-                else str(raw.get("msg", "拼多多错误"))
-            )
-            raise PriceError(
-                self._map_code(code), str(msg), platform="pinduoduo", platform_code=code
-            )
-        data = raw.get("data") or raw.get(response_key) or {}
-        if isinstance(data, dict) and "goods_sn" in data and "price" not in data:
-            data = data.get("goods_sn") or data
-        if "price" not in data:
-            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多响应缺少 price 字段", platform="pinduoduo")
-        try:
-            self._price_in(data["price"])
-        except (InvalidOperation, ValueError, TypeError):
-            raise PriceError(PriceErrorCode.FATAL_ERROR, "拼多多返回价格无法解析", platform="pinduoduo")
-        return data
-
-    def _parse_snapshot(self, ref, data) -> "ProductSnapshot":
-        return ProductSnapshot(
-            product_ref=ref,
-            name=str(data.get("goods_name", "")),
-            current_price=self._price_in(data.get("price", 0)),
-            stock=int(data.get("stock", 0)),
-            status=str(data.get("status", "")),
-            activity_name=str(data.get("promotion", "")),
-            activity_locked=bool(data.get("promotion_locked", False)),
-            observed_at="",
-        )
-
-    def _parse_write_receipt(self, ref, data) -> PriceWriteReceipt:
-        return PriceWriteReceipt(
-            product_ref=ref,
-            applied_price=self._price_in(data.get("price", 0)),
-            idempotent_replay=bool(data.get("idempotent_replay", False)),
-            attempts=1,
-        )
-
-    @staticmethod
-    def _map_code(code) -> PriceErrorCode:
-        return {
-            10001: PriceErrorCode.CLIENT_ERROR,
-            10002: PriceErrorCode.CLIENT_ERROR,
-            10003: PriceErrorCode.CLIENT_ERROR,
-            20001: PriceErrorCode.BUSINESS_ERROR,
-            20002: PriceErrorCode.BUSINESS_ERROR,
-            30001: PriceErrorCode.TRANSIENT_ERROR,
-            50000: PriceErrorCode.FATAL_ERROR,
-            90000: PriceErrorCode.CAPABILITY_UNSUPPORTED,
-        }.get(code, PriceErrorCode.FATAL_ERROR)
-
-
 class _StubAdapter(PlatformAdapter):
-    """真实平台（京东 / 自定义开放平台）adapter 的 stub：诚实声明尚未接入。"""
+    """尚未接入的自定义开放平台 adapter stub：诚实声明尚未接入。"""
 
     def build_request(self, operation, channel, params):
         raise NotImplementedError(
@@ -740,10 +620,6 @@ class _StubAdapter(PlatformAdapter):
         return f"<{type(self).__name__} kind={self.kind} (stub)>"
 
 
-class JdAdapter(_StubAdapter):
-    kind = "jd"
-
-
 class GenericOpenAdapter(_StubAdapter):
     kind = "open"
 
@@ -751,9 +627,7 @@ class GenericOpenAdapter(_StubAdapter):
 ADAPTER_REGISTRY: dict[str, type[PlatformAdapter]] = {
     "mock": MockAdapter,
     "taobao": TaobaoAdapter,
-    "jd": JdAdapter,
     "douyin": DouyinAdapter,
-    "pinduoduo": PinduoduoAdapter,
     "open": GenericOpenAdapter,
 }
 
@@ -763,7 +637,7 @@ def get_adapter(platform: str) -> PlatformAdapter:
     if cls is None:
         cls = MockAdapter
     adapter = cls()
-    # 从渠道注册表绑定同名渠道的凭证（taobao/douyin/pinduoduo 等）
+    # 从渠道注册表绑定同名渠道的凭证（taobao / douyin）
     try:
         from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
 
@@ -784,9 +658,7 @@ __all__ = [
     "PlatformAdapter",
     "MockAdapter",
     "TaobaoAdapter",
-    "JdAdapter",
     "DouyinAdapter",
-    "PinduoduoAdapter",
     "GenericOpenAdapter",
     "PLATFORM_KINDS",
     "PLATFORM_LABELS",

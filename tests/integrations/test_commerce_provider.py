@@ -50,8 +50,8 @@ def test_shelf_action_enum_roundtrip():
 
 def test_provider_does_not_expose_http_response():
     """领域结果不携带 HTTP Response：extra 只含归一化业务字段。"""
-    r = _run(get_commerce_provider("jd").query_order_stats(period="近7天"))
-    assert r.orders == 642 and r.gmv == 51360.0
+    r = _run(get_commerce_provider("douyin").query_order_stats(period="近7天"))
+    assert r.orders == 2310 and r.gmv == 120800.0
     assert "status_code" not in r.extra
 
 

@@ -568,7 +568,6 @@ function ChannelSettings() {
                   >
                     <option value="mock">本地 Mock</option>
                     <option value="taobao">淘宝 TOP</option>
-                    <option value="jd">京东 JOS</option>
                     <option value="douyin">抖音开放平台</option>
                     <option value="open">自定义开放平台</option>
                   </select>
@@ -607,7 +606,7 @@ function ChannelSettings() {
         <div className="mb-2 text-[12.5px] font-medium text-ink">新增渠道</div>
         <div className="grid grid-cols-2 gap-2">
           <InputField value={name} onChange={setName} placeholder="渠道标识（name）" />
-          <InputField value={label} onChange={setLabel} placeholder="展示名（如 拼多多）" />
+          <InputField value={label} onChange={setLabel} placeholder="展示名（如 抖音店）" />
           <InputField value={baseUrl} onChange={setBaseUrl} placeholder="平台地址（留空=本地 mock）" />
           <select
             value={platform}
@@ -616,7 +615,6 @@ function ChannelSettings() {
           >
             <option value="mock">本地 Mock（免费离线）</option>
             <option value="taobao">淘宝开放平台 TOP</option>
-            <option value="jd">京东宙斯 JOS</option>
             <option value="douyin">抖音电商开放平台</option>
             <option value="open">自定义开放平台</option>
           </select>
@@ -650,7 +648,7 @@ function ChannelSettings() {
       </div>
       <p className="text-[11.5px] leading-relaxed text-ink-3">
         渠道统一经 MCP + REST 协议接入：新增渠道写配置后即时生效，无需重启。选「本地 Mock」离线免费；
-        真实平台（淘宝 TOP / 京东 JOS / 抖音）需平台资质，适配器接缝已留好，逐平台接入中。
+        淘宝 / 抖店在填入 base_url 与凭证前走本地 Mock。
       </p>
     </div>
   );

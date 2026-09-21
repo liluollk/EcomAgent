@@ -92,7 +92,7 @@ def _make_session(
         session_id=sid,
         workspace=workspace,
         permission_mode=mode,
-        active_sources=["taobao", "jd", "douyin"],
+        active_sources=["taobao", "open", "douyin"],
         # 缺省 manager（店长）保证写操作 ACL 全放行；场景可用 mode/role 覆盖
         # （如 readonly_blocks_write / rbac_denial）
         user={"user_id": "e2e_user", "role": role},

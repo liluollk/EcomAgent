@@ -1,10 +1,9 @@
 /** 渠道、工具的展示元数据与通用格式化函数 */
 
-export type ChannelId = 'taobao' | 'jd' | 'douyin';
+export type ChannelId = 'taobao' | 'douyin';
 
 export const CHANNEL_META: Record<ChannelId, { label: string; color: string }> = {
   taobao: { label: '淘宝', color: '#FF5000' },
-  jd: { label: '京东', color: '#E1251B' },
   douyin: { label: '抖音', color: '#12B7BF' },
 };
 

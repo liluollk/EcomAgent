@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "saved_at": "2026-09-16T11:18:33+00:00",
+  "saved_at": "2026-09-21T16:52:28+00:00",
   "total": 21,
   "passed": 21,
   "cases": {
@@ -11,7 +11,7 @@
     "activity_lock_blocks_update": "802c69f64ceabc06",
     "rbac_denial_blocks_update": "69b706ef59feb6ba",
     "readonly_mode_blocks_update": "28e2a940f01e0b37",
-    "capability_unsupported_blocks_update": "d939dbc38b4aaed3",
+    "capability_unsupported_blocks_update": "b9a20b16e1758e3c",
     "approval_grants_execution": "f18c14270a23289c",
     "approval_rejection_stops_before_write": "b1acd188ca74f4e4",
     "rate_limit_retry_same_key": "a93973d4d06607ce",

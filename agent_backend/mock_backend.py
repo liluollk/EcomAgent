@@ -27,10 +27,10 @@ from events.agent_event import (
 )
 from .protocol import AgentBackend, BackendConfig, AgentCapabilities, BackendProvider
 
-_CHANNEL_CN = {"taobao": "淘宝", "jd": "京东", "douyin": "抖音", "pdd": "拼多多"}
+_CHANNEL_CN = {"taobao": "淘宝", "douyin": "抖音"}
 
 # 平台（调价闭环的领域标识）→ 中文标签
-_PLATFORM_CN = {"taobao": "淘宝", "douyin": "抖店", "jd": "京东", "mock": "本地 Mock"}
+_PLATFORM_CN = {"taobao": "淘宝", "douyin": "抖店", "mock": "本地 Mock"}
 
 # 结果前缀 → 视为执行失败（错误文本随成功通道回传，由文案前缀区分）
 # 「拦截 / 未生效 / 未确认」都是调价工具的正常返回文本（工具不抛异常），
@@ -181,15 +181,13 @@ def _summarize(tool_name: str, args: dict, result: str) -> str:
 def _extract_channel(text: str, default: str = "taobao") -> str:
     """从用户文本识别渠道意图。
 
-    已知别名（淘宝/京东/抖音/拼多多及拼音）优先；否则匹配 "xx 渠道" 形态，
+    已知别名（淘宝/抖音及拼音）优先；否则匹配 "xx 渠道" 形态，
     若该候选已在渠道注册表启用则采用（支持设置里动态新增的渠道），
     否则回退 default（保持既有分支默认语义）。
     """
     aliases = {
         "淘宝": "taobao", "taobao": "taobao",
-        "京东": "jd", "jd": "jd",
         "抖音": "douyin", "douyin": "douyin",
-        "拼多多": "pdd", "pdd": "pdd",
     }
     for key, channel in aliases.items():
         if key in text:
@@ -208,7 +206,7 @@ def _extract_channel(text: str, default: str = "taobao") -> str:
 
 
 def _extract_platform(text: str, default: str = "") -> str:
-    """从用户文本识别平台（调价闭环的领域标识：taobao / douyin / jd）。
+    """从用户文本识别平台（调价闭环的领域标识：taobao / douyin / open）。
 
     淘宝与天猫都归 taobao、抖音与抖店都归 douyin——平台标识是领域概念，
     与商家怎么说无关。
@@ -216,7 +214,7 @@ def _extract_platform(text: str, default: str = "") -> str:
     aliases = {
         "淘宝": "taobao", "天猫": "taobao", "taobao": "taobao",
         "抖店": "douyin", "抖音": "douyin", "douyin": "douyin",
-        "京东": "jd", "jd": "jd",
+        "开放平台": "open", "open": "open",
     }
     for key, platform in aliases.items():
         if key in text:

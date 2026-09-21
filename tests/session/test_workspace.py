@@ -21,10 +21,10 @@ def test_workspace_add_source():
 def test_workspace_remove_source():
     ws = Workspace(workspace_id="ws-001", name="test")
     ws.add_source("taobao")
-    ws.add_source("jd")
+    ws.add_source("open")
     ws.remove_source("taobao")
     assert "taobao" not in ws.sources
-    assert "jd" in ws.sources
+    assert "open" in ws.sources
 
 
 def test_workspace_has_source():

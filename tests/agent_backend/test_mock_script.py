@@ -126,9 +126,9 @@ def test_mock_script_third_round_summary():
         domain = next(ev for ev in events2 if ev.type == "tool_start")
         messages.append({"role": "assistant", "content": "", "tool_calls": [{
             "id": "c2", "type": "function",
-            "function": {"name": domain.tool_name, "arguments": '{"channel": "jd", "sku": "SKU-002"}'},
+            "function": {"name": domain.tool_name, "arguments": '{"channel": "douyin", "sku": "SKU-002"}'},
         }]})
-        messages.append({"role": "tool", "tool_call_id": "c2", "content": "渠道 jd 商品 SKU-002 库存 45 件：测试商品"})
+        messages.append({"role": "tool", "tool_call_id": "c2", "content": "渠道 douyin 商品 SKU-002 库存 45 件：测试商品"})
         # 第三轮总结
         events3 = [ev async for ev in backend.chat(messages, [], "s1")]
         text = "".join(ev.text for ev in events3 if ev.type == "text_delta")
@@ -158,7 +158,7 @@ def test_mock_script_third_round_error_summary():
         domain = next(ev for ev in events2 if ev.type == "tool_start")
         messages.append({"role": "assistant", "content": "", "tool_calls": [{
             "id": "c2", "type": "function",
-            "function": {"name": domain.tool_name, "arguments": '{"channel": "jd", "sku": "SKU-002"}'},
+            "function": {"name": domain.tool_name, "arguments": '{"channel": "douyin", "sku": "SKU-002"}'},
         }]})
         messages.append({"role": "tool", "tool_call_id": "c2", "content": "[平台错误 10005] 平台限流，请稍后重试"})
         events3 = [ev async for ev in backend.chat(messages, [], "s1")]

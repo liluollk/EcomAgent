@@ -17,12 +17,6 @@ from typing import Callable, Optional
 from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
 
 
-def _setup_add_pdd_channel() -> None:
-    """动态渠道场景前置：注册新渠道 pdd 并确认已生效。"""
-    DEFAULT_CHANNEL_REGISTRY.add({"name": "pdd", "label": "拼多多"})
-    assert "pdd" in DEFAULT_CHANNEL_REGISTRY.enabled_names()
-
-
 def _after_memory_landed() -> None:
     """跨会话记忆场景收尾：断言显式记忆已落盘且可检索注入。"""
     from agent_core import memory_store as _ms
@@ -66,7 +60,7 @@ def _after_single_price_write() -> None:
     )
 
 
-SETUP_HOOKS: dict[str, Callable[[], None]] = {"add_pdd_channel": _setup_add_pdd_channel}
+SETUP_HOOKS: dict[str, Callable[[], None]] = {}
 AFTER_HOOKS: dict[str, Callable[[], None]] = {
     "assert_memory_landed": _after_memory_landed,
     "assert_skill_created": _after_skill_created,

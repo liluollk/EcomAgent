@@ -28,7 +28,7 @@ def test_list_and_has():
 def test_default_store_three_channels():
     """默认凭据存储预置三渠道 oauth 引用；掩码值不含明文密钥。"""
     store = create_default_credential_store()
-    assert sorted(store.list_names()) == ["douyin_oauth", "jd_oauth", "taobao_oauth"]
+    assert sorted(store.list_names()) == ["douyin_oauth", "taobao_oauth"]
     cred = store.resolve("taobao_oauth")
     assert cred.credential_type == "oauth_token"
     assert cred.masked_secret.endswith("*****")  # 掩码值，不落明文密钥

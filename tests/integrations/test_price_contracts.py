@@ -288,7 +288,7 @@ def test_mock_is_offline_test_platform_only():
 
 def test_unknown_platform_raises_capability_unsupported():
     with pytest.raises(PriceError) as excinfo:
-        get_capabilities("pinduoduo")
+        get_capabilities("open")
     assert excinfo.value.code is PriceErrorCode.CAPABILITY_UNSUPPORTED
 
 

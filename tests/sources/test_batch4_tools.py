@@ -43,7 +43,7 @@ def test_builtin_handlers_output_structure():
     """扩展 7 个批次 4 handler 经 REST→Adapter→mock 网关链路返回关键文本。"""
     h = builtin_tools.get_extension_handlers()
     assert "已上架" in _run(h["product_shelf"](channel="taobao", sku="SKU-001", action="on"))
-    assert "已下架" in _run(h["product_shelf"](channel="jd", sku="SKU-001", action="off"))
+    assert "已下架" in _run(h["product_shelf"](channel="douyin", sku="SKU-001", action="off"))
     assert "售后工单" in _run(h["service_ticket"](channel="taobao", order_id="TB-10086", issue="商品破损"))
     assert "GMV" in _run(h["query_order_stats"](channel="taobao", period="近7天"))
     assert "异常" in _run(h["query_anomalies"](channel="taobao"))

@@ -234,7 +234,7 @@ class Runner:
                     session_id="harness",
                     workspace=ws,
                     permission_mode=getattr(PermissionMode, scenario.get("mode", "EXECUTE")),
-                    active_sources=["taobao", "jd", "douyin"],
+                    active_sources=["taobao", "douyin"],
                     # 缺省 manager（店长）保证写操作 ACL 全放行；场景可用 mode/role 覆盖
                     # （如 readonly_blocks_write / rbac_denial）
                     user={"user_id": "harness_user", "role": scenario.get("role", "manager")},

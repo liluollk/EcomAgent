@@ -182,7 +182,7 @@ def test_unmet_prerequisite_blocks_skill_load():
         body="执行直播 SOP。",
     ))
     backend = ProgressiveBackend("douyin_live", "query_inventory", {"channel": "douyin"})
-    session = make_session(active_sources=["jd"])  # 无 douyin
+    session = make_session(active_sources=["open"])  # 无 douyin
     agent = BaseAgent(backend, session.workspace, skill_registry=registry)
     agent.set_tool_handlers({"query_inventory": lambda **kwargs: "ok"})
 
@@ -233,7 +233,7 @@ def test_slash_command_prerequisite_blocked_silently():
         body="执行直播 SOP。",
     ))
     backend = RecordingBackend()
-    session = make_session(active_sources=["jd"])  # 无 douyin
+    session = make_session(active_sources=["open"])  # 无 douyin
     agent = BaseAgent(backend, session.workspace, skill_registry=registry)
     agent.set_tool_handlers({"query_inventory": lambda **kwargs: "ok"})
 

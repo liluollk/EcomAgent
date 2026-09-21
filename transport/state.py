@@ -177,7 +177,7 @@ def _get_workspace_or_create(workspace_id: str) -> Workspace:
             name="OceanBreeze",
             metadata={"brand": "OceanBreeze"},
             rules=[{"type": "price_above_cost", "enabled": True}],
-            credentials=["taobao_oauth", "jd_oauth", "douyin_oauth"],
+            credentials=["taobao_oauth", "douyin_oauth"],
         )
     else:
         ws = Workspace(
@@ -257,7 +257,7 @@ def _restore_from_disk() -> None:
             session_id=session_id,
             workspace=_default_workspace(),
             permission_mode=PermissionMode.ASK,
-            active_sources=["taobao", "jd", "douyin"],
+            active_sources=["taobao", "douyin"],
         )
         try:
             stored = load_session_full(session_id, _STORAGE_DIR)
@@ -354,7 +354,7 @@ def _platform_cost_lookup(channel, sku):
 
 
 def _build_agent(session: Session) -> BaseAgent:
-    """构建默认的 Agent 实例，包含预置的淘宝、京东、抖音渠道 Source。"""
+    """构建默认的 Agent 实例，包含预置的淘宝、抖音渠道 Source。"""
     backend = create_backend(_build_backend_config())
     workspace = session.workspace
     agent = BaseAgent(backend, workspace)

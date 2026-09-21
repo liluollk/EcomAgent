@@ -1,4 +1,4 @@
-"""工作台聚合路由测试 — /workspace/overview 真实协议层取数与容错。"""
+"""工作台聚合路由测试。"""
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,7 +10,6 @@ from sources.channel_registry import DEFAULT_CHANNEL_REGISTRY
 
 @pytest.fixture(autouse=True)
 def isolate_config(tmp_path, monkeypatch):
-    """隔离渠道配置；关闭平台子进程自动拉起（REST client 走离线 ASGI 兜底）。"""
     monkeypatch.setenv("CHANNEL_CONFIG_FILE", str(tmp_path / "channels.json"))
     monkeypatch.setenv("CHANNEL_API_AUTO", "0")
     monkeypatch.delenv("CHANNEL_API_URL", raising=False)
@@ -26,13 +25,12 @@ async def _client():
 
 
 async def test_overview_aggregates_default_channels():
-    """内置渠道全部聚合成功：核心指标 + 促销/异常列表 + 商品。"""
     async with await _client() as client:
         resp = await client.get("/workspace/overview")
         assert resp.status_code == 200
         data = resp.json()
         names = {c["name"] for c in data["channels"]}
-        assert names == {"taobao", "jd", "douyin", "pinduoduo"}
+        assert names == {"taobao", "douyin"}
 
         for ch in data["channels"]:
             assert ch["connected"] is True
@@ -44,13 +42,12 @@ async def test_overview_aggregates_default_channels():
             assert ch["product"] and ch["product"]["name"] and ch["product"]["stock"] > 0
 
         s = data["summary"]
-        assert s["connected_channels"] == 4
+        assert s["connected_channels"] == 2
         assert s["total_orders"] == sum(c["orders"] for c in data["channels"])
         assert s["total_promotions"] == sum(len(c["promotions"]) for c in data["channels"])
 
 
 async def test_overview_disabled_channel_excluded():
-    """停用渠道不进入聚合结果。"""
     async with await _client() as client:
         resp = await client.patch("/sources/douyin", json={"enabled": False})
         assert resp.status_code == 200
@@ -60,28 +57,26 @@ async def test_overview_disabled_channel_excluded():
 
 
 async def test_overview_real_platform_channel_marked_not_connected():
-    """配置了凭证/base_url 的真实平台渠道：聚合层诚实占位，不误报连通。"""
     async with await _client() as client:
         resp = await client.post("/sources", json={
-            "name": "pdd",
-            "label": "拼多多店",
+            "name": "tbprod",
+            "label": "淘宝生产店",
             "platform": "taobao",
             "base_url": "https://example.invalid/openapi",
             "options": {"app_key": "k", "app_secret": "s"},
         })
         assert resp.status_code == 200
         data = (await client.get("/workspace/overview")).json()
-        pdd = next(c for c in data["channels"] if c["name"] == "pdd")
-        assert pdd["connected"] is False
-        assert "适配器未接入" in pdd["error"]
+        tb = next(c for c in data["channels"] if c["name"] == "tbprod")
+        assert tb["connected"] is False
+        assert "适配器未接入" in tb["error"]
 
 
 async def test_overview_added_mock_channel_included():
-    """前端新增的 mock 渠道即时进入聚合（配置化生效）。"""
     async with await _client() as client:
-        resp = await client.post("/sources", json={"name": "pdd", "label": "拼多多"})
+        resp = await client.post("/sources", json={"name": "shop2", "label": "抖音店"})
         assert resp.status_code == 200
         data = (await client.get("/workspace/overview")).json()
-        pdd = next(c for c in data["channels"] if c["name"] == "pdd")
-        assert pdd["connected"] is True
-        assert pdd["label"] == "拼多多"
+        shop = next(c for c in data["channels"] if c["name"] == "shop2")
+        assert shop["connected"] is True
+        assert shop["label"] == "抖音店"

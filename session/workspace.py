@@ -39,7 +39,7 @@ class Workspace:
         """添加一个 Source 到工作空间。
 
         Args:
-            source_name: Source 名称，如 "taobao"、"jd"、"douyin"。
+            source_name: Source 名称，如 "taobao"、"douyin"。
         """
         if source_name not in self.sources:
             self.sources.append(source_name)

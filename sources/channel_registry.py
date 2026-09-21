@@ -50,30 +50,12 @@ _DEFAULT_CHANNELS: list[dict[str, Any]] = [
         "enabled": True,
     },
     {
-        "name": "jd",
-        "label": "京东",
-        "base_url": "",
-        "platform": "mock",
-        "auth_type": "mock",
-        "enabled": True,
-    },
-    {
         "name": "douyin",
         "label": "抖音",
         "base_url": "",
         "platform": "mock",
         "auth_type": "mock",
         "enabled": True,
-    },
-    {
-        # 拼多多：无凭证时 effective_platform 回退 mock；填 base_url+凭证后走 pinduoduo Adapter
-        "name": "pinduoduo",
-        "label": "拼多多",
-        "base_url": "",
-        "platform": "pinduoduo",
-        "auth_type": "mock",
-        "enabled": True,
-        "options": {},
     },
 ]
 
@@ -184,8 +166,8 @@ class ChannelRegistry:
 
     def remove(self, name: str) -> None:
         """删除渠道（内置三渠道不可删，用于保留演示基线）。"""
-        if name in {"taobao", "jd", "douyin", "pinduoduo"}:
-            raise ValueError("内置渠道（淘宝/京东/抖音/拼多多）不可删除")
+        if name in {"taobao", "douyin"}:
+            raise ValueError("内置渠道（淘宝/抖音）不可删除")
         channels = [c for c in _store.load() if c["name"] != name]
         if len(channels) == len(_store.load()):
             raise KeyError(name)

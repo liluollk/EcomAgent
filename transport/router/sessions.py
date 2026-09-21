@@ -47,7 +47,7 @@ async def create_session(request: Optional[CreateSessionRequest] = None) -> JSON
         session_id=session_id,
         workspace=workspace,
         permission_mode=PermissionMode[mode],
-        active_sources=["taobao", "jd", "douyin"],
+        active_sources=["taobao", "douyin"],
         user={"user_id": user_id, "role": role},
         model_state={
             "provider": _backend_provider_name(),

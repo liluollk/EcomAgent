@@ -34,7 +34,8 @@ interface DashboardData {
 /** 渠道品牌色（数据语义色，与工具卡/渠道卡一致） */
 const CHANNEL_COLOR: Record<string, string> = {
   taobao: 'var(--ch-taobao)',
-  jd: 'var(--ch-jd)',
+  taobao: 'var(--ch-taobao)',
+  douyin: 'var(--ch-douyin)',
   douyin: 'var(--ch-douyin)',
 };
 

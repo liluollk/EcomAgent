@@ -250,11 +250,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "fault": "capability_refused",
         "steps": [
             {
-                # 客户端侧能力检查：jd 尚未接入调价执行面，必须在发请求前就判失败
-                # （目标价 129 高于 jd 成本 120，确保拦截原因就是能力缺失）
-                "message": f"把京东 {_ITEM}/{_FREE_SKU} 的价格调到 129",
+                # 客户端侧能力检查：open（自定义开放平台）尚未接入调价执行面，必须在发请求前就判失败
+                # （目标价需高于该渠道成本，确保拦截原因就是能力缺失）
+                "message": f"把开放平台 {_ITEM}/{_FREE_SKU} 的价格调到 129",
                 "tool": "update_price",
-                "input": {"platform": "jd", "sku_id": _FREE_SKU},
+                "input": {"platform": "open", "sku_id": _FREE_SKU},
                 "result_contains": ["拦截", "CAPABILITY_UNSUPPORTED"],
                 "expect": {"operation_created": False, "writes_delta": 0},
             },

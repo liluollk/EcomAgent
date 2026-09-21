@@ -1,10 +1,9 @@
 /** 渠道、工具的展示元数据与通用格式化函数 */
 
-export type ChannelId = 'taobao' | 'jd' | 'douyin';
+export type ChannelId = 'taobao' | 'douyin';
 
 export const CHANNEL_META: Record<ChannelId, { label: string; color: string }> = {
   taobao: { label: '淘宝', color: '#FF5000' },
-  jd: { label: '京东', color: '#E1251B' },
   douyin: { label: '抖音', color: '#12B7BF' },
 };
 
@@ -52,12 +51,13 @@ export function inferChannel(input: Record<string, unknown> | undefined): Channe
         ? input.channel
         : '';
   const ch = raw.toLowerCase();
-  if (ch === 'taobao' || ch === 'jd' || ch === 'douyin') return ch;
+  if (ch === 'taobao' || ch === 'douyin') return ch;
   const skuVal = typeof input.sku_id === 'string' ? input.sku_id : input.sku;
   const sku = typeof skuVal === 'string' ? skuVal.toUpperCase() : '';
   const order = typeof input.order_id === 'string' ? input.order_id.toUpperCase() : '';
   if (sku.startsWith('TB') || order.startsWith('TB')) return 'taobao';
-  if (sku.startsWith('JD') || order.startsWith('JD')) return 'jd';
+  if (sku.startsWith('TB') || order.startsWith('TB')) return 'taobao';
+  if (sku.startsWith('DY') || order.startsWith('DY')) return 'douyin';
   if (sku.startsWith('DY') || order.startsWith('DY')) return 'douyin';
   return null;
 }

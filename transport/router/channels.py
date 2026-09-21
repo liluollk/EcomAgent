@@ -61,7 +61,7 @@ async def test_source(name: str) -> JSONResponse:
     """连通性测试：按渠道 platform 路由。
 
     mock 平台：用该渠道 REST client 发一次只读请求（order-stats）。
-    真实平台（taobao/jd/douyin/open）：由对应 PlatformAdapter 的 probe() 判断
+    真实平台（taobao/douyin/open）：由对应 PlatformAdapter 的 probe() 判断
     （stub 返回诚实「尚未接入」，不误报连通）。
     """
     cfg = DEFAULT_CHANNEL_REGISTRY.get(name)

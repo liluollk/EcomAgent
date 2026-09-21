@@ -2,7 +2,7 @@
 Source — 外部系统能力接入的抽象层。
 
 Source 概念。
-每个 Source 代表一个外部系统（如淘宝开放平台、京东开放平台），
+每个 Source 代表一个外部系统（如淘宝开放平台、抖音电商开放平台），
 包含工具定义和对应的处理函数。
 
 工具定义采用 OpenAI function calling 格式：
@@ -41,7 +41,7 @@ class Source:
     """Source 抽象 — 外部系统能力接入。
 
     Attributes:
-        name: Source 名称，如 "taobao"、"jd"、"douyin"。
+        name: Source 名称，如 "taobao"、"douyin"。
         description: Source 描述。
         type: 连接类型，如 "mcp"、"rest"、"graphql"。
         tools: 该 Source 提供的工具列表。

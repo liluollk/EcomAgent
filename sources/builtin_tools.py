@@ -457,7 +457,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "查询指定渠道商品库存（旧名兼容入口，扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}, "sku": {"type": "string", "description": "商品 SKU。"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}, "sku": {"type": "string", "description": "商品 SKU。"}},
             "required": ["channel", "sku"],
         },
     },
@@ -467,7 +467,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"},
+                "channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"},
                 "sku": {"type": "string", "description": "商品 SKU。"},
                 "discount": {"type": "number", "description": "折扣率（0.0-1.0）。"},
                 "start_time": {"type": "string", "description": "开始时间。"},
@@ -481,7 +481,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "查询指定渠道订单的当前状态（扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}, "order_id": {"type": "string", "description": "订单号。"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}, "order_id": {"type": "string", "description": "订单号。"}},
             "required": ["channel", "order_id"],
         },
     },
@@ -491,7 +491,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"},
+                "channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"},
                 "sku": {"type": "string", "description": "商品 SKU。"},
                 "action": {"type": "string", "description": "on=上架 / off=下架。"},
             },
@@ -504,7 +504,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"},
+                "channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"},
                 "order_id": {"type": "string", "description": "关联订单号。"},
                 "issue": {"type": "string", "description": "问题描述。"},
                 "priority": {"type": "string", "description": "优先级，low / normal / high。", "default": "normal"},
@@ -517,7 +517,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "订单/销售分析（订单量、GMV、客单价）（扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}, "period": {"type": "string", "description": "统计周期。", "default": "近7天"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}, "period": {"type": "string", "description": "统计周期。", "default": "近7天"}},
             "required": ["channel"],
         },
     },
@@ -526,7 +526,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "经营异常排查（价格/库存/评分）（扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}},
             "required": ["channel"],
         },
     },
@@ -535,7 +535,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "促销活动检查（进行中活动）（扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}},
             "required": ["channel"],
         },
     },
@@ -544,7 +544,7 @@ _EXTENSION_DEFINITIONS: list[dict[str, Any]] = [
         "description": "售后分析（退款率、工单量）（扩展工具）。",
         "parameters": {
             "type": "object",
-            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / jd / douyin。"}, "period": {"type": "string", "description": "统计周期。", "default": "近7天"}},
+            "properties": {"channel": {"type": "string", "description": "渠道标识，可选 taobao / douyin。"}, "period": {"type": "string", "description": "统计周期。", "default": "近7天"}},
             "required": ["channel"],
         },
     },

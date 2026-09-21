@@ -42,7 +42,7 @@ async def test_dashboard_summary_aggregates(tmp_path):
 
         # 渠道行与预警
         names = {c["name"] for c in body["channels"]}
-        assert {"taobao", "jd", "douyin"} <= names
+        assert {"taobao", "douyin"} <= names
         taobao = next(c for c in body["channels"] if c["name"] == "taobao")
         assert taobao["connected"] is True
         assert taobao["stock"] and taobao["product"]

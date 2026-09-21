@@ -217,7 +217,7 @@ export interface ProvidersResponse {
 }
 
 /** 渠道平台类型（后端渠道配置的 platform 字段） */
-export type ChannelPlatform = 'mock' | 'taobao' | 'jd' | 'douyin' | 'open';
+export type ChannelPlatform = 'mock' | 'taobao' | 'douyin' | 'open';
 
 /** 渠道来源（后端 /sources 返回，api_key 等敏感字段已掩码） */
 export interface ChannelSource {
@@ -236,12 +236,11 @@ export interface ChannelSource {
 export const PLATFORM_LABELS: Record<ChannelPlatform, string> = {
   mock: '本地 Mock',
   taobao: '淘宝 TOP',
-  jd: '京东 JOS',
   douyin: '抖音开放平台',
   open: '自定义开放平台',
 };
 
-export const CHANNEL_PLATFORMS: ChannelPlatform[] = ['mock', 'taobao', 'jd', 'douyin', 'open'];
+export const CHANNEL_PLATFORMS: ChannelPlatform[] = ['mock', 'taobao', 'douyin', 'open'];
 
 /** 技能（后端 /skills 返回，SKILL.md 知识包） */
 export interface Skill {

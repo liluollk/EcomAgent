@@ -8,7 +8,7 @@
   - HttpCommerceProvider：CommerceProvider Protocol 的实现，
     把操作结果映射为领域结果类型——不向上层暴露 HTTP Response。
 
-上层编排只依赖 CommerceProvider 接口；将来接入淘宝/京东真实平台时，
+上层编排只依赖 CommerceProvider 接口；将来接入淘宝/抖音等真实平台时，
 替换 provider/client/adapter 实现即可，工具层与引擎零改动。
 """
 

@@ -99,7 +99,6 @@ function trendRows(baseGmv: number, baseOrders: number, lift: number) {
 
 const mockChannels: Record<string, { label: string; gmv: number; orders: number; stock: number; product: string; anomalies: string[] }> = {
   taobao: { label: '淘宝', gmv: 85600, orders: 1280, stock: 1523, product: '海洋之风法式泡泡袖连衣裙', anomalies: ['价格低于成本价（SKU-009）', '库存预警（SKU-017 低于安全水位）'] },
-  jd: { label: '京东', gmv: 51360, orders: 642, stock: 890, product: '海洋之风高腰 A 字半身裙', anomalies: ['无限 SKU 差评集中（SKU-003）'] },
   douyin: { label: '抖音', gmv: 120800, orders: 2310, stock: 2340, product: '海洋之风复古针织开衫', anomalies: [] },
 };
 
@@ -228,7 +227,6 @@ let activeProvider = 'openai';
 
 const sources: ChannelSource[] = [
   { name: 'taobao', label: '淘宝', base_url: '', platform: 'mock', auth_type: 'mock', enabled: true },
-  { name: 'jd', label: '京东', base_url: '', platform: 'mock', auth_type: 'mock', enabled: true },
   { name: 'douyin', label: '抖音', base_url: '', platform: 'mock', auth_type: 'mock', enabled: true },
   { name: 'tbshop', label: '品牌直营店', base_url: 'https://eco.taobao.com/router/rest', platform: 'taobao', auth_type: 'api_key', api_key: 'sk-l****', options: { app_key: '123456', app_secret: 'sec-****' }, enabled: true },
 ];
@@ -624,7 +622,6 @@ export async function mockRequest(
         product: { sku: 'SKU-001', name: '海洋之风法式泡泡袖连衣裙', stock: 1523 },
       },
       {
-        name: 'jd', label: '京东', platform: 'mock', connected: true, error: null,
         orders: 642, gmv: 51360.0, avg_order: 80.0, refund_rate: 0.015, tickets: 9,
         promotions: [{ name: 'Plus 会员价 95折', discount: 0.95 }],
         anomalies: ['无限 SKU 差评集中（SKU-003）'],

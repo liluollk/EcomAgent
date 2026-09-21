@@ -57,13 +57,13 @@ def test_turn_lifecycle_build_system_prompt():
         metadata={"brand": "OceanBreeze"},
     )
     session = Session(session_id="sess-001", workspace=ws)
-    session.active_sources = ["taobao", "jd"]
+    session.active_sources = ["taobao", "open"]
     backend = FakeBackend()
     lifecycle = TurnLifecycle(session, ws, backend)
     prompt = lifecycle.build_system_prompt()
     assert "OceanBreeze" in prompt
     assert "taobao" in prompt
-    assert "jd" in prompt
+    assert "open" in prompt
     assert "ASK" in prompt
 
 
@@ -96,7 +96,7 @@ def test_turn_lifecycle_stable_prompt_is_same_when_runtime_state_changes():
     lifecycle = TurnLifecycle(session, ws, FakeBackend())
     first = lifecycle.build_stable_prompt()
 
-    session.active_sources = ["jd", "douyin"]
+    session.active_sources = ["open", "douyin"]
     session.permission_mode = PermissionMode.EXECUTE
     ws.metadata["brand"] = "B"
     second = lifecycle.build_stable_prompt()

@@ -126,7 +126,7 @@
 
   <rect x="298" y="854" width="246" height="88" rx="10" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" stroke-dasharray="5 4"/>
   <text x="421" y="878" text-anchor="middle" font-size="13" font-weight="500" fill="#444441" dominant-baseline="central">真实电商平台</text>
-  <text x="421" y="898" text-anchor="middle" font-size="12" fill="#5F5E5A" dominant-baseline="central">淘宝 / 京东 / 抖店 OpenAPI</text>
+  <text x="421" y="898" text-anchor="middle" font-size="12" fill="#5F5E5A" dominant-baseline="central">淘宝 / 抖店 OpenAPI</text>
   <text x="421" y="914" text-anchor="middle" font-size="12" fill="#5F5E5A" dominant-baseline="central">新增 Adapter 实现即接入</text>
   <text x="421" y="930" text-anchor="middle" font-size="12" fill="#888780" dominant-baseline="central">编排层与评测体系零改动</text>
 
