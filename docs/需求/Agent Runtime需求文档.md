@@ -10,7 +10,7 @@
 
 项目主体是 Runtime，而不是某个垂直业务系统。电商商品维护 Agent 仅作为参考实现，用于验证 Runtime 能否承载具有查询、计划、审批、写入、回查和恢复等特征的真实业务流程。
 
-项目形态为“Runtime SDK + API 服务 + 调试界面 + 参考 Agent + Eval”，不建设多租户 SaaS 平台，也不以接入真实企业账号或产生线上业务指标为目标。
+项目形态为“Agent Runtime 系统 + Runtime Host/API + 调试界面 + 参考 Agent + Eval”。Runtime 是项目主体；Host/API 负责承载和暴露 Runtime，调试界面用于观察执行过程，它们都不是独立的平台产品。本项目不建设多租户 SaaS 平台，也不以接入真实企业账号或产生线上业务指标为目标。
 
 ## 2. 要解决的问题
 
@@ -292,4 +292,4 @@ AgentEvent 同时服务于 WebSocket UI、Trace、审计和 Eval，但不同消�
 
 ## 13. 首版完成定义
 
-首版完成时，应具备一个可安装或可直接引用的 `runtime` Python 包、一个可运行的 API 服务、一个用于观察会话与工具执行的 Web 界面、一个电商商品维护参考 Agent、独立的 Runtime Contract Eval 与业务 Eval，以及覆盖权限、幂等、恢复和架构边界的自动化测试。
+首版完成时，应具备一个边界独立且可运行的 `runtime` Python 核心包、一个承载 Runtime 的 API Host、一个用于观察会话与工具执行的 Web 调试界面、一个电商商品维护参考 Agent、独立的 Runtime Contract Eval 与业务 Eval，以及覆盖权限、幂等、恢复和架构边界的自动化测试。`runtime` 包是项目内部的核心代码边界，不以对外发布 SDK 为首版目标。
