@@ -1,37 +1,47 @@
 # Agent 工作台与 Runtime 需求文档
 
-> 版本：v0.3
+> 版本：v0.4
 > 日期：2026-10-02
-> 状态：待评审
+> 状态：已确认
 
 ## 1. 项目定位
 
-本项目面向电商企业内部商品运营场景，从零设计并实现一套 Agent 工作台及其通用 Agent Runtime。Runtime 统一多模型接入、业务能力装载、Workspace/Session 状态隔离、工具权限与运行状态管理；工作台为运营人员提供任务对话、执行进度、信息补充、写前确认和中断恢复入口。
+本项目面向企业内部业务场景，从零设计并实现一套 Agent 工作台及其通用 Agent Runtime。Agent Runtime 是核心技术主体，统一模型接入、能力装载、Workspace/Session/Run 状态、工具权限、持久执行和故障恢复；Agent 工作台是产品载体，为业务人员提供任务对话、执行进度、信息补充、写前确认和中断恢复入口。
 
-首个上层业务 Agent 是商品运营 Agent，覆盖商品查询、维护计划、敏感写操作确认、执行和结果回查。Runtime 的职责与商品业务逻辑解耦，使后续店铺运营、活动运营和客服售后 Agent 可以复用同一套运行底座。
+商品运营 Agent 是首个业务参考实现，覆盖商品查询、维护计划、敏感写操作确认、执行和结果回查，用于验证 Runtime 能支撑具有真实业务约束和写操作风险的任务闭环。`SKU`、平台、价格等电商概念只存在于商品运营 Agent，Runtime 不依赖具体业务领域。
 
-项目的产品主体是 Agent 工作台，Runtime 是其核心技术底座。FastAPI、WebSocket 等属于实现方式，不作为项目定位；Eval 属于工程验证体系，不作为面向用户的产品模块。
+项目不是单一的“商品调价 Agent”，也不定位为包含计费、应用市场和云端控制面的商业化 Agent 平台。最终交付物由三层组成：
+
+```text
+Agent Runtime          核心技术主体
+    ↓
+Agent 工作台           产品载体
+    ↓
+商品运营 Agent         业务参考实现
+```
+
+FastAPI、React、Mem0、WeKnora 和 Langfuse 等属于实现选型或外部集成，不作为项目定位。Eval 属于工程验证体系，不作为面向用户的产品模块。
 
 ## 2. 用户与价值
 
 ### 2.1 目标用户
 
-目标用户是多品牌电商企业内部的业务人员，业务场景包括品牌运营、店铺运营和客服售后。首版聚焦其中的商品运营任务，不另外定义 Agent 管理者、研发人员或审计人员等独立产品角色。
+工作台面向企业内部业务人员；首个参考场景的直接用户是需要跨淘宝、抖音店铺处理商品维护任务的运营成员。首版不另外定义 Agent 管理者、研发人员或审计人员等独立产品角色，Workspace 配置由具备相应权限的内部成员完成。
 
 ### 2.2 核心价值
 
-- 运营人员在统一工作台中使用不同业务 Agent，不需要理解模型和工具接入细节；
+- 业务人员通过统一工作台使用 Agent，不需要理解模型和工具接入细节；
 - 新业务 Agent 复用 Runtime 的模型、会话、能力、权限和状态管理，不重复建设执行基础设施；
 - 高风险工具调用在执行前经过代码侧校验和人工确认，避免仅依赖模型自律；
-- 任务中断后可以从持久化 Session 恢复，不需要重新开始整段对话和操作。
+- 任务中断后可以从持久化 Session 与 Run 恢复，不需要重新开始整段对话和操作。
 
 ## 3. 项目边界
 
 ### 3.1 首版范围
 
-- Agent 工作台：Workspace 选择、Session 对话、执行状态、信息补充、写前确认和恢复入口；
-- Agent Runtime：完整执行链、多模型抽象、能力装载、权限治理和状态管理；
-- 商品运营 Agent：作为第一个真实上层业务 Agent；
+- Agent Runtime：作为核心技术主体，实现完整执行链、模型抽象、能力装载、权限治理、持久状态和故障恢复；
+- Agent 工作台：作为产品载体，提供 Workspace 选择、Session 对话、执行状态、信息补充、写前确认和恢复入口；
+- 商品运营 Agent：作为首个业务参考实现，验证 Runtime 与业务代码的解耦边界及完整任务闭环；
 - 能力接入：本地 Tool 与 MCP Server；淘宝、抖音等业务 API 通过商品运营 Agent 内部的代码 Adapter 接入；
 - 长期记忆、知识库、Trace 和 Eval 分别通过 Mem0、WeKnora、Langfuse 与独立 Eval 模块实现；
 - Eval：分别验证 Runtime 行为合同和商品运营任务结果。
@@ -426,4 +436,8 @@ docs/
 
 ## 15. 首版完成定义
 
-首版完成时，用户能够在 Agent 工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，对高风险写操作进行确认，并在任务中断后恢复执行。底层 Runtime 能通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程，并由独立 Eval 验证关键行为。
+首版完成时，项目应形成一套可独立复用的 Agent Runtime、一个通过公开 API 使用 Runtime 的 Agent 工作台，以及一个不侵入 Runtime 核心的商品运营参考 Agent。
+
+用户能够在工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，对高风险写操作进行确认，并在任务中断后恢复执行。Runtime 通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程；商品运营 Agent 只通过 Runtime 公开接口与协议接入；独立 Eval 分别验证 Runtime 不变量、商品运营任务结果和故障恢复行为。
+
+该完成定义证明的是“通用 Runtime 能够承载一个具有真实约束的业务 Agent”，不等同于已经建设多种业务 Agent、接入真实生产流量或达到企业生产 SLA。
