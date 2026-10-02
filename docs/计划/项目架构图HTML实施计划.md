@@ -17,7 +17,7 @@
 - Reference: `docs/架构/项目架构图设计.md`
 - Reference: `docs/需求/Agent工作台与Runtime需求文档.md`
 
-- [ ] **Step 1: 运行结构检查确认目标文件尚不存在**
+- [x] **Step 1: 运行结构检查确认目标文件尚不存在**
 
 ```powershell
 $diagram = 'docs/架构/项目架构图.html'
@@ -28,15 +28,15 @@ if (Test-Path -LiteralPath $diagram) {
 
 Expected: 命令退出码为 0。
 
-- [ ] **Step 2: 创建语义化单文件 HTML**
+- [x] **Step 2: 创建语义化单文件 HTML**
 
 HTML 必须包含 `header/main/aside/footer`、视图切换按钮、Runtime 总框、五层结构、独立 Eval 旁路、模块说明区和 Run 步骤轨道。每个可选择模块使用唯一 `data-node`，连接关系使用 `data-connects` 声明。
 
-- [ ] **Step 3: 实现视觉与响应式布局**
+- [x] **Step 3: 实现视觉与响应式布局**
 
 使用设计文档中的六色 Token、系统字体与工程蓝图式结构。桌面端为主图加右侧说明栏；小于 `900px` 时改为纵向；小于 `560px` 时模块网格改单列。所有焦点态可见，并支持 `prefers-reduced-motion`。
 
-- [ ] **Step 4: 实现视图与模块交互**
+- [x] **Step 4: 实现视图与模块交互**
 
 ```javascript
 function setView(view) {
@@ -59,7 +59,7 @@ function selectNode(nodeId) {
 
 模块选择还必须更新说明区；Escape 或“重置”按钮清除选择。Enter/Space 与点击具有相同行为。
 
-- [ ] **Step 5: 运行结构和外部依赖检查**
+- [x] **Step 5: 运行结构和外部依赖检查**
 
 ```powershell
 $html = Get-Content -LiteralPath 'docs/架构/项目架构图.html' -Raw
@@ -82,7 +82,7 @@ if ($html -match '<script[^>]+src=' -or $html -match '<link[^>]+href=') {
 
 Expected: 命令退出码为 0。
 
-- [ ] **Step 6: 使用 Chromium 截图检查桌面布局**
+- [x] **Step 6: 使用 Chromium 截图检查桌面布局**
 
 ```powershell
 $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
@@ -92,7 +92,7 @@ $htmlPath = (Resolve-Path 'docs/架构/项目架构图.html').Path.Replace('\', 
 
 Expected: 生成 1440×900 截图；主图无横向滚动、遮挡、截断或文字重叠。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```powershell
 git add docs/架构/项目架构图.html docs/架构/项目架构图设计.md docs/计划/项目架构图HTML实施计划.md
