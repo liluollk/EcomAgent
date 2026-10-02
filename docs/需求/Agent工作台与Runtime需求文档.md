@@ -1,8 +1,8 @@
 # Agent 工作台与 Runtime 需求文档
 
-> 版本：v0.4
+> 版本：v0.5
 > 日期：2026-10-02
-> 状态：已确认
+> 状态：范围已确认，详细设计评审中
 
 ## 1. 项目定位
 
@@ -32,7 +32,7 @@ FastAPI、React、Mem0、WeKnora 和 Langfuse 等属于实现选型或外部集�
 
 - 业务人员通过统一工作台使用 Agent，不需要理解模型和工具接入细节；
 - 新业务 Agent 复用 Runtime 的模型、会话、能力、权限和状态管理，不重复建设执行基础设施；
-- 高风险工具调用在执行前经过代码侧校验和人工确认，避免仅依赖模型自律；
+- 写操作在执行前经过代码侧校验，并按 Execution Mode 进入写前确认，避免仅依赖模型自律；
 - 任务中断后可以从持久化 Session 与 Run 恢复，不需要重新开始整段对话和操作。
 
 ## 3. 项目边界
@@ -122,7 +122,8 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 
 - Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、可用 Agent 与 Sources；
 - Session 管理一次持续对话的消息与上下文，可以包含多个 Run；
-- Run 表示由一条用户消息或一次恢复操作触发的执行过程，隔离 ToolCalls、Input Requests、Confirmation Requests 和执行状态；
+- 一条普通用户消息创建一个新的逻辑 Run；Input Request、Confirmation Request、Worker 重启、失败重试和租约接管只恢复原 Run，不创建新 Run；
+- 每次 Worker 实际调度原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；
 - 同一 Session 同一时刻最多存在一个活动 Run，避免并发执行污染上下文或重复产生副作用；
 - 不同 Session 的消息、确认和工具结果严格隔离；
 - Session 与 Run 状态持久化，进程重启或任务中断后可以恢复。
@@ -147,6 +148,8 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 - Provider 错误格式、超时和取消。
 
 生产实现只保留两类协议后端：`OpenAIBackend` 和 `AnthropicBackend`。DeepSeek 等 OpenAI 兼容服务使用 `OpenAIBackend`，不按模型厂商新增子类。`ScriptedBackend` 仅用于测试与 Eval，不属于第三种生产协议。前端配置协议类型、Base URL、API Key 和 Model；API Key 必须加密保存且读取时脱敏。
+
+AgentBackend 必须声明 Tool Calling、Streaming、Structured Output、Cancellation、Usage Reporting 和 Parallel Tool Calls 等能力。业务 Agent 缺少必需能力时必须在 Run 创建前 fail-fast；Provider 可移植性只承诺共同能力集合内的行为一致。
 
 Session、Skill、业务 Agent 和工作台不得依赖具体模型 SDK 或厂商实现。
 
@@ -184,6 +187,8 @@ Runtime 将 Tool Resolution 之后、Tool Execution 之前的校验与决策步�
 - `READ_ONLY` 禁止所有写 Tool，`CONFIRM_WRITES` 要求当前操作者在每次写入前确认，`AUTO_EXECUTE` 允许符合权限和业务规则的写操作直接执行；
 - Confirmation Request 是当前操作者的写前确认，不是另一名成员的审批流；即使处于 `AUTO_EXECUTE`，Access Control 和 Business Policy 仍必须通过。
 
+完整身份来源、角色权限、Actor 传递、Secret 和模型端点安全以 `docs/架构/身份与Workspace权限设计.md` 为准。
+
 ### 7.5 Input Request / Confirmation Request
 
 模型可见工具只包含业务 Tool，不提供 `request_user_input`。人机交互分为两类：
@@ -198,9 +203,9 @@ Runtime 将 Tool Resolution 之后、Tool Execution 之前的校验与决策步�
 - Runtime 负责持久化 Input Request、切换 Run 状态、发出事件、接收并校验回答以及恢复执行；
 - 工作台负责渲染问题和候选项、收集当前用户回答，不自行修改 Run 或 ToolCall 状态。
 
-候选店铺、平台等内容必须由业务层根据 Workspace 配置、成员数据范围和实时资源生成，不允许模型自由编造。只有具备当前 Session 访问权限的成员才能回答待处理请求；同一请求只能处理一次，过期、取消或已经处理的请求不得再次恢复 Run。用户回答按 Input Request 的 Schema 校验，并记录回答人、回答时间和关联的 ToolCall。
+候选店铺、平台等内容必须由业务层根据 Workspace 配置、成员数据范围和实时资源生成，不允许模型自由编造。只有具备当前 Session 访问权限的成员才能回答待处理请求；同一请求只能处理一次，过期、取消或已经处理的请求不得再次恢复 Run。等待 Input Request 或 Confirmation Request 的 Run 仍是活动 Run，当前 Session 不能创建新的普通 Run。用户回答按 Input Request 的 Schema 校验，并记录回答人、回答时间和关联的 ToolCall。
 
-恢复后不得直接调用 Tool。Runtime 必须重新执行 Schema Validation、业务输入校验、Access Control、Business Policy 和 Execution Mode；若写操作需要确认，再进入 `WAITING_CONFIRMATION`。输入请求与写前确认是两种独立交互，不能共用一个模糊的 Permission Request。
+恢复后不得直接调用 Tool。Runtime 必须重新执行 Schema Validation、业务输入校验、Access Control、Business Policy 和 Execution Mode；若写操作需要确认，再进入 `WAITING_CONFIRMATION`。输入请求与写前确认是两种独立交互，不能共用一个含糊的“权限请求”。
 
 ### 7.6 AgentEvent
 
@@ -225,18 +230,21 @@ Runtime 使用统一 AgentEvent 表达：
 
 ## 8. 运行状态与恢复
 
-- Run 使用 `RUNNING`、`WAITING_INPUT`、`WAITING_CONFIRMATION`、`COMPLETED`、`FAILED` 和 `CANCELLED` 等原因明确的持久状态；不使用无法表达等待原因的通用 `INTERRUPTED` 状态；
+- Run、RunAttempt、ToolCall、RunJob、Input Request 和 Confirmation Request 分别维护状态，不能共用一套含糊状态；完整状态与合法迁移以 `docs/架构/Runtime执行状态与恢复设计.md` 为准；
+- `CANCELLED` 是不可恢复的终态；“中断恢复”指 Worker 退出、租约过期或外部调用结果待确认，不等于用户取消；
 - `INPUT_REQUIRED` 和 `RUN_RESUMED` 是 AgentEvent，不是持久状态；`RESUMED` 只描述一次状态迁移；
 - Runtime 在模型决策、输入挂起、确认挂起、工具执行前后和任务结束时保存关键状态；
 - 恢复依据持久化 Session 和 ToolCall 状态，不依赖模型“记住”此前操作；
-- Input Request 和 Confirmation Request 必须具有稳定 ID、关联 Run 与 ToolCall、请求状态、回答 Schema、创建与处理时间以及操作人；
+- Input Request 和 Confirmation Request 必须具有稳定 ID、关联 Run 与 ToolCall、请求状态、回答 Schema、创建与处理时间、过期时间以及操作人；
+- Confirmation Request 必须绑定规范化参数摘要、`operation_id`、资源版本和 Policy 版本；确认后仍需重新执行当前 Access Control、Business Policy 和资源状态检查，参数或关键状态改变时旧确认立即失效；
 - 写操作使用稳定 `operation_id` 和幂等键，恢复时不得生成新的逻辑操作；
-- 外部调用超时且结果不确定时进入 `UNKNOWN`，先回查再决定是否重试；
+- ToolCall 外部调用超时且结果不确定时进入 `UNKNOWN`，Run 进入 `WAITING_RECONCILIATION`；先回查再决定是否能安全重试；
+- 对既不支持幂等键、又无法可靠回查的 Adapter，`UNKNOWN` 后禁止自动重试写入，不宣称 exactly-once；
 - 非法状态迁移被拒绝，并生成可审计事件。
 
-API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job 表，Worker 通过数据库租约领取任务。模型或 Tool 外部调用不得发生在长数据库事务内；租约、稳定 `operation_id`、幂等键和写后回查共同防止恢复时重复写入。
+API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job 表，Worker 通过数据库租约领取任务。租约必须携带 fencing token，Worker 提交状态时使用 token 与 `state_version` 做 CAS；失去租约的 Worker 不得继续提交。模型或 Tool 外部调用不得发生在长数据库事务内；租约、稳定 `operation_id`、幂等键和写后回查共同控制恢复时的重复写风险。
 
-这些能力用于实现图片所描述的“运行状态管理”和“任务中断后的会话恢复”，不是独立的平台产品。
+这些能力用于实现运行状态管理和任务中断后的会话恢复，不等同于用户取消后继续执行。
 
 ## 9. Agent 工作台
 
@@ -245,7 +253,7 @@ API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job �
 - 创建、选择和切换 Workspace；
 - 展示品牌、渠道、店铺及可用业务 Agent；
 - 展示当前 Workspace 已启用的模型、Skills、Sources 和 Execution Mode；
-- 配置 Workspace 成员角色、店铺数据范围、动作权限和 Execution Mode；
+- 配置 Workspace 成员角色、店铺数据范围、动作权限和 Execution Mode；首版角色为 `WorkspaceOwner` 与 `Operator`；
 - 配置模型连接、Skill、MCP Source、WeKnora 知识库连接和业务规则；
 - 业务配置通过扩展 Schema 渲染，工作台不硬编码商品领域流程。
 
@@ -256,7 +264,7 @@ API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job �
 - 展示 ToolCall、ToolResult 和当前执行状态；
 - 展示 Input Request 并按 Schema 收集回答；
 - 展示 Confirmation Request，支持确认或拒绝写操作；
-- 支持中断、取消和恢复；
+- 支持取消活动 Run；Worker 异常、租约过期和待处理交互由 Runtime 按状态恢复；
 - 展示异常原因和最终结果。
 
 ### 9.3 前端边界
@@ -279,7 +287,9 @@ API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job �
 7. 写后回查并返回真实执行状态；
 8. 任务中断后从 Session 恢复。
 
-商品 Tool、平台 Adapter、价格规则和领域 Policy 位于 `agents/product_operations/`。Runtime 不包含商品专用判断。
+首版业务 Tool 只覆盖商品与店铺状态查询以及 `update_price`；不实现库存调整、上下架、商品资料编辑和促销活动写入，避免把“商品维护”无限扩展。
+
+商品 Tool、输入要求解析器、价格规则和领域 Policy 位于 `agents/product_operations/`；淘宝、抖音平台客户端和协议适配位于 `adapters/commerce/`。Runtime 不包含商品专用判断。
 
 首版可以使用本地或模拟平台 Adapter，但必须明确标注；真实平台接入不是证明 Runtime 架构成立的前置条件。
 
@@ -300,7 +310,7 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 
 ### 11.2 商品运营 Agent Eval
 
-商品运营 Agent Eval 使用真实模型验证六类任务：只读查询、合法写操作、信息不完整、高风险请求、多轮任务和查询—计划—确认—执行—回查组合任务。
+商品运营 Agent Eval 使用真实模型验证六类任务：只读查询、合法写操作、信息不完整、未授权或违规写请求、多轮任务和查询—计划—确认—执行—回查组合任务。
 
 核心指标包括：
 
@@ -425,19 +435,22 @@ docs/
 4. Runtime 不导入商品运营 Agent，商品 Agent 只通过公开接口与协议接入；
 5. 不同 Session 的上下文严格隔离，每个 Run 的 ToolCalls、Input Requests、Confirmation Requests 和执行状态均可独立追踪；
 6. 本地 Tool 和 MCP Server Tool 可以通过统一 Source 接口装载，业务平台 API 通过商品运营 Agent 的代码 Adapter 接入；
-7. 高风险写操作未经授权不能到达 Tool 实现；
+7. 写操作未经授权或未满足 Execution Mode 要求时不能到达 Tool 实现；
 8. 缺失或不可信的关键业务信息必须进入 `WAITING_INPUT`，不得由 Runtime 或模型猜测后执行；
 9. 用户补充信息后必须重新执行完整校验，不能从 `WAITING_INPUT` 直接进入 Tool 执行；
-10. 中断任务可以从持久化状态恢复，且不会重复产生已提交副作用；
+10. 对支持幂等或可靠回查的 Adapter，恢复不得产生重复逻辑写入；对无法消除不确定性的 Adapter，系统必须保持 `UNKNOWN` 并禁止盲目重试；
 11. Runtime Eval 与商品运营 Agent Eval 可以独立运行和报告；
 12. API 进程重启不丢失待执行 Run，Worker 可通过 PostgreSQL 租约继续领取任务；
 13. Mem0、WeKnora 或 Langfuse 单独不可用时，不得破坏 Runtime 权威状态和安全边界；
-14. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
+14. Runtime 确定性不变量、关键工作台 E2E 和故障恢复用例全部通过；危险副作用与重复逻辑写入均以 `0/N` 报告真实分母；
+15. 模型 Eval 固定模型、温度、Prompt/Skill/Tool 版本、初始数据、重复次数和 Scorer；任务完成率与合法任务误拒率在首次基线后写入版本化发布门槛，正式评测期间不得移动；冻结测试集不参与针对单条失败的调参；
+16. Provider 401、依赖不可用和用例跳过记为基础设施失败，不计入模型质量得分；
+17. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
 
 ## 15. 首版完成定义
 
 首版完成时，项目应形成一套可独立复用的 Agent Runtime、一个通过公开 API 使用 Runtime 的 Agent 工作台，以及一个不侵入 Runtime 核心的商品运营参考 Agent。
 
-用户能够在工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，对高风险写操作进行确认，并在任务中断后恢复执行。Runtime 通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程；商品运营 Agent 只通过 Runtime 公开接口与协议接入；独立 Eval 分别验证 Runtime 不变量、商品运营任务结果和故障恢复行为。
+用户能够在工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，按 Execution Mode 对写操作进行确认，并在任务中断后恢复执行。Runtime 通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程；商品运营 Agent 只通过 Runtime 公开接口与协议接入；独立 Eval 分别验证 Runtime 不变量、商品运营任务结果和故障恢复行为。
 
 该完成定义证明的是“通用 Runtime 能够承载一个具有真实约束的业务 Agent”，不等同于已经建设多种业务 Agent、接入真实生产流量或达到企业生产 SLA。
