@@ -5,7 +5,7 @@ description = "Agent runtime workbench"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic",
-    "sqlalchemy",
+    "sqlalchemy[asyncio]",
     "asyncpg",
     "alembic",
     "fastapi",

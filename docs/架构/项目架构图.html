@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Runtime · 项目架构图</title>
+  <style>
+    :root {
+      --ink: #10243e;
+      --ink-soft: #43566e;
+      --paper: #f5f8fc;
+      --panel: #ffffff;
+      --line: #ced9e6;
+      --line-strong: #91a5ba;
+      --cyan: #0b7fab;
+      --cyan-pale: #eaf7fb;
+      --amber: #d67b22;
+      --amber-pale: #fff5e8;
+      --violet: #6c5dd3;
+      --violet-pale: #f2efff;
+      --green: #197a62;
+      --green-pale: #eaf7f2;
+      --shadow: 0 14px 36px rgba(16, 36, 62, 0.08);
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { color-scheme: light; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 1px 1px, rgba(67, 86, 110, 0.13) 1px, transparent 1.3px),
+        var(--paper);
+      background-size: 22px 22px;
+      color: var(--ink);
+      font-family: var(--sans);
+    }
+
+    button { font: inherit; }
+
+    .page {
+      width: min(1540px, 100%);
+      margin: 0 auto;
+      padding: 22px 24px 18px;
+    }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 16px;
+    }
+
+    .title-lockup {
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      gap: 15px;
+      align-items: stretch;
+    }
+
+    .plate-number {
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: white;
+      font: 700 12px/1 var(--mono);
+      letter-spacing: 0.08em;
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+    }
+
+    .eyebrow {
+      margin: 0 0 5px;
+      color: var(--cyan);
+      font: 700 11px/1.2 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 3.2vw, 46px);
+      line-height: 1.02;
+      letter-spacing: -0.045em;
+    }
+
+    .subtitle {
+      max-width: 850px;
+      margin: 8px 0 0;
+      color: var(--ink-soft);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 8px 20px rgba(16, 36, 62, 0.05);
+    }
+
+    .view-button,
+    .reset-button {
+      min-height: 34px;
+      padding: 0 13px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink-soft);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .view-button:hover,
+    .reset-button:hover { color: var(--ink); background: #edf3f8; }
+
+    .view-button[aria-pressed="true"] {
+      border-color: var(--ink);
+      background: var(--ink);
+      color: white;
+    }
+
+    .reset-button {
+      border-left-color: var(--line);
+      margin-left: 2px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 292px;
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .blueprint,
+    .side-panel {
+      border: 1px solid var(--line-strong);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow);
+    }
+
+    .blueprint {
+      position: relative;
+      min-height: 692px;
+      padding: 15px;
+      overflow: hidden;
+    }
+
+    .blueprint::before {
+      content: "LOGICAL VIEW · MODULAR MONOLITH";
+      position: absolute;
+      top: 12px;
+      right: 14px;
+      color: #8999aa;
+      font: 600 9px/1 var(--mono);
+      letter-spacing: 0.12em;
+    }
+
+    .diagram-caption {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 25px;
+      margin-bottom: 8px;
+      color: var(--ink-soft);
+      font-size: 11px;
+    }
+
+    .legend-line {
+      display: inline-block;
+      width: 25px;
+      border-top: 2px solid var(--cyan);
+    }
+
+    .legend-line.dashed { border-top: 2px dashed var(--violet); }
+
+    .architecture-stack {
+      position: relative;
+      display: grid;
+      gap: 7px;
+    }
+
+    .architecture-stack::before {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 12px;
+      bottom: 19px;
+      left: 22px;
+      border-left: 2px solid var(--cyan);
+      opacity: 0.82;
+    }
+
+    .flow-arrow {
+      position: relative;
+      z-index: 1;
+      height: 9px;
+      margin-left: 17px;
+      color: var(--cyan);
+      font: 800 13px/9px var(--mono);
+    }
+
+    .flow-arrow::after { content: "↓"; }
+
+    .layer {
+      position: relative;
+      z-index: 1;
+      margin-left: 36px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .layer-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 31px;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .layer-name {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .layer-index {
+      color: var(--cyan);
+      font: 700 10px/1 var(--mono);
+    }
+
+    .layer-title {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .layer-note {
+      color: #6e8094;
+      font: 600 9px/1.2 var(--mono);
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    .node-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 7px;
+      padding: 8px;
+    }
+
+    .ingress .node-grid { grid-template-columns: 1.1fr 0.9fr; }
+
+    .node {
+      position: relative;
+      min-width: 0;
+      min-height: 59px;
+      padding: 8px 9px 7px;
+      border: 1px solid #cbd7e3;
+      background: white;
+      color: var(--ink);
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease, transform 160ms ease;
+    }
+
+    .node:hover { border-color: var(--cyan); transform: translateY(-1px); }
+
+    .node:focus-visible,
+    .view-button:focus-visible,
+    .reset-button:focus-visible {
+      outline: 3px solid rgba(11, 127, 171, 0.28);
+      outline-offset: 2px;
+    }
+
+    .node-kicker {
+      display: block;
+      margin-bottom: 4px;
+      color: #718399;
+      font: 700 8px/1.1 var(--mono);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .node strong {
+      display: block;
+      overflow: hidden;
+      font-size: 12px;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .node small {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink-soft);
+      font-size: 9.5px;
+      line-height: 1.25;
+    }
+
+    .step-badge {
+      display: none;
+      position: absolute;
+      top: -7px;
+      right: -6px;
+      min-width: 21px;
+      height: 21px;
+      padding: 0 4px;
+      place-items: center;
+      border: 2px solid white;
+      border-radius: 50%;
+      background: var(--cyan);
+      color: white;
+      font: 800 9px/17px var(--mono);
+      text-align: center;
+    }
+
+    .runtime-shell {
+      margin-left: 36px;
+      border: 2px solid var(--ink);
+      background: #fbfdff;
+    }
+
+    .runtime-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 31px;
+      padding: 6px 10px;
+      background: var(--ink);
+      color: white;
+    }
+
+    .runtime-label strong { font-size: 13px; }
+    .runtime-label span { font: 600 9px/1 var(--mono); color: #c8d9e8; }
+
+    .plane { border-top: 1px solid #c9d5e2; }
+    .plane:first-of-type { border-top: 0; }
+
+    .plane-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 9px 0;
+    }
+
+    .plane-title strong { font-size: 11px; }
+    .plane-title span { color: #6d7e92; font: 600 8px/1 var(--mono); }
+
+    .control-plane .node-grid { padding-top: 6px; }
+
+    .execution-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 2.1fr minmax(0, 1fr);
+      gap: 7px;
+      padding: 7px 8px 8px;
+      align-items: stretch;
+    }
+
+    .execution-column {
+      display: grid;
+      gap: 7px;
+    }
+
+    .execution-column .node { min-height: 65px; }
+
+    .harness {
+      position: relative;
+      border: 1px solid var(--cyan);
+      background: var(--cyan-pale);
+      padding: 26px 7px 7px;
+    }
+
+    .harness-title {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      height: 23px;
+      padding: 0 8px;
+      background: var(--cyan);
+      color: white;
+    }
+
+    .harness-title strong { font-size: 10px; }
+    .harness-title span { font: 600 8px/1 var(--mono); opacity: 0.86; }
+
+    .harness-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 5px;
+    }
+
+    .harness .node {
+      min-height: 78px;
+      padding: 7px;
+      border-color: #9bcddd;
+    }
+
+    .harness .node strong { font-size: 10px; white-space: normal; }
+    .harness .node small { font-size: 8.5px; }
+
+    .safety-node { border-left: 3px solid var(--amber); background: var(--amber-pale); }
+    .data-node { border-left: 3px solid var(--green); background: var(--green-pale); }
+    .external-node { border-left: 3px solid var(--violet); background: var(--violet-pale); }
+
+    .authority {
+      display: grid;
+      grid-template-columns: 1.05fr 2fr;
+      gap: 0;
+      background: var(--ink);
+      color: white;
+    }
+
+    .authority-title {
+      display: flex;
+      align-items: center;
+      padding: 10px 12px;
+      border-right: 1px solid #41546a;
+    }
+
+    .authority-title strong { font-size: 12px; }
+    .authority-title span { margin-left: 8px; color: #b7c8d8; font: 600 8px/1 var(--mono); }
+
+    .authority-items {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      color: #dce8f2;
+      font-size: 9px;
+      text-align: center;
+    }
+
+    .flow-rail {
+      display: none;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 5px;
+      margin: 0 0 8px 36px;
+      padding: 7px;
+      border: 1px solid #9bcddd;
+      background: var(--cyan-pale);
+    }
+
+    .flow-rail span {
+      min-width: 0;
+      padding: 4px 5px;
+      border-left: 2px solid var(--cyan);
+      background: white;
+      font-size: 8.5px;
+      line-height: 1.3;
+    }
+
+    .flow-rail b { display: block; color: var(--cyan); font: 800 8px/1 var(--mono); margin-bottom: 2px; }
+
+    body[data-view="run"] .flow-rail { display: grid; }
+    body[data-view="run"] .node:not([data-run-step]) { opacity: 0.34; }
+    body[data-view="run"] .node[data-run-step] { border-color: var(--cyan); box-shadow: inset 0 0 0 1px var(--cyan); }
+    body[data-view="run"] .node[data-run-step] .step-badge { display: grid; }
+
+    body.has-selection .node { opacity: 0.22; }
+    body.has-selection .node.is-related,
+    body.has-selection .node.is-selected { opacity: 1; }
+    body.has-selection .node.is-related { border-color: var(--cyan); }
+    body.has-selection .node.is-selected {
+      border-color: var(--amber);
+      box-shadow: 0 0 0 2px rgba(214, 123, 34, 0.2);
+      transform: translateY(-1px);
+    }
+
+    .side-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 692px;
+    }
+
+    .eval-panel {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--violet-pale);
+    }
+
+    .aside-kicker {
+      margin: 0 0 6px;
+      color: var(--violet);
+      font: 800 9px/1 var(--mono);
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .eval-panel h2,
+    .inspector h2 {
+      margin: 0;
+      font-size: 15px;
+    }
+
+    .eval-panel p {
+      margin: 6px 0 10px;
+      color: var(--ink-soft);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .eval-chain {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 3px;
+    }
+
+    .eval-chain span {
+      padding: 6px 2px;
+      border: 1px dashed var(--violet);
+      background: white;
+      color: #5446ac;
+      font: 700 7.5px/1.15 var(--mono);
+      text-align: center;
+    }
+
+    .inspector {
+      min-height: 0;
+      padding: 14px;
+      overflow: auto;
+    }
+
+    .inspector-label {
+      margin-bottom: 6px;
+      color: var(--cyan);
+      font: 700 9px/1 var(--mono);
+      letter-spacing: 0.1em;
+    }
+
+    .inspector-summary {
+      margin: 8px 0 12px;
+      color: var(--ink-soft);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .fact {
+      padding: 9px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .fact dt {
+      margin-bottom: 3px;
+      color: #718399;
+      font: 700 8px/1 var(--mono);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .fact dd {
+      margin: 0;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .boundary-panel {
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .boundary-panel strong { display: block; margin-bottom: 6px; font-size: 10px; }
+
+    .boundary-panel ul {
+      margin: 0;
+      padding-left: 15px;
+      color: var(--ink-soft);
+      font-size: 9px;
+      line-height: 1.55;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 10px;
+      color: #718399;
+      font: 600 9px/1.3 var(--mono);
+    }
+
+    @media (max-width: 1120px) {
+      .workspace { grid-template-columns: 1fr; }
+      .side-panel { min-height: 0; grid-template-columns: 1fr 1.4fr 1fr; grid-template-rows: auto; }
+      .eval-panel { border-right: 1px solid var(--line); border-bottom: 0; }
+      .boundary-panel { border-top: 0; border-left: 1px solid var(--line); }
+      .inspector { max-height: 250px; }
+    }
+
+    @media (max-width: 900px) {
+      .page { padding: 16px; }
+      .masthead { grid-template-columns: 1fr; align-items: start; }
+      .toolbar { width: max-content; }
+      .execution-layout { grid-template-columns: 1fr; }
+      .harness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .harness-grid .node:last-child { grid-column: 1 / -1; }
+      .flow-rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .side-panel { grid-template-columns: 1fr; }
+      .eval-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+      .boundary-panel { border-left: 0; border-top: 1px solid var(--line); }
+    }
+
+    @media (max-width: 560px) {
+      .title-lockup { grid-template-columns: 38px 1fr; }
+      .plate-number { font-size: 9px; }
+      .toolbar { width: 100%; flex-wrap: wrap; }
+      .view-button { flex: 1; }
+      .node-grid,
+      .ingress .node-grid,
+      .harness-grid { grid-template-columns: 1fr; }
+      .harness-grid .node:last-child { grid-column: auto; }
+      .layer,
+      .runtime-shell { margin-left: 23px; }
+      .architecture-stack::before { left: 11px; }
+      .flow-arrow { margin-left: 6px; }
+      .flow-rail { margin-left: 23px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .authority { grid-template-columns: 1fr; }
+      .authority-title { border-right: 0; border-bottom: 1px solid #41546a; }
+      .authority-items { grid-template-columns: repeat(2, 1fr); }
+      .layer-note { display: none; }
+      footer { flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+
+    @media print {
+      body { background: white; }
+      .page { max-width: none; padding: 0; }
+      .toolbar, footer { display: none; }
+      .blueprint, .side-panel { box-shadow: none; }
+    }
+  </style>
+</head>
+<body data-view="architecture">
+  <div class="page">
+    <header class="masthead">
+      <div class="title-lockup">
+        <div class="plate-number">RUNTIME / 01</div>
+        <div>
+          <p class="eyebrow">Agent Runtime Workbench · Architecture Plate</p>
+          <h1>让业务 Agent 运行得可控、可恢复、可验证</h1>
+          <p class="subtitle">同一模块化单体中的控制职责与执行职责，共享 PostgreSQL 权威状态；Agent Harness 只负责模型控制环，Eval 始终位于生产执行链之外。</p>
+        </div>
+      </div>
+      <div class="toolbar" aria-label="视图控制">
+        <button class="view-button" type="button" data-view-button="architecture" aria-pressed="true">系统架构</button>
+        <button class="view-button" type="button" data-view-button="run" aria-pressed="false">Run 执行链</button>
+        <button class="reset-button" type="button" data-reset>重置高亮</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="blueprint" aria-label="Agent Runtime 项目架构图">
+        <div class="diagram-caption">
+          <span class="legend-line"></span><span>生产执行 / 调用</span>
+          <span class="legend-line dashed"></span><span>配置 / 验证 / 观测</span>
+        </div>
+
+        <div class="flow-rail" aria-label="Run 执行步骤">
+          <span><b>01–02</b>接收用户命令</span>
+          <span><b>03–04</b>创建 Run 与 Job</span>
+          <span><b>05–06</b>装配 Context 并决策</span>
+          <span><b>07–08</b>校验或等待用户</span>
+          <span><b>09–10</b>执行 Tool 并处理结果</span>
+          <span><b>11–12</b>恢复收敛与事件回放</span>
+        </div>
+
+        <div class="architecture-stack">
+          <section class="layer ingress">
+            <div class="layer-heading">
+              <div class="layer-name"><span class="layer-index">00</span><h2 class="layer-title">产品入口</h2></div>
+              <span class="layer-note">USER-FACING SURFACE</span>
+            </div>
+            <div class="node-grid">
+              <button class="node" type="button" data-node="workbench" data-run-step="01" data-connects="api events" aria-label="Agent 工作台">
+                <span class="step-badge">01</span><span class="node-kicker">React · TypeScript</span><strong>Agent 工作台</strong><small>Workspace、Session、输入补充与写前确认</small>
+              </button>
+              <button class="node" type="button" data-node="api" data-run-step="02" data-connects="workbench control session jobs events" aria-label="FastAPI API">
+                <span class="step-badge">02</span><span class="node-kicker">Command / Query</span><strong>FastAPI API</strong><small>身份校验、短事务命令、快照与事件接口</small>
+              </button>
+            </div>
+          </section>
+
+          <div class="flow-arrow" aria-hidden="true"></div>
+
+          <section class="runtime-shell" aria-label="Agent Runtime 模块化单体">
+            <div class="runtime-label"><strong>Agent Runtime</strong><span>ONE DEPLOYABLE · TWO LOGICAL PLANES</span></div>
+
+            <section class="plane control-plane" data-node="control" data-connects="api workspace identity versions secrets session harness">
+              <div class="plane-title"><strong>Runtime Control Plane</strong><span>逻辑边界 · 非独立服务</span></div>
+              <div class="node-grid">
+                <button class="node" type="button" data-node="workspace" data-connects="control identity versions session"><span class="node-kicker">Scope</span><strong>Workspace</strong><small>品牌 / 业务单元、店铺和 Agent 配置</small></button>
+                <button class="node safety-node" type="button" data-node="identity" data-connects="control workspace pretool requests"><span class="node-kicker">RBAC</span><strong>成员与权限</strong><small>角色、动作权限与店铺资源范围</small></button>
+                <button class="node" type="button" data-node="versions" data-connects="control harness backend tools eval"><span class="node-kicker">Immutable</span><strong>版本与配置</strong><small>Agent / Skill / Tool / Source / Policy 快照</small></button>
+                <button class="node safety-node" type="button" data-node="secrets" data-connects="control backend mcp"><span class="node-kicker">Encrypted</span><strong>Secret 与端点</strong><small>密钥加密、URL Allowlist 与脱敏</small></button>
+              </div>
+            </section>
+
+            <section class="plane execution-plane">
+              <div class="plane-title"><strong>Runtime Execution Plane</strong><span>持久执行 · 状态恢复 · 安全收敛</span></div>
+              <div class="execution-layout">
+                <div class="execution-column">
+                  <button class="node" type="button" data-node="session" data-run-step="03" data-connects="api jobs context requests postgres"><span class="step-badge">03</span><span class="node-kicker">Conversation</span><strong>Session / Run</strong><small>一次逻辑任务、消息与活动状态</small></button>
+                  <button class="node" type="button" data-node="jobs" data-run-step="04" data-connects="api session recovery postgres"><span class="step-badge">04</span><span class="node-kicker">Lease + CAS</span><strong>RunJob / Attempt</strong><small>领取、心跳、fencing token 与接管</small></button>
+                  <button class="node safety-node" type="button" data-node="requests" data-run-step="08" data-connects="session pretool identity events workbench"><span class="step-badge">08</span><span class="node-kicker">Human in the loop</span><strong>Input / Confirmation</strong><small>补充业务信息与当前操作者写前确认</small></button>
+                </div>
+
+                <section class="harness" data-node="harness" data-connects="context backend loop pretool posttool session">
+                  <div class="harness-title"><strong>Agent Harness</strong><span>MODEL CONTROL LOOP</span></div>
+                  <div class="harness-grid">
+                    <button class="node" type="button" data-node="context" data-run-step="05" data-connects="session memory posttool backend"><span class="step-badge">05</span><span class="node-kicker">Budget</span><strong>ContextAssembler</strong><small>优先级、Protected Context 与增量 Summary</small></button>
+                    <button class="node" type="button" data-node="backend" data-run-step="06" data-connects="context loop versions secrets"><span class="step-badge">06</span><span class="node-kicker">Protocol</span><strong>AgentBackend</strong><small>OpenAI / Anthropic 共同能力抽象</small></button>
+                    <button class="node" type="button" data-node="loop" data-run-step="06" data-connects="backend pretool posttool events"><span class="step-badge">06</span><span class="node-kicker">Orchestration</span><strong>Agent Loop</strong><small>轮次、ToolCall 顺序、限额与回填</small></button>
+                    <button class="node safety-node" type="button" data-node="pretool" data-run-step="07" data-connects="loop identity requests tools"><span class="step-badge">07</span><span class="node-kicker">Before effect</span><strong>PreToolUse</strong><small>Schema、来源、授权、Policy 与执行模式</small></button>
+                    <button class="node safety-node" type="button" data-node="posttool" data-run-step="10" data-connects="loop tools operation context events"><span class="step-badge">10</span><span class="node-kicker">After effect</span><strong>ToolResultProcessor</strong><small>结果分类、Schema、脱敏与 ContextProjection</small></button>
+                  </div>
+                </section>
+
+                <div class="execution-column">
+                  <button class="node safety-node" type="button" data-node="operation" data-run-step="11" data-connects="posttool recovery commerce postgres"><span class="step-badge">11</span><span class="node-kicker">Side effect</span><strong>Operation</strong><small>稳定幂等键、执行尝试与外部引用</small></button>
+                  <button class="node safety-node" type="button" data-node="recovery" data-run-step="11" data-connects="jobs operation events postgres"><span class="step-badge">11</span><span class="node-kicker">Convergence</span><strong>Reconciliation</strong><small>UNKNOWN 回查、故障恢复与终态收敛</small></button>
+                  <button class="node" type="button" data-node="events" data-run-step="12" data-connects="loop posttool recovery api workbench postgres"><span class="step-badge">12</span><span class="node-kicker">At-least-once</span><strong>AgentEvent</strong><small>持久事件、序号、重放与审计关联</small></button>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <div class="flow-arrow" aria-hidden="true"></div>
+
+          <section class="layer capability-layer">
+            <div class="layer-heading">
+              <div class="layer-name"><span class="layer-index">03</span><h2 class="layer-title">Capability Layer</h2></div>
+              <span class="layer-note">DOMAIN + EXTERNAL CAPABILITIES</span>
+            </div>
+            <div class="node-grid">
+              <button class="node data-node" type="button" data-node="tools" data-run-step="09" data-connects="pretool posttool mcp commerce"><span class="step-badge">09</span><span class="node-kicker">Unified contract</span><strong>Local Tool</strong><small>代码随附、Schema 固定、Handler 显式绑定</small></button>
+              <button class="node external-node" type="button" data-node="mcp" data-run-step="09" data-connects="tools secrets"><span class="step-badge">09</span><span class="node-kicker">Source</span><strong>MCP / WeKnora</strong><small>能力发现与品牌规范、运营 SOP 检索</small></button>
+              <button class="node safety-node" type="button" data-node="commerce" data-run-step="09" data-connects="tools operation postgres"><span class="step-badge">09</span><span class="node-kicker">Reference agent</span><strong>商品 Adapter / Policy</strong><small>淘宝、抖音 Mock 状态与价格业务规则</small></button>
+              <button class="node external-node" type="button" data-node="memory" data-connects="context postgres"><span class="node-kicker">Non-critical</span><strong>Memory / Mem0</strong><small>跨 Session 偏好；本地生命周期过滤后注入</small></button>
+            </div>
+          </section>
+
+          <div class="flow-arrow" aria-hidden="true"></div>
+
+          <section class="layer authority" data-node="postgres" data-connects="workspace identity versions session jobs requests operation recovery events memory">
+            <div class="authority-title"><strong>PostgreSQL Authority</strong><span>唯一权威状态</span></div>
+            <div class="authority-items"><span>Runtime State</span><span>Identity & Config</span><span>Audit & Events</span><span>Outbox & pgvector</span></div>
+          </section>
+        </div>
+      </section>
+
+      <aside class="side-panel" aria-label="架构说明">
+        <section class="eval-panel" data-node="eval" data-connects="api versions events postgres">
+          <p class="aside-kicker">Outside the runtime</p>
+          <h2>Eval 验证旁路</h2>
+          <p>只通过公开 API / 协议运行固定场景，不参与权限、执行或恢复决策。</p>
+          <div class="eval-chain"><span>Scenario</span><span>Runner</span><span>Scorer</span><span>Report</span></div>
+        </section>
+
+        <section class="inspector" aria-live="polite">
+          <div class="inspector-label" id="inspector-label">ARCHITECTURE READING GUIDE</div>
+          <h2 id="inspector-title">先看边界，再看调用</h2>
+          <p class="inspector-summary" id="inspector-summary">点击任一模块可查看它在系统中的职责、输入输出和明确不承担的事情。</p>
+          <dl id="inspector-facts">
+            <div class="fact"><dt>核心主体</dt><dd>Runtime 是项目核心；工作台是产品载体；商品运营 Agent 是业务参考实现。</dd></div>
+            <div class="fact"><dt>安全原则</dt><dd>模型提出行动，Runtime 在代码侧校验并控制副作用。</dd></div>
+            <div class="fact"><dt>恢复原则</dt><dd>写操作不确定时先回查，不把超时当作失败后直接重试。</dd></div>
+          </dl>
+        </section>
+
+        <section class="boundary-panel">
+          <strong>图中最重要的四条边界</strong>
+          <ul>
+            <li>Control / Execution 是逻辑职责，不是微服务。</li>
+            <li>Harness 属于 Runtime，但不等于整个 Runtime。</li>
+            <li>Mem0、WeKnora、Langfuse 都不是权威状态源。</li>
+            <li>Eval 在执行链之外，Harness 不是 Eval。</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+
+    <footer>
+      <span>Agent Runtime Workbench · Architecture v0.8</span>
+      <span>Solid = execution · Dashed = verification/configuration · Amber = side-effect boundary</span>
+    </footer>
+  </div>
+
+  <script>
+    const details = {
+      workbench: { label: 'PRODUCT SURFACE', title: 'Agent 工作台', summary: '运营人员使用业务 Agent 的唯一产品入口。', input: '用户任务、Input Request 回答、写前确认', output: '命令与查询请求；由 EventReducer 生成的 UI 投影', boundary: '不直接调用模型、MCP 或业务平台 API' },
+      api: { label: 'APPLICATION BOUNDARY', title: 'FastAPI API', summary: '接收命令、验证身份并返回快照或事件，不运行长时 Agent Loop。', input: 'JWT、Workspace 命令、Session 命令', output: '短事务状态变更、RunJob、查询快照', boundary: '不在请求进程内执行模型或 Tool' },
+      control: { label: 'LOGICAL PLANE', title: 'Runtime Control Plane', summary: '管理谁能使用什么能力，以及运行时固定哪些配置版本。', input: 'Workspace 配置、成员权限、版本和 Secret', output: 'ActorContext、RuntimeAssembly 与版本快照', boundary: '是模块化单体中的职责，不是独立微服务' },
+      workspace: { label: 'CONTROL PLANE', title: 'Workspace', summary: '一个品牌或业务单元的长期配置边界，可连接多个淘宝和抖音店铺。', input: '成员、店铺、Agent、模型、Skill 与 Source 配置', output: '当前可用能力及非敏感配置摘要', boundary: '不是固定单店上下文，也不包含 Session 私有消息' },
+      identity: { label: 'SECURITY CONTRACT', title: '成员与权限', summary: '将成员身份、动作权限和通用资源范围组合成当前 ActorContext。', input: '当前 Membership、Permission、ResourceScope', output: 'ALLOW 或稳定拒绝原因', boundary: '写前实时读取；不长期相信 JWT 或 Run 快照' },
+      versions: { label: 'REPRODUCIBILITY', title: '版本与配置', summary: 'Run 固定模型、Agent、Skill、Tool、Source 与 Prompt 的实际版本。', input: '已发布配置与代码注册', output: '不可变版本快照和 Hash', boundary: '安全权限与业务资源状态仍需写前读取当前值' },
+      secrets: { label: 'SECURITY CONTRACT', title: 'Secret 与端点', summary: '加密保存模型和 Source 凭证，并阻断危险外部地址。', input: 'Base URL、API Key、端点 Allowlist', output: '受绑定的密文引用和脱敏配置', boundary: '明文不能进入日志、事件、Trace 或 Eval 报告' },
+      session: { label: 'EXECUTION PLANE', title: 'Session / Run', summary: 'Session 承载持续对话；Run 表示一条普通用户消息触发的一次逻辑任务。', input: '已持久化用户消息与固定版本', output: '活动状态、ToolCall、Request 与最终结果', boundary: '恢复原 Run，不为重试、确认或 Worker 重启创建新 Run' },
+      jobs: { label: 'DURABLE SCHEDULING', title: 'RunJob / Attempt', summary: '基于 PostgreSQL 租约推进 Run，并阻止失去租约的 Worker 提交旧结果。', input: 'PENDING Job、available_at、当前状态版本', output: 'RunAttempt、lease token、下一持久边界', boundary: '模型和外部 Tool 调用期间不持有数据库长事务' },
+      requests: { label: 'HUMAN IN THE LOOP', title: 'Input / Confirmation', summary: 'Input 补充业务信息；Confirmation 是当前操作者的写前确认。', input: '结构化 InputRequirement 或确认指纹', output: '一次性回答、恢复 Job、审计事件', boundary: '不是另一个成员的审批流；恢复后必须重走完整 PreToolUse' },
+      harness: { label: 'MODEL-SIDE RUNTIME', title: 'Agent Harness', summary: '把 LLM 组织成能循环调用 Tool 的 Agent，并把结果安全回填。', input: 'Context、ToolDefinition、AgentBackend', output: 'Assistant Message、完整 ToolCall 与下一轮请求', boundary: '不负责身份、持久租约、业务授权或 Eval' },
+      context: { label: 'HARNESS', title: 'ContextAssembler', summary: '按优先级和 Token 预算组装 BackendRequest。', input: '安全规则、Skill、消息、Tool 投影与过滤后的 Memory', output: '受预算约束的模型上下文与 SESSION_SUMMARY', boundary: '安全规则、当前意图和活动交互属于 Protected Context，不能被压缩' },
+      backend: { label: 'HARNESS', title: 'AgentBackend', summary: '屏蔽 OpenAI 与 Anthropic 协议在流式输出和 Tool Calling 上的差异。', input: 'BackendRequest、CancellationToken 与固定模型配置', output: '标准化文本、ToolCall 和 Usage 事件', boundary: 'Provider 共同能力之外不承诺行为一致' },
+      loop: { label: 'HARNESS', title: 'Agent Loop', summary: '按稳定顺序持久化和推进 ToolCall，并实施轮次与时间预算。', input: '标准化 BackendEvent 与当前 Run 状态', output: '下一轮模型调用、等待状态或 Run 终态', boundary: '首版不并行执行 ToolCall，不是通用 Workflow 引擎' },
+      pretool: { label: 'BEFORE SIDE EFFECT', title: 'PreToolUse', summary: '在 Tool 执行前按固定顺序完成结构、来源、权限、Policy 与确认校验。', input: 'ToolCall、当前 Actor、资源和业务状态', output: 'ALLOW、DENY、REQUIRE_INPUT 或 REQUIRE_CONFIRMATION', boundary: '安全不依赖 Prompt；业务扩展只能返回数据化决策' },
+      posttool: { label: 'AFTER SIDE EFFECT', title: 'ToolResultProcessor', summary: '分离权威执行结果、模型可见投影和前端安全视图。', input: 'Handler 结果、Output Schema、Operation 状态', output: '脱敏 ToolResult、ContextProjection 与 AgentEvent', boundary: '投影失败不能抹掉已经发生的外部写入事实' },
+      operation: { label: 'SIDE-EFFECT CONTROL', title: 'Operation', summary: '表示一次逻辑写入，以稳定 operation_id 贯穿确认、执行、恢复和回查。', input: '已通过校验的写 ToolCall 与幂等键', output: 'PREPARED、EXECUTING、APPLIED、UNKNOWN 等状态', boundary: 'Operation 不等于某一次网络请求' },
+      recovery: { label: 'RECOVERY CONTRACT', title: 'Reconciliation', summary: '外部写入结果不确定时先读取权威状态，再决定完成、重试或失败。', input: 'UNKNOWN Operation、外部引用和回查策略', output: 'APPLIED、NOT_APPLIED 或继续 UNKNOWN', boundary: '不可幂等且不可回查时禁止盲目重试' },
+      events: { label: 'DURABLE EVENT STREAM', title: 'AgentEvent', summary: '状态变更与事件在同一事务提交，通过 WebSocket 至少一次交付。', input: 'Runtime 状态迁移与脱敏 payload', output: '有序、可重放、可审计的事件', boundary: '事件是 UI/Trace/Eval 的共同语义，但不能反向改变执行状态' },
+      tools: { label: 'CAPABILITY', title: 'Local Tool', summary: '代码随附的明确业务能力，通过本地 ToolBinding 接入 Runtime。', input: '不可变 ToolExecutionContext', output: '标准化 ToolResult', boundary: 'Handler 不创建 Request、不提交 Runtime Repository、不自行重试写操作' },
+      mcp: { label: 'EXTERNAL SOURCE', title: 'MCP / WeKnora', summary: 'MCP 提供外部工具协议；WeKnora 只提供品牌知识和运营 SOP 检索。', input: '已通过 Allowlist 的 Source 配置', output: '本地重新分类后的 ToolVersion 与不可信检索结果', boundary: 'MCP Server 不能自行声明本地权限和副作用等级' },
+      commerce: { label: 'REFERENCE AGENT', title: '商品 Adapter / Policy', summary: '参考 Agent 将淘宝、抖音平台差异封装为商品 Tool，并实施价格业务规则。', input: '店铺、SKU、价格、Listing Version 与当前 Policy', output: '查询结果、幂等改价和回查结果', boundary: '电商字段只存在于业务 Agent，Runtime 不硬编码 SKU 或平台' },
+      memory: { label: 'NON-AUTHORITATIVE', title: 'Memory / Mem0', summary: '保存跨 Session 的非关键用户偏好，并通过本地生命周期阻止旧记录复活。', input: '用户已确认的偏好、反馈、决策与经验', output: '带来源、有效期和 Revision 的不可信 Context 数据', boundary: '不保存权限、价格规则、凭证或本次执行参数' },
+      postgres: { label: 'SOURCE OF TRUTH', title: 'PostgreSQL Authority', summary: '统一保存身份、配置、执行状态、事件、审计、Memory Record 和 Outbox。', input: '所有应用服务短事务', output: '可恢复、可追溯、可比较并交换的权威状态', boundary: '首版不引入 Redis；外部组件不能覆盖这里的状态' },
+      eval: { label: 'OUTSIDE PRODUCTION PATH', title: 'Eval 验证旁路', summary: '以固定 Scenario、Runner 和 Scorer 验证 Runtime 不变量及业务结果。', input: '固定模型配置、版本、初始状态和场景数据', output: '分维度报告、基础设施错误与发布 Gate', boundary: 'Eval 不是 Harness，不参与生产权限、执行或恢复' }
+    }
+
+    const body = document.body
+    const title = document.getElementById('inspector-title')
+    const label = document.getElementById('inspector-label')
+    const summary = document.getElementById('inspector-summary')
+    const facts = document.getElementById('inspector-facts')
+
+    function setView(view) {
+      body.dataset.view = view
+      document.querySelectorAll('[data-view-button]').forEach((button) => {
+        const active = button.dataset.viewButton === view
+        button.setAttribute('aria-pressed', String(active))
+      })
+    }
+
+    function clearSelection() {
+      body.classList.remove('has-selection')
+      document.querySelectorAll('[data-node]').forEach((node) => {
+        node.classList.remove('is-selected', 'is-related')
+      })
+      label.textContent = 'ARCHITECTURE READING GUIDE'
+      title.textContent = '先看边界，再看调用'
+      summary.textContent = '点击任一模块可查看它在系统中的职责、输入输出和明确不承担的事情。'
+      facts.innerHTML = '<div class="fact"><dt>核心主体</dt><dd>Runtime 是项目核心；工作台是产品载体；商品运营 Agent 是业务参考实现。</dd></div><div class="fact"><dt>安全原则</dt><dd>模型提出行动，Runtime 在代码侧校验并控制副作用。</dd></div><div class="fact"><dt>恢复原则</dt><dd>写操作不确定时先回查，不把超时当作失败后直接重试。</dd></div>'
+    }
+
+    function selectNode(nodeId) {
+      const node = document.querySelector(`[data-node="${nodeId}"]`)
+      const detail = details[nodeId]
+      if (!node || !detail) return
+      const connected = new Set((node.dataset.connects || '').split(' ').filter(Boolean))
+      connected.add(nodeId)
+      body.classList.add('has-selection')
+      document.querySelectorAll('[data-node]').forEach((candidate) => {
+        const selected = candidate.dataset.node === nodeId
+        candidate.classList.toggle('is-selected', selected)
+        candidate.classList.toggle('is-related', connected.has(candidate.dataset.node))
+      })
+      label.textContent = detail.label
+      title.textContent = detail.title
+      summary.textContent = detail.summary
+      facts.innerHTML = `<div class="fact"><dt>Input</dt><dd>${detail.input}</dd></div><div class="fact"><dt>Output</dt><dd>${detail.output}</dd></div><div class="fact"><dt>Boundary</dt><dd>${detail.boundary}</dd></div>`
+    }
+
+    document.querySelectorAll('[data-view-button]').forEach((button) => {
+      button.addEventListener('click', () => setView(button.dataset.viewButton))
+    })
+
+    document.querySelector('[data-reset]').addEventListener('click', clearSelection)
+
+    document.querySelectorAll('[data-node]').forEach((node) => {
+      node.addEventListener('click', () => selectNode(node.dataset.node))
+      if (node.tagName !== 'BUTTON') {
+        node.tabIndex = 0
+        node.setAttribute('role', 'button')
+        node.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            selectNode(node.dataset.node)
+          }
+        })
+      }
+    })
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') clearSelection()
+    })
+  </script>
+</body>
+</html>
