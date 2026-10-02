@@ -1,6 +1,6 @@
 # Agent 工作台与 Runtime 需求文档
 
-> 版本：v0.5
+> 版本：v0.7
 > 日期：2026-10-02
 > 状态：范围已确认，详细设计评审中
 
@@ -79,15 +79,17 @@ Eval 是 Runtime 外部的工程验证系统，通过固定场景、Runner 和 S
 Agent 工作台
     ├── Workspace：品牌 / 渠道 / 店铺级配置
     ├── Session：多轮对话与上下文
-    ├── Run：ToolCall / Input Request / Confirmation Request / 执行状态
+    ├── Run：一次逻辑任务及其交互状态
+    ├── RunAttempt / RunJob：实际调度、租约与恢复
     └── 商品运营 Agent
                     ↓
               Agent Runtime
-    Workspace / Session
+    Workspace / Session / Run
         → Skill / Source
-        → AgentBackend
+        → AgentBackend / Agent Harness
         → ToolCall
         → PreToolUse
+        → Input Request / Confirmation Request
         → AgentEvent
                     ↓
     Model Provider / Local Tool / MCP Server
@@ -116,6 +118,8 @@ eval ──→ 公开 API / 公开接口与协议
 
 Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Workspace 可以保存品牌、渠道和店铺配置，但这些数据通过可扩展业务配置进入 Runtime，不成为 Runtime 内部条件分支。
 
+Runtime 公共接口、Harness 和扩展协议以 `docs/架构/Runtime核心接口与Harness设计.md` 为准；表结构、约束和事务边界以 `docs/架构/PostgreSQL数据模型与事务设计.md` 为准。
+
 ## 7. Agent Runtime 核心执行链
 
 ### 7.1 Workspace / Session
@@ -126,6 +130,7 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 - 每次 Worker 实际调度原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；
 - 同一 Session 同一时刻最多存在一个活动 Run，避免并发执行污染上下文或重复产生副作用；
 - 不同 Session 的消息、确认和工具结果严格隔离；
+- 首版 Session 为创建者私有，其他成员不能读取、继续或处理其 Request；WorkspaceOwner 通过独立审计视图查看脱敏事件；
 - Session 与 Run 状态持久化，进程重启或任务中断后可以恢复。
 
 ### 7.2 Skill / Source
@@ -147,7 +152,7 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 - Token 与用量信息；
 - Provider 错误格式、超时和取消。
 
-生产实现只保留两类协议后端：`OpenAIBackend` 和 `AnthropicBackend`。DeepSeek 等 OpenAI 兼容服务使用 `OpenAIBackend`，不按模型厂商新增子类。`ScriptedBackend` 仅用于测试与 Eval，不属于第三种生产协议。前端配置协议类型、Base URL、API Key 和 Model；API Key 必须加密保存且读取时脱敏。
+生产实现只保留两类协议后端：`OpenAIBackend` 和 `AnthropicBackend`。DeepSeek 等 OpenAI 兼容服务使用 `OpenAIBackend`，不按模型厂商新增子类。`ScriptedBackend` 仅用于测试与 Eval，不属于第三种生产协议。前端配置协议类型、Base URL、API Key 和 Model；API Key 必须加密保存且读取时脱敏。生产 Base URL 必须命中部署级 allowlist，开发模式才可显式允许本地端点。
 
 AgentBackend 必须声明 Tool Calling、Streaming、Structured Output、Cancellation、Usage Reporting 和 Parallel Tool Calls 等能力。业务 Agent 缺少必需能力时必须在 Run 创建前 fail-fast；Provider 可移植性只承诺共同能力集合内的行为一致。
 
@@ -158,9 +163,12 @@ Session、Skill、业务 Agent 和工作台不得依赖具体模型 SDK 或厂�
 ToolCall 在执行前依次经过：
 
 ```text
-Schema Validation
-    → Tool Resolution
+Tool Resolution
+    → Schema Validation
+    → Input Normalization
+    → Argument Provenance Resolution
     → Business Input Validation
+    → Authorization Resource Resolution
     → Access Control
     → Business Policy
     → Execution Mode
@@ -170,20 +178,25 @@ Schema Validation
     → AgentEvent Persistence
 ```
 
-Runtime 将 Tool Resolution 之后、Tool Execution 之前的校验与决策步骤统一纳入 PreToolUse 管线，但每项规则仍由所属层实现，不能把业务判断堆入 Runtime 核心。
+Runtime 将 Tool Resolution 以及 Tool Execution 之前的校验与决策步骤统一纳入 PreToolUse 管线，但每项规则仍由所属层实现，不能把业务判断堆入 Runtime 核心。
 
-- Schema Validation 校验参数类型和必填字段；
+- Tool Resolution 只解析当前 Run 已固定的 ToolVersion；未知 Tool、未启用版本或版本不匹配均不得继续；
+- Schema Validation 使用已解析 ToolVersion 的 JSON Schema 校验参数类型和必填字段；
+- Input Normalization 由业务 Agent 提供确定性规则，将别名、ID 和单位归一化，不允许使用模型猜测缺失作用域；
+- Argument Provenance Resolution 从当前用户消息、已回答 Request 和权威读取中生成参数来源，不相信模型自报的 `source` 或 `confidence`；
 - 商品运营 Agent 通过 Runtime 公开接口注册业务输入校验器，识别店铺、平台等执行所需信息是否缺失、无效或来源不可信；
 - Runtime 只负责调用校验器并处理其结构化结果，不硬编码 `store_id`、`platform`、`SKU` 等商品领域规则；
-- Access Control 校验成员身份、Workspace 与店铺数据范围和动作权限；
+- Access Control 校验成员身份、Workspace、通用资源范围和动作权限；商品运营 Agent 将通用资源映射为店铺，Runtime 不硬编码 `store_id`；
 - Business Policy 校验价格、活动状态等业务约束，规则实现属于商品运营 Agent；
 - Execution Mode 决定写操作被拒绝、进入写前确认，还是允许自动执行；
 - 写操作需要确认时进入 Confirmation Request，用户确认后从原 Run 继续；
 - 隐藏 Tool 只用于减少误调用，不能替代执行前授权。
 
+Schema 校验失败后要区分来源：不可解析 JSON、未允许字段或根结构错误属于模型输出错误，不应询问用户如何修复；必填业务字段缺失或值不完整时，Runtime 将结构化诊断交给业务 InputRequirementResolver，只有用户能补充的问题才进入 Input Request。
+
 成员身份与执行模式是两条独立边界：
 
-- RBAC 在 Workspace 级管理成员角色，在店铺级限制数据范围，并通过动作权限控制是否可以查询或修改；首版不实现 SKU 级授权；
+- RBAC 在 Workspace 级管理成员角色，使用 `(resource_type, resource_id)` 限制数据范围，并通过动作权限控制是否可以查询或修改；商品 Agent 首版只映射到店铺级，不实现 SKU 级授权；
 - `READ_ONLY` 禁止所有写 Tool，`CONFIRM_WRITES` 要求当前操作者在每次写入前确认，`AUTO_EXECUTE` 允许符合权限和业务规则的写操作直接执行；
 - Confirmation Request 是当前操作者的写前确认，不是另一名成员的审批流；即使处于 `AUTO_EXECUTE`，Access Control 和 Business Policy 仍必须通过。
 
@@ -205,7 +218,7 @@ Runtime 将 Tool Resolution 之后、Tool Execution 之前的校验与决策步�
 
 候选店铺、平台等内容必须由业务层根据 Workspace 配置、成员数据范围和实时资源生成，不允许模型自由编造。只有具备当前 Session 访问权限的成员才能回答待处理请求；同一请求只能处理一次，过期、取消或已经处理的请求不得再次恢复 Run。等待 Input Request 或 Confirmation Request 的 Run 仍是活动 Run，当前 Session 不能创建新的普通 Run。用户回答按 Input Request 的 Schema 校验，并记录回答人、回答时间和关联的 ToolCall。
 
-恢复后不得直接调用 Tool。Runtime 必须重新执行 Schema Validation、业务输入校验、Access Control、Business Policy 和 Execution Mode；若写操作需要确认，再进入 `WAITING_CONFIRMATION`。输入请求与写前确认是两种独立交互，不能共用一个含糊的“权限请求”。
+恢复后不得直接调用 Tool。Runtime 必须从 Tool Resolution 开始重新执行完整 PreToolUse；若写操作需要确认，再进入 `WAITING_CONFIRMATION`。输入请求与写前确认是两种独立交互，不能共用一个含糊的“权限请求”。
 
 ### 7.6 AgentEvent
 
@@ -223,7 +236,7 @@ Runtime 使用统一 AgentEvent 表达：
 ### 7.7 Memory / Knowledge / Observability
 
 - Session 消息和 Run 状态属于短期执行上下文，由 Runtime 存入 PostgreSQL；
-- 长期记忆只保存已经确认的用户偏好、反馈、决策和经验，不保存权限、店铺作用域、价格规则、凭证或本次执行参数等关键事实；
+- 长期记忆只保存已经确认的用户偏好、反馈、决策和经验，不保存权限、资源作用域、价格规则、凭证或本次执行参数等关键事实；
 - 应用数据库保存长期记忆的权威内容与同步状态，Mem0 OSS 负责提取和检索，`BAAI/bge-small-zh-v1.5` 作为本地 Embedding 模型，向量写入 pgvector；
 - WeKnora 保存商品知识、品牌规范、运营说明和 SOP 文档，通过 MCP 暴露检索能力。知识库提供事实资料，Skill 定义完成任务的方法和约束，二者不能互相替代；
 - Langfuse 记录模型、Tool 和 Run 的 Trace，并承载 Eval Experiment 与 Score；PostgreSQL 中的 Runtime 状态和审计记录才是业务权威数据，Langfuse 不参与状态恢复或授权判断。
@@ -275,6 +288,8 @@ API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job �
 - 首版不建设低代码 Agent 编辑器和插件市场。
 
 ## 10. 商品运营 Agent
+
+商品域边界、Tool Schema、参数来源、价格 Policy、Mock 平台和回查协议以 `docs/架构/商品运营参考Agent设计.md` 为准。
 
 商品运营 Agent 是首个实际运行在 Runtime 上的业务 Agent。首版业务闭环包括：
 
@@ -433,7 +448,7 @@ docs/
 2. `Workspace / Session → Skill / Source → AgentBackend → ToolCall → PreToolUse → AgentEvent` 执行链完整可观测；
 3. 在 `OpenAIBackend` 与 `AnthropicBackend` 之间切换不需要修改 Session、Skill、业务 Agent 和工作台代码；
 4. Runtime 不导入商品运营 Agent，商品 Agent 只通过公开接口与协议接入；
-5. 不同 Session 的上下文严格隔离，每个 Run 的 ToolCalls、Input Requests、Confirmation Requests 和执行状态均可独立追踪；
+5. 不同 Session 的上下文严格隔离，私有 Session 不能被其他成员读取或继续，每个 Run 的 ToolCalls、Input Requests、Confirmation Requests 和执行状态均可独立追踪；
 6. 本地 Tool 和 MCP Server Tool 可以通过统一 Source 接口装载，业务平台 API 通过商品运营 Agent 的代码 Adapter 接入；
 7. 写操作未经授权或未满足 Execution Mode 要求时不能到达 Tool 实现；
 8. 缺失或不可信的关键业务信息必须进入 `WAITING_INPUT`，不得由 Runtime 或模型猜测后执行；

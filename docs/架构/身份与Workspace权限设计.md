@@ -16,7 +16,7 @@
 
 - 用户使用本地账号登录，密码仅保存强哈希；
 - API 校验 JWT 后构造不可由前端覆盖的 `ActorContext`；
-- JWT 至少包含 `actor_id`、签发时间、过期时间和 token ID，不直接携带可长期信任的角色与店铺范围；
+- JWT 至少包含 `actor_id`、签发时间、过期时间和 token ID，不直接携带可长期信任的角色与资源范围；
 - Workspace 成员关系、角色和范围以 PostgreSQL 当前数据为准；
 - 本地开发可以提供预置账号，但不能使用任意受信任 Header 冒充用户；
 - 未来接入 SSO 时只替换登录和身份映射，Runtime 继续消费相同 ActorContext。
@@ -28,7 +28,7 @@ actor_id
 workspace_id
 membership_id
 role
-store_scope
+resource_scopes
 request_id
 ```
 
@@ -42,7 +42,7 @@ WorkspaceOwner 可以：
 
 - 查看和修改 Workspace 配置；
 - 邀请、移除成员和修改成员角色；
-- 配置成员店铺范围与动作权限；
+- 配置成员资源范围与动作权限；商品运营 Agent 中资源为店铺；
 - 配置 Agent、模型连接、Skill、Source、MCP、知识库和业务规则；
 - 修改 Execution Mode；
 - 创建和使用 Session；
@@ -56,7 +56,7 @@ Operator 可以：
 
 - 查看被授权的 Workspace、店铺和业务 Agent；
 - 创建和使用 Session；
-- 在店铺范围和动作权限内调用只读或写 Tool；
+- 在资源范围和动作权限内调用只读或写 Tool；
 - 回答自己可访问 Session 的 Input Request；
 - 在具有写动作权限时确认自己发起的写操作；
 - 查看自己可访问的 Run 与执行事件。
@@ -71,18 +71,18 @@ Operator 默认不能管理成员、模型凭证、Source、Skill、业务规则
 
 ```text
 成员角色
-  ∩ 店铺数据范围
+  ∩ 资源数据范围
   ∩ 动作权限
 ```
 
-### 4.1 店铺数据范围
+### 4.1 资源数据范围
 
-每个 Membership 的范围是：
+Runtime 不硬编码“店铺”概念，只处理 `(resource_type, resource_id)`。每个 Membership 在某类资源上的范围是：
 
-- Workspace 内全部店铺；或
-- 明确的 `store_id` 集合。
+- Workspace 内该类资源全部对象；或
+- 明确的资源 ID 集合。
 
-候选店铺列表只能从当前 Membership 可访问的店铺中生成。用户输入了格式合法但不在范围内的 `store_id` 时必须拒绝，不能转成确认请求。
+商品运营 Agent 将 `resource_type = store` 映射到自己的店铺实体。ToolBinding 使用确定性 ResourceResolver 从规范化参数提取资源引用，Runtime 只负责根据当前 Membership 校验。候选店铺列表只能从当前 Membership 可访问的店铺中生成。用户输入了格式合法但越出范围的 `store_id` 时必须拒绝，不能转成确认请求。
 
 ### 4.2 动作权限
 
@@ -111,6 +111,8 @@ Execution Mode 不授予动作权限：拥有 `product.price.write` 但 Workspac
 
 Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Workspace 与资源 ID。禁止先按全局资源 ID 查询后再在业务层补权限判断。
 
+首版 Session 为创建者私有：只有创建者能读取消息、提交后续输入或处理 Request。WorkspaceOwner 可查看必要的脱敏审计事件，不因角色自动获得完整会话内容。首版不实现共享 Session。
+
 首版使用应用层隔离和自动化测试，不要求 PostgreSQL RLS；未来若增加真正多租户部署，再评估数据库 RLS。
 
 ## 6. Actor 传递与 Worker 授权
@@ -119,13 +121,13 @@ Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Wo
 
 - `created_by_actor_id`；
 - 创建时的 Membership ID；
-- 创建时的店铺范围和动作权限摘要，用于审计；
+- 创建时的资源范围和动作权限摘要，用于审计；
 - 当前 Execution Mode 和相关配置版本。
 
-Worker 不能使用“系统管理员”身份绕过原操作者权限。每次写操作前，Worker 根据 `created_by_actor_id` 重新读取当前 Membership、店铺范围和动作权限：
+Worker 不能使用“系统管理员”身份绕过原操作者权限。每次写操作前，Worker 根据 `created_by_actor_id` 重新读取当前 Membership、资源范围和动作权限：
 
 - Membership 已删除或禁用：拒绝执行；
-- 店铺已移出范围：拒绝执行；
+- 目标资源已移出范围：拒绝执行；
 - 写权限已撤销：拒绝执行；
 - Execution Mode 或 Business Policy 变化：按当前规则重新决策；
 - Actor 快照只用于审计，不能覆盖当前权限事实。
@@ -158,16 +160,18 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 - 日志、异常、AgentEvent、ToolResult、Langfuse Trace 和 Eval 报告统一脱敏；
 - 主密钥轮换通过 key version 支持逐条重加密。
 
-## 9. 模型 Base URL 安全
+## 9. 外部端点安全
 
-允许前端填写任意模型 URL 会造成 SSRF 和 API Key 外泄。首版采用部署级端点 allowlist：
+允许前端填写任意模型或 MCP URL 会造成 SSRF、API Key 外泄和内网探测。首版采用部署级端点 allowlist：
 
 - WorkspaceOwner 只能选择或填写匹配 `MODEL_ENDPOINT_ALLOWLIST` 的 HTTPS 端点；
+- MCP Source 必须匹配独立的 `MCP_ENDPOINT_ALLOWLIST`；WeKnora 通过 MCP 接入时适用同一规则；
+- 远程 MCP 只允许 HTTPS 传输；本地 stdio MCP 只能选择部署者预先注册的 Server Key，前端不能提交任意可执行文件、命令行参数或环境变量；
 - 本地开发如需 `http://localhost`，必须通过独立开发配置显式开启；
 - 禁止 URL 中携带用户名、密码或 fragment；
 - 默认禁止自动跟随跨主机重定向；
 - DNS 解析后校验目标地址，拒绝云元数据地址、链路本地地址和未在 allowlist 中的私网地址；
-- 每个 Secret 绑定 `workspace_id`、协议类型和规范化端点，不能被另一个端点复用；
+- 每个 Secret 绑定 `workspace_id`、连接类型和规范化端点，不能被另一个端点复用；
 - “测试连接”接口只返回成功、错误分类和脱敏信息，不能回显响应 Header 或凭证。
 
 这套限制保护的是运行主机和模型凭证，不属于 AgentBackend 的模型能力抽象。
@@ -176,8 +180,8 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 
 以下行为必须记录审计事件：
 
-- 登录成功、失败和 token 撤销；
-- 成员加入、移除、角色和店铺范围变化；
+- 登录成功和失败；
+- 成员加入、移除、角色和资源范围变化；
 - 动作权限与 Execution Mode 变化；
 - 模型、Source、Skill、Secret 和业务规则配置变化；
 - Input Request 回答；
@@ -193,7 +197,7 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 
 1. Operator 无法管理成员、模型 Secret 和 Execution Mode；
 2. WorkspaceOwner 可以管理配置，但不能替其他成员完成 Confirmation；
-3. Operator 只能读取和修改授权店铺；
+3. Operator 只能读取和修改授权资源，商品运营 Agent 中具体表现为授权店铺；
 4. 格式合法但越出店铺范围的 `store_id` 被拒绝；
 5. `READ_ONLY` 下任何成员都不能执行写 Tool；
 6. `AUTO_EXECUTE` 不会绕过缺失的 `product.price.write`；
@@ -201,5 +205,6 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 8. Worker 不能使用系统 Actor 绕过原 Actor 权限；
 9. 使用另一个 Workspace 的资源 ID 无法读取或修改数据；
 10. API Key 创建后不回显，且不会出现在日志、AgentEvent 或 Trace；
-11. 未在 allowlist 的模型 URL、云元数据地址和跨主机重定向被拒绝；
+11. 未在 allowlist 的模型或 MCP URL、云元数据地址和跨主机重定向被拒绝；
 12. 所有成员、配置、确认和写操作变化都有可关联的审计记录。
+13. Operator 无法读取或继续另一名成员的私有 Session，WorkspaceOwner 也只能通过审计界面查看脱敏记录。

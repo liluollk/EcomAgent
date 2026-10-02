@@ -50,7 +50,7 @@ RunAttempt 状态：
 
 ### 3.4 ToolCall 与 Operation
 
-ToolCall 是模型提出的一次工具调用。写 Tool 在第一次通过参数规范化后创建稳定 `operation_id`；恢复、确认和重试不得重新生成。Operation 表示对外部系统的一次逻辑写入，不等同于网络请求次数。
+ToolCall 是模型提出的一次工具调用。写 Tool 在所有必需参数完成规范化、且首次进入 Confirmation 或执行边界前，先在 ToolCall 上分配稳定 `operation_id`；恢复、确认和重试不得重新生成。分配 ID 不代表已经写入外部系统；真正执行前才以该 ID 创建 Operation。Operation 表示对外部系统的一次逻辑写入，不等同于网络请求次数。
 
 ## 4. 分层状态机
 
@@ -112,7 +112,7 @@ ToolCall 是模型提出的一次工具调用。写 Tool 在第一次通过参�
 - `WAITING_INPUT → VALIDATING`，回答只补入获准字段；
 - `WAITING_CONFIRMATION → VALIDATING`，接受和拒绝均先恢复 Runtime；拒绝最终进入 `CANCELLED` 并作为 ToolResult 回填；
 - `EXECUTING → SUCCEEDED / FAILED / UNKNOWN`；
-- `UNKNOWN → SUCCEEDED / FAILED / EXECUTING`，只有回查确定 `NOT_APPLIED` 且 Adapter 策略允许时才能重新执行。
+- `UNKNOWN → SUCCEEDED / FAILED / VALIDATING`；只有回查确定 `NOT_APPLIED` 且 Adapter 策略允许时才能回到 `VALIDATING`，并在重新通过完整 PreToolUse 后执行。
 
 ### 4.3 RunJob 状态
 
@@ -148,7 +148,7 @@ Input Request 至少保存：
 
 业务 Agent 的 InputRequirementResolver 负责把 Schema 问题或业务歧义转换成 InputRequirement。Runtime 负责持久化和恢复，不理解 `store_id`、平台或 SKU。
 
-回答只能写入 Request 声明的字段，不能由前端替换整个 ToolCall 参数。恢复后重新执行 Schema Validation、业务输入校验、Access Control、Business Policy 和 Execution Mode。
+回答只能写入 Request 声明的字段，不能由前端替换整个 ToolCall 参数。恢复后从 Tool Resolution 开始重新执行完整 PreToolUse。
 
 ## 6. Confirmation Request 与 TOCTOU 防护
 
