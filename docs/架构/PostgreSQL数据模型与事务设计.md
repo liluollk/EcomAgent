@@ -169,7 +169,7 @@ Message 约束：
 - `(session_id, sequence_no)` 唯一；
 - Assistant Message 状态只允许 `STREAMING / COMPLETED / ABORTED`；
 - Context 查询只读取允许的 Role 且状态为 `COMPLETED` 的 Message。
-- `SYSTEM_SUMMARY` Message 必须同时保存覆盖区间、Schema 版本和来源 Hash，且只能覆盖同一 Session 内已完成的连续消息；
+- `SESSION_SUMMARY` Message 必须同时保存覆盖区间、Schema 版本和来源 Hash，且只能覆盖同一 Session 内已完成的连续消息；它是内部消息类型，不映射为 Provider System Message；
 
 Run 约束：
 

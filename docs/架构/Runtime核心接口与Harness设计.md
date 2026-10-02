@@ -197,7 +197,7 @@ Runtime 不根据厂商名称写特殊分支。DeepSeek 等 OpenAI 兼容服务�
 
 ## 6. Message 与流式输出
 
-Message 类型包括 `USER`、`ASSISTANT`、`TOOL` 和 `SYSTEM_SUMMARY`。用户消息在创建 Run 前已完整持久化。
+Message 类型包括 `USER`、`ASSISTANT`、`TOOL` 和 `SESSION_SUMMARY`。用户消息在创建 Run 前已完整持久化。`SESSION_SUMMARY` 是 Runtime 内部类型，转换为 BackendRequest 时作为带明确边界的非指令数据，而不是 Provider 的 System Message，避免把旧用户输入或 Tool 内容提升为系统规则。
 
 Assistant Message 状态：
 
@@ -235,7 +235,7 @@ ContextAssembler 不读取 Secret 明文，不把权限快照当成当前授权�
 
 `ContextBudgetPolicy` 使用模型配置中的 Context Window、最大输出 Token、Tool Schema Token 和安全余量计算本轮输入预算。安全规则、当前用户消息、活动 ToolCall、等待中的 Input/Confirmation 和恢复所需事实属于 Protected Context，不能被裁剪或摘要。预算不足时按以下顺序收敛：低相关长期记忆、旧 ToolResult Context 投影、较早已完成消息。
 
-仍然超预算时，`ConversationSummarizer` 生成结构化 Summary Message，保存 `covered_from_sequence / covered_to_sequence / summary_schema_version / source_hash`。Summary 只能覆盖已完成且不再活动的消息；生成失败时不得静默丢失 Protected Context，若 Protected Context 本身超限则以 `CONTEXT_BUDGET_EXCEEDED` 终止本次推进。Token 估算由注入的 `TokenEstimator` 完成，Provider 无精确计数接口时使用保守估算并保留安全余量。
+仍然超预算时，`ConversationSummarizer` 使用当前 Run 固定的 AgentBackend、关闭 Tool Calling，并按版本化 Schema 生成结构化 Summary Message，保存 `covered_from_sequence / covered_to_sequence / summary_schema_version / source_hash`。该调用计入 Run 的模型调用预算；输出 Schema 校验失败时不持久化 Summary。Summary 只能覆盖已完成且不再活动的消息；生成失败时不得静默丢失 Protected Context，若 Protected Context 本身超限则以 `CONTEXT_BUDGET_EXCEEDED` 终止本次推进。Token 估算由注入的 `TokenEstimator` 完成，Provider 无精确计数接口时使用保守估算并保留安全余量。
 
 ## 8. Agent Loop
 
