@@ -10,7 +10,7 @@
 
 项目主体是 Runtime，而不是某个垂直业务系统。电商商品维护 Agent 仅作为参考实现，用于验证 Runtime 能否承载具有查询、计划、审批、写入、回查和恢复等特征的真实业务流程。
 
-项目形态为“Agent Runtime 系统 + Runtime Host/API + 调试界面 + 参考 Agent + Eval”。Runtime 是项目主体；Host/API 负责承载和暴露 Runtime，调试界面用于观察执行过程，它们都不是独立的平台产品。本项目不建设多租户 SaaS 平台，也不以接入真实企业账号或产生线上业务指标为目标。
+项目形态为“Agent Runtime 系统 + Runtime Host/API + Runtime Console + 参考 Agent + Eval”。Runtime 是项目主体；Host/API 负责承载和暴露 Runtime；Runtime Console 提供会话操作、审批、恢复和执行观测入口。它们共同构成完整运行系统，但不扩展为多租户 SaaS 平台，也不以接入真实企业账号或产生线上业务指标为目标。
 
 ## 2. 要解决的问题
 
@@ -51,7 +51,7 @@ Reference Agent 是 Runtime 的业务接入示例。首个参考实现为电商�
 4. 通过 Skill、Source 和 Tool Registry 实现业务能力声明与加载。
 5. 在工具执行前完成参数校验、权限判定、审批和通用执行策略校验。
 6. 对写操作提供幂等、超时、分类重试、Checkpoint、中断恢复和未知结果处理能力。
-7. 通过统一 AgentEvent 支撑 UI、Trace、审计和 Eval。
+7. 通过统一 AgentEvent 支撑 Runtime Console、Trace、审计和 Eval。
 8. 通过独立 Eval 验证 Runtime contract 与参考 Agent 业务结果。
 
 ### 4.2 非目标
@@ -116,7 +116,7 @@ reference_agents/
 
 apps/
     api/                # FastAPI 组装入口
-    web/                # React + TypeScript 调试与演示界面
+    web/                # React + TypeScript Runtime Console
 
 eval/
     runtime_contracts/  # Runtime 通用行为评测
@@ -149,7 +149,7 @@ Agent Harness 必须支持：
 - 驱动模型响应、ToolCall、ToolResult 回填和下一轮决策；
 - 限制最大轮次、上下文预算和单轮工具调用数；
 - 在上下文压缩后保留任务目标、审批状态、未完成操作和关键工具结果；
-- 生成完整 AgentEvent，而不是直接操作 UI 或 Eval。
+- 生成完整 AgentEvent，而不是直接操作 Runtime Console 或 Eval。
 
 ### 7.3 AgentBackend
 
@@ -216,7 +216,18 @@ Schema Validation
 - Checkpoint 与恢复；
 - 最终结果与异常。
 
-AgentEvent 同时服务于 WebSocket UI、Trace、审计和 Eval，但不同消费者不能反向影响 Runtime 执行。
+AgentEvent 同时服务于 Runtime Console、Trace、审计和 Eval，但不同消费者不能绕过 Runtime API 反向影响执行。
+
+### 7.9 Runtime Console
+
+Runtime Console 是 Runtime 的运行控制面，不承载电商等领域业务逻辑。首版必须支持：
+
+- 创建 Workspace 和 Session，并查看当前运行状态；
+- 实时展示模型轮次、ToolCall、ToolResult 和 AgentEvent；
+- 展示待审批请求，并通过 Runtime API 提交批准或拒绝；
+- 发起中断、恢复和取消操作；
+- 查看 Checkpoint、Trace、审计记录与最终结果；
+- 根据通用 Tool Schema 和 Event Schema 渲染信息，不直接依赖参考 Agent 的内部实现。
 
 ## 8. 参考 Agent
 
@@ -262,7 +273,7 @@ AgentEvent 同时服务于 WebSocket UI、Trace、审计和 Eval，但不同消�
 
 - Runtime：Python 3.12、Pydantic v2、asyncio；
 - API：FastAPI、WebSocket；
-- UI：React、TypeScript；
+- Runtime Console：React、TypeScript；
 - 能力协议：MCP、REST、本地 Python Tool；
 - 首版持久化：SQLite 或文件型实现，通过 Store Protocol 隔离；
 - 测试：pytest；
@@ -273,7 +284,7 @@ AgentEvent 同时服务于 WebSocket UI、Trace、审计和 Eval，但不同消�
 1. 在新仓库中从 Contracts 和架构边界测试开始，不复制旧仓库目录结构。
 2. 实现最小 Runtime 闭环：Scripted Backend 调用一个通用 Tool，并持久化 Session 和 AgentEvent。
 3. 补齐权限、审批、Checkpoint、幂等和恢复。
-4. 接入真实 Provider Adapter 与 API/UI。
+4. 接入真实 Provider Adapter、Runtime Host/API 与 Runtime Console。
 5. 将旧项目中的电商能力按新 contracts 重新实现为 Reference Agent，不直接迁移领域耦合的执行层。
 6. 建立 Runtime Contract Eval 和 Reference Agent Eval。
 7. 新 Runtime 达到验收标准后，旧仓库只作为历史参考，不参与新项目构建和运行。
@@ -292,4 +303,4 @@ AgentEvent 同时服务于 WebSocket UI、Trace、审计和 Eval，但不同消�
 
 ## 13. 首版完成定义
 
-首版完成时，应具备一个边界独立且可运行的 `runtime` Python 核心包、一个承载 Runtime 的 API Host、一个用于观察会话与工具执行的 Web 调试界面、一个电商商品维护参考 Agent、独立的 Runtime Contract Eval 与业务 Eval，以及覆盖权限、幂等、恢复和架构边界的自动化测试。`runtime` 包是项目内部的核心代码边界，不以对外发布 SDK 为首版目标。
+首版完成时，应具备一个边界独立且可运行的 `runtime` Python 核心包、一个承载 Runtime 的 API Host、一个用于会话操作与执行观测的 Runtime Console、一个电商商品维护参考 Agent、独立的 Runtime Contract Eval 与业务 Eval，以及覆盖权限、幂等、恢复和架构边界的自动化测试。`runtime` 包是项目内部的核心代码边界，不以对外发布 SDK 为首版目标。
