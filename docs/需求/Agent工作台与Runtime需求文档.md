@@ -86,15 +86,15 @@ Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品
 
 ```text
 apps/workbench ─┐
-agents/* ───────┼──→ runtime public contracts
+agents/* ───────┼──→ Runtime 公开接口与协议
 apps/api ───────┘             ↓
                          runtime internals
 
-eval ──→ public API / public contracts
+eval ──→ 公开 API / 公开接口与协议
 ```
 
 - `runtime/` 不得导入 `agents/`、`apps/` 或 `eval/`；
-- `agents/` 通过公开 contracts 注册 Skill、Source、Tool 和业务 Policy；
+- `agents/` 通过 Runtime 公开接口与协议注册 Skill、Source、Tool 和业务 Policy；
 - `apps/api/` 负责组装 Runtime、Provider Adapter、Store 和业务 Agent；
 - `apps/workbench/` 不感知具体模型 SDK，不直接执行 Tool；
 - `eval/` 只能通过 Runtime 的公开入口运行场景。
@@ -216,9 +216,9 @@ Runtime 使用统一 AgentEvent 表达：
 
 ## 11. Eval
 
-### 11.1 Runtime Eval
+### 11.1 Runtime 核心行为评测
 
-Runtime Contract Eval 使用 `ScriptedBackend`、确定性 Tool 和故障注入验证通用执行合同，不依赖模型随机性。以下能力属于系统不变量，目标是全部通过：
+Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注入验证必须始终成立的执行规则，不依赖模型随机性。以下能力属于系统不变量，目标是全部通过：
 
 - Provider 输出是否正确标准化；
 - Session 是否隔离并可恢复；
@@ -281,7 +281,7 @@ Runtime Contract Eval 使用 `ScriptedBackend`、确定性 Tool 和故障注入�
 
 评测集按任务类型、信息完整度、权限状态、风险等级、单轮/多轮、正常/故障和普通/对抗表达组合覆盖，不要求穷举笛卡尔积。
 
-数据分为可迭代的开发集、固化历史失败的回归集和不根据单条失败修改规则的冻结测试集。最终报告分别展示 Runtime Contract、任务完成率、行为决策正确率、危险副作用率、合法任务误拒率和故障恢复成功率，不生成掩盖问题来源的综合总分。
+数据分为可迭代的开发集、固化历史失败的回归集和不根据单条失败修改规则的冻结测试集。最终报告分别展示 Runtime 核心行为、任务完成率、行为决策正确率、危险副作用率、合法任务误拒率和故障恢复成功率，不生成掩盖问题来源的综合总分。
 
 Eval 结果是项目能力的验证证据，不是工作台的产品功能，也不包装为真实生产业务指标。
 
@@ -289,7 +289,7 @@ Eval 结果是项目能力的验证证据，不是工作台的产品功能，也
 
 ```text
 runtime/
-    contracts/          # 公共协议和数据结构
+    protocols/          # 公共接口、协议和数据结构
     orchestration/      # Agent Harness、Context 与 Agent Loop
     backend/            # AgentBackend 与 ProviderAdapter
     workspace/          # Workspace 配置与生命周期
@@ -344,7 +344,7 @@ docs/
 1. 工作台可以完成 Workspace 选择、Session 对话、权限确认和中断恢复；
 2. `Workspace / Session → Skill / Source → AgentBackend → ToolCall → PreToolUse → AgentEvent` 执行链完整可观测；
 3. 切换 Provider 不需要修改 Session、Skill、业务 Agent 和工作台代码；
-4. Runtime 不导入商品运营 Agent，商品 Agent 只通过公开 contracts 接入；
+4. Runtime 不导入商品运营 Agent，商品 Agent 只通过公开接口与协议接入；
 5. 不同 Session 的上下文、ToolCalls、Permission Requests 和执行状态严格隔离；
 6. 本地 Tool、REST Adapter 和 MCP Server Tool 可以通过统一 Source 接口装载；
 7. 高风险写操作未经授权不能到达 Tool 实现；
