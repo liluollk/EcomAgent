@@ -1,7 +1,7 @@
 # Agent 工作台与 Runtime 需求文档
 
-> 版本：v0.2  
-> 日期：2026-10-02  
+> 版本：v0.3
+> 日期：2026-10-02
 > 状态：待评审
 
 ## 1. 项目定位
@@ -32,7 +32,8 @@
 - Agent 工作台：Workspace 选择、Session 对话、执行状态、信息补充、写前确认和恢复入口；
 - Agent Runtime：完整执行链、多模型抽象、能力装载、权限治理和状态管理；
 - 商品运营 Agent：作为第一个真实上层业务 Agent；
-- Source 接入：本地 Tool、REST Adapter 和 MCP Server；
+- 能力接入：本地 Tool 与 MCP Server；淘宝、抖音等业务 API 通过商品运营 Agent 内部的代码 Adapter 接入；
+- 长期记忆、知识库、Trace 和 Eval 分别通过 Mem0、WeKnora、Langfuse 与独立 Eval 模块实现；
 - Eval：分别验证 Runtime 行为合同和商品运营任务结果。
 
 ### 3.2 首版不做
@@ -40,7 +41,8 @@
 - 多租户计费、组织管理、应用市场和云端部署控制面；
 - 真实企业账号体系和生产 SLA；
 - 同时实现店铺运营、活动运营和客服售后三套业务 Agent；
-- 为展示技术栈而引入工作流引擎、向量数据库或多 Agent 协作；
+- Redis、独立工作流引擎、多 Agent 协作和通用低代码 OpenAPI-to-Tool 平台；
+- 把任意 REST API 在前端动态转换为 Tool；业务 API 由对应业务 Agent 的代码 Adapter 显式实现；
 - 将模拟平台结果描述为真实线上业务指标。
 
 ## 4. 术语边界
@@ -78,7 +80,8 @@ Agent 工作台
         → PreToolUse
         → AgentEvent
                     ↓
-    Model Provider / REST API / Local Tool / MCP Server
+    Model Provider / Local Tool / MCP Server
+    Mem0 / WeKnora / Langfuse / PostgreSQL
 ```
 
 Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
@@ -96,7 +99,8 @@ eval ──→ 公开 API / 公开接口与协议
 
 - `runtime/` 不得导入 `agents/`、`apps/` 或 `eval/`；
 - `agents/` 通过 Runtime 公开接口与协议注册 Skill、Source、Tool 和业务 Policy；
-- `apps/api/` 负责组装 Runtime、Provider Adapter、Store 和业务 Agent；
+- `apps/api/` 负责身份校验、配置管理、命令接收和查询，不直接运行长时 Agent Loop；
+- `apps/worker/` 负责领取持久化 Run Job，组装 Runtime、AgentBackend、Store 和业务 Agent，并推进执行；
 - `apps/workbench/` 不感知具体模型 SDK，不直接执行 Tool；
 - `eval/` 只能通过 Runtime 的公开入口运行场景。
 
@@ -106,7 +110,7 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 
 ### 7.1 Workspace / Session
 
-- Workspace 管理品牌、渠道、店铺级长期配置、业务规则、可用 Agent 与 Sources；
+- Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、可用 Agent 与 Sources；
 - Session 管理一次持续对话的消息与上下文，可以包含多个 Run；
 - Run 表示由一条用户消息或一次恢复操作触发的执行过程，隔离 ToolCalls、Input Requests、Confirmation Requests 和执行状态；
 - 同一 Session 同一时刻最多存在一个活动 Run，避免并发执行污染上下文或重复产生副作用；
@@ -116,13 +120,15 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 ### 7.2 Skill / Source
 
 - Skill 描述业务 Agent 可完成的任务、使用规则和所需能力；
-- Source 描述能力来源，包括本地实现、REST Adapter 和 MCP Server；
+- Source 描述能力来源，包括本地实现和 MCP Server；
 - Runtime 根据 Workspace、Agent 和权限配置装载当前 Session 可用的 Skill 与 Tool；
 - Source 与 Skill 由 Runtime 统一管理，但其业务内容归属于上层 Agent。
 
+淘宝、抖音等业务 REST API 不作为通用 Source 动态导入。商品运营 Agent 通过明确的代码 Adapter 调用平台 API，再以业务 Tool 暴露给 Runtime。WeKnora 作为知识服务通过 MCP Source 接入，Runtime 不依赖其内部检索实现。
+
 ### 7.3 AgentBackend
 
-统一 `AgentBackend` 与 `ProviderAdapter` 屏蔽：
+统一 `AgentBackend` 屏蔽：
 
 - 不同模型 SDK；
 - 普通响应与流式协议；
@@ -130,7 +136,9 @@ Runtime 核心不硬编码 `SKU`、`platform`、`price` 等领域字段。Worksp
 - Token 与用量信息；
 - Provider 错误格式、超时和取消。
 
-Session、Skill、业务 Agent 和工作台不得依赖具体模型实现。首版提供一个真实 Provider Adapter 和一个确定性 Scripted Backend，后者用于测试与 Eval。
+生产实现只保留两类协议后端：`OpenAIBackend` 和 `AnthropicBackend`。DeepSeek 等 OpenAI 兼容服务使用 `OpenAIBackend`，不按模型厂商新增子类。`ScriptedBackend` 仅用于测试与 Eval，不属于第三种生产协议。前端配置协议类型、Base URL、API Key 和 Model；API Key 必须加密保存且读取时脱敏。
+
+Session、Skill、业务 Agent 和工作台不得依赖具体模型 SDK 或厂商实现。
 
 ### 7.4 ToolCall / PreToolUse
 
@@ -159,6 +167,12 @@ Runtime 将 Tool Resolution 之后、Tool Execution 之前的校验与决策步�
 - Execution Mode 决定写操作被拒绝、进入写前确认，还是允许自动执行；
 - 写操作需要确认时进入 Confirmation Request，用户确认后从原 Run 继续；
 - 隐藏 Tool 只用于减少误调用，不能替代执行前授权。
+
+成员身份与执行模式是两条独立边界：
+
+- RBAC 在 Workspace 级管理成员角色，在店铺级限制数据范围，并通过动作权限控制是否可以查询或修改；首版不实现 SKU 级授权；
+- `READ_ONLY` 禁止所有写 Tool，`CONFIRM_WRITES` 要求当前操作者在每次写入前确认，`AUTO_EXECUTE` 允许符合权限和业务规则的写操作直接执行；
+- Confirmation Request 是当前操作者的写前确认，不是另一名成员的审批流；即使处于 `AUTO_EXECUTE`，Access Control 和 Business Policy 仍必须通过。
 
 ### 7.5 Input Request / Confirmation Request
 
@@ -191,6 +205,14 @@ Runtime 使用统一 AgentEvent 表达：
 
 工作台、Trace、审计和 Eval 消费同一事件语义，但不能绕过 Runtime 改变执行状态。
 
+### 7.7 Memory / Knowledge / Observability
+
+- Session 消息和 Run 状态属于短期执行上下文，由 Runtime 存入 PostgreSQL；
+- 长期记忆只保存已经确认的用户偏好、反馈、决策和经验，不保存权限、店铺作用域、价格规则、凭证或本次执行参数等关键事实；
+- 应用数据库保存长期记忆的权威内容与同步状态，Mem0 OSS 负责提取和检索，`BAAI/bge-small-zh-v1.5` 作为本地 Embedding 模型，向量写入 pgvector；
+- WeKnora 保存商品知识、品牌规范、运营说明和 SOP 文档，通过 MCP 暴露检索能力。知识库提供事实资料，Skill 定义完成任务的方法和约束，二者不能互相替代；
+- Langfuse 记录模型、Tool 和 Run 的 Trace，并承载 Eval Experiment 与 Score；PostgreSQL 中的 Runtime 状态和审计记录才是业务权威数据，Langfuse 不参与状态恢复或授权判断。
+
 ## 8. 运行状态与恢复
 
 - Run 使用 `RUNNING`、`WAITING_INPUT`、`WAITING_CONFIRMATION`、`COMPLETED`、`FAILED` 和 `CANCELLED` 等原因明确的持久状态；不使用无法表达等待原因的通用 `INTERRUPTED` 状态；
@@ -202,6 +224,8 @@ Runtime 使用统一 AgentEvent 表达：
 - 外部调用超时且结果不确定时进入 `UNKNOWN`，先回查再决定是否重试；
 - 非法状态迁移被拒绝，并生成可审计事件。
 
+API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job 表，Worker 通过数据库租约领取任务。模型或 Tool 外部调用不得发生在长数据库事务内；租约、稳定 `operation_id`、幂等键和写后回查共同防止恢复时重复写入。
+
 这些能力用于实现图片所描述的“运行状态管理”和“任务中断后的会话恢复”，不是独立的平台产品。
 
 ## 9. Agent 工作台
@@ -211,6 +235,8 @@ Runtime 使用统一 AgentEvent 表达：
 - 创建、选择和切换 Workspace；
 - 展示品牌、渠道、店铺及可用业务 Agent；
 - 展示当前 Workspace 已启用的模型、Skills、Sources 和 Execution Mode；
+- 配置 Workspace 成员角色、店铺数据范围、动作权限和 Execution Mode；
+- 配置模型连接、Skill、MCP Source、WeKnora 知识库连接和业务规则；
 - 业务配置通过扩展 Schema 渲染，工作台不硬编码商品领域流程。
 
 ### 9.2 Session 视图
@@ -255,7 +281,7 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 
 - Provider 输出是否正确标准化；
 - Session 是否隔离并可恢复；
-- Local、REST 和 MCP Tool 是否通过统一 Source 接口装载；
+- Local 与 MCP Tool 是否通过统一 Source 接口装载；
 - Tool 参数、权限和副作用是否在执行前校验；
 - Input Request 和 Confirmation Request 是否从正确状态继续，并在恢复后重新执行完整校验；
 - 重试是否复用幂等键；
@@ -277,7 +303,7 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 
 ### 11.3 故障恢复 Eval
 
-通过故障脚本验证模型超时、Tool 调用前中断、Tool 已成功但响应丢失、审批后重启、平台暂时不可用、回查暂时不一致和重复提交等场景。
+通过故障脚本验证模型超时、Tool 调用前中断、Tool 已成功但响应丢失、确认后重启、平台暂时不可用、回查暂时不一致和重复提交等场景。
 
 报告以下指标：
 
@@ -324,25 +350,29 @@ Eval 结果是项目能力的验证证据，不是工作台的产品功能，也
 runtime/
     interfaces/         # 公共接口和数据结构
     orchestration/      # Agent Harness、Context 与 Agent Loop
-    backend/            # AgentBackend 与 ProviderAdapter
+    backend/            # AgentBackend 公共接口
     workspace/          # Workspace 配置与生命周期
     session/            # Session 状态、持久化与恢复
     capabilities/       # Skill、Source 与 Tool 装载
     execution/          # ToolCall 与 ToolResult
     access/             # 成员权限、数据范围与动作授权
     interaction/        # Input Request、Confirmation Request 与恢复
-    events/             # AgentEvent、Trace 与审计
+    memory/             # 长期记忆接口与同步流程
+    events/             # AgentEvent 与审计
 
 agents/
     product_operations/ # 商品运营 Agent
 
 adapters/
-    providers/          # 模型 Provider Adapter
+    model_backends/     # OpenAIBackend 与 AnthropicBackend
     commerce/           # 淘宝、抖音或模拟平台 Adapter
     mcp/                # MCP Source Adapter
+    mem0/               # Mem0 长期记忆集成
+    langfuse/           # Trace 与 Eval 集成
 
 apps/
-    api/                # FastAPI Runtime Host
+    api/                # FastAPI 命令、查询与事件接口
+    worker/             # PostgreSQL Job Worker 与 Runtime Host
     workbench/          # React + TypeScript Agent 工作台
 
 eval/
@@ -364,10 +394,14 @@ docs/
 ## 13. 技术选型
 
 - Runtime：Python 3.12、Pydantic v2、asyncio；
-- Runtime Host：FastAPI、WebSocket；
+- Runtime Host：FastAPI、WebSocket、独立 Runtime Worker；
 - Agent 工作台：React、TypeScript；
-- 能力协议：MCP、REST、本地 Python Tool；
-- 状态存储：首版使用 SQLite，通过统一 Store 接口隔离实现；
+- 能力协议：MCP、本地 Python Tool；业务平台使用代码 Adapter；
+- 状态存储：PostgreSQL、SQLAlchemy 2、Alembic；
+- 长期记忆：Mem0 OSS、pgvector、`BAAI/bge-small-zh-v1.5`；
+- 知识库：WeKnora，通过 MCP 接入；
+- 可观测与实验：Langfuse；
+- 任务领取：PostgreSQL Run Job 与租约，不引入 Redis；
 - 测试：pytest；
 - Eval：独立 Scenario、Runner、Scorer 和 Report。
 
@@ -377,16 +411,18 @@ docs/
 
 1. 工作台可以完成 Workspace 选择、Session 对话、信息补充、写前确认和中断恢复；
 2. `Workspace / Session → Skill / Source → AgentBackend → ToolCall → PreToolUse → AgentEvent` 执行链完整可观测；
-3. 切换 Provider 不需要修改 Session、Skill、业务 Agent 和工作台代码；
+3. 在 `OpenAIBackend` 与 `AnthropicBackend` 之间切换不需要修改 Session、Skill、业务 Agent 和工作台代码；
 4. Runtime 不导入商品运营 Agent，商品 Agent 只通过公开接口与协议接入；
 5. 不同 Session 的上下文严格隔离，每个 Run 的 ToolCalls、Input Requests、Confirmation Requests 和执行状态均可独立追踪；
-6. 本地 Tool、REST Adapter 和 MCP Server Tool 可以通过统一 Source 接口装载；
+6. 本地 Tool 和 MCP Server Tool 可以通过统一 Source 接口装载，业务平台 API 通过商品运营 Agent 的代码 Adapter 接入；
 7. 高风险写操作未经授权不能到达 Tool 实现；
 8. 缺失或不可信的关键业务信息必须进入 `WAITING_INPUT`，不得由 Runtime 或模型猜测后执行；
 9. 用户补充信息后必须重新执行完整校验，不能从 `WAITING_INPUT` 直接进入 Tool 执行；
 10. 中断任务可以从持久化状态恢复，且不会重复产生已提交副作用；
 11. Runtime Eval 与商品运营 Agent Eval 可以独立运行和报告；
-12. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
+12. API 进程重启不丢失待执行 Run，Worker 可通过 PostgreSQL 租约继续领取任务；
+13. Mem0、WeKnora 或 Langfuse 单独不可用时，不得破坏 Runtime 权威状态和安全边界；
+14. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
 
 ## 15. 首版完成定义
 
