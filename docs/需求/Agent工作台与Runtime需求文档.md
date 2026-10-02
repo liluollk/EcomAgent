@@ -289,7 +289,7 @@ Eval 结果是项目能力的验证证据，不是工作台的产品功能，也
 
 ```text
 runtime/
-    protocols/          # 公共接口、协议和数据结构
+    interfaces/         # 公共接口和数据结构
     orchestration/      # Agent Harness、Context 与 Agent Loop
     backend/            # AgentBackend 与 ProviderAdapter
     workspace/          # Workspace 配置与生命周期
@@ -333,7 +333,7 @@ docs/
 - Runtime Host：FastAPI、WebSocket；
 - Agent 工作台：React、TypeScript；
 - 能力协议：MCP、REST、本地 Python Tool；
-- 状态存储：首版使用 SQLite，通过 Store Protocol 隔离实现；
+- 状态存储：首版使用 SQLite，通过统一 Store 接口隔离实现；
 - 测试：pytest；
 - Eval：独立 Scenario、Runner、Scorer 和 Report。
 
