@@ -295,13 +295,19 @@ git commit -m "feat: integrate secured mcp sources"
 **Files:**
 - Modify: `pyproject.toml`
 - Create: `runtime/memory/service.py`
+- Create: `runtime/memory/lifecycle.py`
 - Create: `runtime/integrations/outbox_worker.py`
 - Create: `adapters/mem0/client.py`
 - Create: `adapters/mem0/outbox_handler.py`
+- Create: `apps/api/routes/memories.py`
+- Create: `apps/api/schemas/memories.py`
+- Modify: `apps/api/main.py`
 - Test: `tests/runtime/memory/test_memory_policy.py`
+- Test: `tests/runtime/memory/test_memory_lifecycle.py`
 - Test: `tests/adapters/mem0/test_outbox.py`
+- Test: `tests/apps/api/test_memories.py`
 
-- [ ] **Step 1: 写禁止记忆类型和同步失败测试**
+- [ ] **Step 1: 写禁止记忆、生命周期和同步失败测试**
 
 ```python
 @pytest.mark.parametrize("kind", ["permission", "resource_scope", "price_rule", "credential"])
@@ -310,7 +316,7 @@ def test_execution_critical_facts_are_not_memories(memory_service, kind: str) ->
 
 
 async def test_mem0_failure_does_not_rollback_completed_run(outbox_worker, completed_run) -> None:
-    await outbox_worker.process_with_failure("MEMORY_SYNC")
+    await outbox_worker.process_with_failure("MEMORY_UPSERT")
     assert await completed_run.reload_status() == RunStatus.COMPLETED
 
 
@@ -318,29 +324,46 @@ async def test_expired_outbox_lease_is_reclaimable(outbox_worker, expired_outbox
     lease = await outbox_worker.claim("worker-b")
     assert lease.outbox_id == expired_outbox.id
     assert lease.lease_token != expired_outbox.lease_token
+
+
+async def test_correction_supersedes_previous_memory(memory_service, active_memory) -> None:
+    corrected = await memory_service.correct(active_memory.id, content="prefer cautious changes")
+    assert corrected.supersedes_id == active_memory.id
+    assert (await active_memory.reload()).lifecycle_status == "SUPERSEDED"
+
+
+async def test_deleted_memory_is_filtered_even_if_mem0_returns_it(memory_service, active_memory) -> None:
+    await memory_service.delete(active_memory.id, actor_id=active_memory.actor_id)
+    recalled = await memory_service.filter_retrieval([mem0_hit(active_memory.id)])
+    assert recalled == []
+
+
+async def test_actor_cannot_delete_another_users_memory(memory_service, active_memory) -> None:
+    with pytest.raises(MemoryAccessDenied):
+        await memory_service.delete(active_memory.id, actor_id=uuid4())
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run pytest tests/runtime/memory tests/adapters/mem0 -q`
+Run: `uv run pytest tests/runtime/memory tests/adapters/mem0 tests/apps/api/test_memories.py -q`
 
 Expected: FAIL because memory integration does not exist.
 
 - [ ] **Step 3: 实现权威 MemoryRecord 与异步同步**
 
-`pyproject.toml` 增加 Mem0 OSS 客户端依赖。Runtime 只保存已确认的偏好/反馈/决策/经验，与 Run 完成事务一起写 `MEMORY_SYNC` Outbox。通用 OutboxWorker 使用短租约领取 `PENDING`，失败后按预算延迟重试或置 `DEAD`，不修改 Run。Mem0 检索结果带来源并以不可信数据注入 Context。
+`pyproject.toml` 增加 Mem0 OSS 客户端依赖。Runtime 只保存已确认的偏好/反馈/决策/经验。Memory Record 使用 `subject_key/revision/supersedes_id`、生命周期状态、同步状态和有效期；纠正创建新 Revision 并替代旧记录，删除写 Tombstone。应用服务与 API 仅允许当前 Actor 查询、纠正和删除自己的记忆，不实现模型自动冲突裁决。Worker 维护任务调用 `expire_due()` 把到期记录改为 `EXPIRED`。写入和删除分别产生 `MEMORY_UPSERT/MEMORY_DELETE` Outbox。通用 OutboxWorker 使用短租约领取 `PENDING`，失败后按预算延迟重试或置 `DEAD`，不修改 Run。Mem0 检索结果必须按本地 ID、Revision、生命周期和有效期过滤后，才以带来源的不可信数据注入 Context。
 
 - [ ] **Step 4: 运行 Memory 测试**
 
-Run: `uv run pytest tests/runtime/memory tests/adapters/mem0 -q`
+Run: `uv run pytest tests/runtime/memory tests/adapters/mem0 tests/apps/api/test_memories.py -q`
 
 Expected: 全部 PASS。
 
 - [ ] **Step 5: 提交**
 
 ```powershell
-git add pyproject.toml runtime/memory runtime/integrations adapters/mem0 tests/runtime/memory tests/adapters/mem0
-git commit -m "feat: add durable long-term memory sync"
+git add pyproject.toml runtime/memory runtime/integrations adapters/mem0 apps/api tests/runtime/memory tests/adapters/mem0 tests/apps/api/test_memories.py
+git commit -m "feat: add durable memory lifecycle"
 ```
 
 ### Task 8: 接入 Langfuse Trace Outbox
@@ -451,15 +474,28 @@ git commit -m "feat: add agent workbench workspace shell"
 - Create: `apps/workbench/src/features/sessions/InputRequestCard.tsx`
 - Create: `apps/workbench/src/features/sessions/ConfirmationCard.tsx`
 - Create: `apps/workbench/src/features/sessions/ToolCallCard.tsx`
+- Create: `apps/workbench/src/features/sessions/eventReducer.ts`
+- Create: `apps/workbench/src/features/sessions/eventReducer.test.ts`
 - Create: `apps/workbench/src/features/sessions/SessionPage.test.tsx`
 
-- [ ] **Step 1: 写 Input/Confirmation 分离和断线重放测试**
+- [ ] **Step 1: 写 Input/Confirmation 分离与 EventReducer 测试**
 
 ```tsx
 it("renders input and confirmation as different interactions", async () => {
   render(<SessionPage sessionId="session-1" />)
   expect(await screen.findByText("请选择操作店铺")).toBeInTheDocument()
   expect(screen.queryByRole("button", { name: "确认执行" })).not.toBeInTheDocument()
+})
+
+
+it("stops on an event gap and never reverses a terminal run", () => {
+  const baseline = projectionFromSnapshot(snapshot("run-1", 4, "RUNNING"))
+  const completed = reduceAgentEvent(baseline, event(5, "RUN_COMPLETED"))
+  const withGap = reduceAgentEvent(completed, event(7, "RUN_RUNNING"))
+  expect(withGap.needsSnapshot).toBe(true)
+  expect(withGap.runs["run-1"].status).toBe("COMPLETED")
+  const late = reduceAgentEvent(withGap, event(4, "RUN_RUNNING"))
+  expect(late.runs["run-1"].status).toBe("COMPLETED")
 })
 ```
 
@@ -471,7 +507,7 @@ Expected: FAIL because Session components do not exist.
 
 - [ ] **Step 3: 实现对话与嵌入式 Run 状态**
 
-中间主区域展示消息、ToolCall、ToolResult、Input Request、Confirmation Request、错误和最终结果；不建设独立右侧 Run 视图。WebSocket 断开后先取消息快照，再从 cursor 重放；编辑器在存在活动等待 Run 时禁止新普通任务。
+中间主区域展示消息、ToolCall、ToolResult、Input Request、Confirmation Request、错误和最终结果；不建设独立右侧 Run 视图。`EventReducer` 按 event ID 去重、按 Run 序号推进、忽略旧序号、检测缺口后停止消费并拉取带 cursor 的新快照，终态不可被迟到事件逆转。Reducer 只维护 UI 投影，不回写 Runtime 状态。WebSocket 断开后先取消息快照，再从 cursor 重放；编辑器在存在活动等待 Run 时禁止新普通任务。
 
 - [ ] **Step 4: 运行前端检查**
 
@@ -496,13 +532,14 @@ git commit -m "feat: add interactive agent session workspace"
 
 **Files:**
 - Create: `apps/workbench/e2e/product-price-flow.spec.ts`
+- Create: `apps/workbench/e2e/fixtures/runtime.ts`
 - Create: `apps/workbench/playwright.config.ts`
 - Modify: `docker-compose.yml`
 - Create: `docs/开发/外部集成.md`
 
 - [ ] **Step 1: 写工作台关键 E2E**
 
-E2E 使用 ScriptedBackend 和 Mock Commerce Adapter，完成登录、选 Workspace、创建 Session、缺店铺 Input Request、写前确认、改价、断线重连和最终价格验证。
+E2E 使用 ScriptedBackend 和 Mock Commerce Adapter，完成登录、选 Workspace、创建 Session、缺店铺 Input Request、写前确认、改价、重复事件去重、事件缺口触发快照、断线重连和最终价格验证。
 
 ```typescript
 test("resumes a price update after input, confirmation, and reconnect", async ({ page }) => {
@@ -512,6 +549,16 @@ test("resumes a price update after input, confirmation, and reconnect", async ({
   await page.getByRole("button", { name: "确认执行" }).click()
   await page.reload()
   await expect(page.getByText("SKU-001 当前价格：99.00 元")).toBeVisible()
+})
+
+
+test("reloads a snapshot when an event sequence has a gap", async ({ page }) => {
+  const runtime = await RuntimeFixture.attach(page)
+  await runtime.seedSnapshot({ runId: "run-1", lastSequenceNo: 4, status: "RUNNING" })
+  await runtime.pushEvent({ id: "e-5", runId: "run-1", sequenceNo: 5, type: "RUN_COMPLETED" })
+  await runtime.pushEvent({ id: "e-7", runId: "run-1", sequenceNo: 7, type: "RUN_RUNNING" })
+  await expect.poll(() => runtime.snapshotRequestCount("run-1")).toBe(2)
+  await expect(page.getByText("已完成")).toBeVisible()
 })
 ```
 

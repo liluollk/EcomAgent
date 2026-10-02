@@ -248,16 +248,20 @@ git add runtime/jobs tests/runtime/jobs
 git commit -m "feat: add durable run job leases"
 ```
 
-### Task 5: 实现 ContextAssembler 和流式 Message 持久化
+### Task 5: 实现 Context 预算、压缩和流式 Message 持久化
 
 **Files:**
 - Create: `runtime/orchestration/context.py`
+- Create: `runtime/orchestration/context_budget.py`
+- Create: `runtime/orchestration/token_estimator.py`
+- Create: `runtime/orchestration/summarization.py`
 - Create: `runtime/orchestration/messages.py`
 - Create: `runtime/orchestration/streaming.py`
 - Test: `tests/runtime/orchestration/test_context.py`
+- Test: `tests/runtime/orchestration/test_context_budget.py`
 - Test: `tests/runtime/orchestration/test_streaming.py`
 
-- [ ] **Step 1: 写 ABORTED 消息和不可信内容测试**
+- [ ] **Step 1: 写 ABORTED、不可信内容和 Context 预算测试**
 
 ```python
 def test_aborted_assistant_message_is_excluded(context_assembler, conversation) -> None:
@@ -268,21 +272,35 @@ def test_aborted_assistant_message_is_excluded(context_assembler, conversation) 
 def test_tool_result_never_becomes_system_message(context_assembler, malicious_tool_result) -> None:
     request = context_assembler.build_with_tool_result(malicious_tool_result)
     assert all(message.role != "system" for message in request.tool_messages)
+
+
+async def test_context_compression_preserves_protected_items(context_assembler, long_session) -> None:
+    request = await context_assembler.build(long_session, input_budget_tokens=800)
+    assert request.contains("runtime safety rules")
+    assert request.contains(long_session.current_user_message.content)
+    assert request.contains(long_session.pending_confirmation.fingerprint)
+    assert request.session_summary.covered_to_sequence < long_session.current_user_message.sequence_no
+    assert request.session_summary.provider_role != "system"
+
+
+async def test_protected_context_over_budget_fails_closed(context_assembler, session) -> None:
+    with pytest.raises(ContextBudgetExceeded, match="CONTEXT_BUDGET_EXCEEDED"):
+        await context_assembler.build(session, input_budget_tokens=10)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run pytest tests/runtime/orchestration/test_context.py tests/runtime/orchestration/test_streaming.py -q`
+Run: `uv run pytest tests/runtime/orchestration/test_context.py tests/runtime/orchestration/test_context_budget.py tests/runtime/orchestration/test_streaming.py -q`
 
 Expected: FAIL because orchestration services do not exist.
 
-- [ ] **Step 3: 实现上下文优先级和消息状态**
+- [ ] **Step 3: 实现上下文优先级、Token 预算和结构化 Summary**
 
-Context 顺序固定为 Runtime 安全规则、Agent Prompt/Skill、Workspace 非敏感摘要、已完成消息、当前 Run ToolResult、过滤 Memory、当前用户消息。只有 `COMPLETED` Message 进入上下文；流失败时标记 `ABORTED`。Tool/MCP/Memory 统一按不可信数据注入。
+Context 顺序固定为 Runtime 安全规则、Agent Prompt/Skill、Workspace 非敏感摘要、已完成消息、当前 Run ToolResult 投影、过滤 Memory、当前用户消息。`ContextBudgetPolicy` 使用注入的 `TokenEstimator`，从 Context Window 扣除最大输出、Tool Schema 和安全余量；安全规则、当前意图、活动 ToolCall 与待处理 Request 标记为 Protected。超限时依次移除低相关 Memory、旧 ToolResult 投影，并用当前固定 AgentBackend 在禁用 Tool Calling 的模式下生成带覆盖区间、Schema 版本和来源 Hash 的 `SESSION_SUMMARY`；Summarizer 按独立输入预算增量合并上一 Summary 与下一段最早消息，不重新提交整段超长历史。该调用计入模型预算，Summary 作为不可信数据而非 Provider System Message 注入。只有 `COMPLETED` Message 进入上下文；流失败时标记 `ABORTED`。Tool/MCP/Memory 统一按不可信数据注入。Summary Schema 校验失败或 Protected Context 自身超限时返回 `CONTEXT_BUDGET_EXCEEDED`，不静默丢内容。
 
 - [ ] **Step 4: 运行 Context 测试**
 
-Run: `uv run pytest tests/runtime/orchestration/test_context.py tests/runtime/orchestration/test_streaming.py -q`
+Run: `uv run pytest tests/runtime/orchestration/test_context.py tests/runtime/orchestration/test_context_budget.py tests/runtime/orchestration/test_streaming.py -q`
 
 Expected: 全部 PASS。
 
@@ -408,16 +426,19 @@ git add runtime/interaction tests/runtime/interaction
 git commit -m "feat: add durable input and confirmation requests"
 ```
 
-### Task 8: 实现 ToolExecutor、Operation 和 Reconciliation
+### Task 8: 实现 ToolResultProcessor、Operation 和 Reconciliation
 
 **Files:**
 - Create: `runtime/execution/tool_executor.py`
+- Create: `runtime/execution/tool_result_processor.py`
+- Create: `runtime/execution/context_projection.py`
 - Create: `runtime/execution/operations.py`
 - Create: `runtime/execution/reconciliation.py`
+- Test: `tests/runtime/execution/test_tool_result_processor.py`
 - Test: `tests/runtime/execution/test_operations.py`
 - Test: `tests/runtime/execution/test_reconciliation.py`
 
-- [ ] **Step 1: 写响应丢失和 `NOT_APPLIED` 重新校验测试**
+- [ ] **Step 1: 写 PostToolUse、响应丢失和 `NOT_APPLIED` 重新校验测试**
 
 ```python
 async def test_unknown_write_schedules_reconciliation(operation_service) -> None:
@@ -430,21 +451,36 @@ async def test_not_applied_returns_to_validation(reconciliation_service) -> None
     result = await reconciliation_service.apply_result(ReconcileResult.NOT_APPLIED)
     assert result.tool_call_status == ToolCallStatus.VALIDATING
     assert result.direct_execute is False
+
+
+async def test_posttool_redacts_and_filters_context_projection(tool_result_processor) -> None:
+    processed = await tool_result_processor.process(
+        result_with_extra_field_and_secret("sk-sensitive")
+    )
+    assert "extra_field" not in processed.context_projection.structured_data
+    assert "sk-sensitive" not in processed.context_projection.model_dump_json()
+
+
+async def test_projection_failure_does_not_erase_applied_write(tool_result_processor) -> None:
+    processed = await tool_result_processor.process(applied_write_with_invalid_payload())
+    assert processed.operation_outcome == OperationOutcome.APPLIED
+    assert processed.tool_call_error == "INVALID_TOOL_RESULT"
+    assert processed.retry_allowed is False
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run pytest tests/runtime/execution/test_operations.py tests/runtime/execution/test_reconciliation.py -q`
+Run: `uv run pytest tests/runtime/execution/test_tool_result_processor.py tests/runtime/execution/test_operations.py tests/runtime/execution/test_reconciliation.py -q`
 
 Expected: FAIL because operation services do not exist.
 
-- [ ] **Step 3: 实现两阶段写操作**
+- [ ] **Step 3: 实现固定 PostToolUse 与两阶段写操作**
 
-外部调用前的短事务创建或读取稳定 Operation，写 `EXECUTING` 与 Attempt；提交后调用 Adapter；结果事务用 lease token 与 `state_version` CAS 提交。`UNKNOWN` 只能进入 Reconciliation；`NOT_APPLIED` 只能回到 `VALIDATING`。写操作被允许、拒绝、执行、回查和进入 `UNKNOWN` 都写 AuditEvent。
+外部调用前的短事务创建或读取稳定 Operation，写 `EXECUTING` 与 Attempt；提交后调用 Adapter。`ToolResultProcessor` 固定执行协议校验、Operation 结果分类、Output Schema 校验、字段级脱敏、大小限制和 `ContextProjection`；权威执行结果、模型投影与前端安全视图分离。首版不建设 Artifact Store，权威结果超限返回确定错误，模型投影按字段和数组上限确定性裁剪并保存 `truncated/content_hash`。结果事务用 lease token 与 `state_version` CAS 提交状态、脱敏结果和 AgentEvent。`UNKNOWN` 只能进入 Reconciliation；`NOT_APPLIED` 只能回到 `VALIDATING`；已经 `APPLIED` 的写入不能因输出或投影失败被解释为未执行。写操作被允许、拒绝、执行、回查和进入 `UNKNOWN` 都写 AuditEvent。
 
 - [ ] **Step 4: 运行 Operation 与回查测试**
 
-Run: `uv run pytest tests/runtime/execution/test_operations.py tests/runtime/execution/test_reconciliation.py -q`
+Run: `uv run pytest tests/runtime/execution/test_tool_result_processor.py tests/runtime/execution/test_operations.py tests/runtime/execution/test_reconciliation.py -q`
 
 Expected: 全部 PASS。
 
@@ -510,7 +546,7 @@ git commit -m "feat: complete persistent agent loop"
 
 - [ ] **Step 1: 添加外部写入前后崩溃的故障注入测试**
 
-测试必须覆盖：执行前 Worker 退出、Operation 已改为 `EXECUTING` 后退出、外部写入生效但响应丢失、回查 `UNKNOWN → APPLIED`、旧 Worker 使用失效 fencing token 提交。
+测试必须覆盖：执行前 Worker 退出、Operation 已改为 `EXECUTING` 后退出、外部写入生效但响应丢失、回查 `UNKNOWN → APPLIED`、旧 Worker 使用失效 fencing token 提交、ToolResult Schema 失败不清除已发生写入、Context 压缩不丢 Protected Context。
 
 ```python
 async def test_response_loss_reconciles_without_second_write(crash_harness) -> None:

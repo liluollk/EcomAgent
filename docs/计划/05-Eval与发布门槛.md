@@ -158,7 +158,9 @@ git commit -m "feat: score authoritative agent outcomes"
 
 **Files:**
 - Create: `eval/datasets/runtime/core.yaml`
+- Create: `eval/datasets/runtime/context.yaml`
 - Create: `eval/datasets/runtime/interaction.yaml`
+- Create: `eval/datasets/runtime/memory.yaml`
 - Create: `eval/datasets/runtime/recovery.yaml`
 - Create: `eval/runtime_suite.py`
 - Test: `tests/eval/test_runtime_suite.py`
@@ -175,6 +177,9 @@ def test_runtime_suite_contains_required_invariants(runtime_suite) -> None:
         "unknown-reconciles-first",
         "cancelled-never-resumes",
         "event-replay-deduplicates",
+        "context-summary-preserves-protected-facts",
+        "posttool-invalid-output-keeps-write-outcome",
+        "deleted-memory-never-reenters-context",
     }
 ```
 
@@ -186,7 +191,7 @@ Expected: FAIL because runtime datasets do not exist.
 
 - [ ] **Step 3: 用 ScriptedBackend 实现确定性用例**
 
-数据集覆盖 Backend 归一化、Session 隔离、固定 PreToolUse 顺序、Input/Confirmation 恢复、幂等、Reconciliation、租约接管、Event 重放和限额终止。这些用例的发布目标是全部通过，不使用 LLM Judge。
+数据集覆盖 Backend 归一化、Session 隔离、固定 PreToolUse/PostToolUse 顺序、Context 预算与 Summary、Input/Confirmation 恢复、Memory 失效过滤、幂等、Reconciliation、租约接管、Event 重放和限额终止。Context 用例使用 ScriptedBackend 验证 Protected Context 与 Summary 覆盖区间，不依赖 LLM Judge；这些用例的发布目标是全部通过。
 
 - [ ] **Step 4: 运行 Runtime Eval**
 
@@ -230,7 +235,7 @@ Expected: FAIL because dataset files do not exist.
 
 - [ ] **Step 3: 构建场景分层**
 
-三个分区均按只读查询、合法写入、信息不完、越权/违规、多轮和组合任务覆盖，并组合完整度、风险等级、单/多轮、正常/故障与普通/对抗表达。Regression 只接收确认过的历史缺陷；Frozen Test 写入 manifest SHA-256，正式评测前验证哈希。
+三个分区均按只读查询、合法写入、信息不完整、越权/违规、多轮和组合任务覆盖，并组合完整度、风险等级、单/多轮、正常/故障与普通/对抗表达。多轮场景包含超过原始消息预算的对话，验证 Summary 后仍保留用户目标、已确认约束和必要证据。Regression 只接收确认过的历史缺陷；Frozen Test 写入 manifest SHA-256，正式评测前验证哈希。
 
 - [ ] **Step 4: 运行数据集验证**
 
@@ -411,7 +416,7 @@ git commit -m "eval: freeze initial release baseline"
 
 - [ ] **Step 1: 配置非 Secret CI Gate**
 
-Backend CI 启动 PostgreSQL/pgvector，运行 Alembic、Ruff、mypy 和 pytest；Workbench CI 运行 lint、Vitest、build 和 ScriptedBackend E2E；Eval CI 默认运行 Runtime/Recovery 确定性套件和数据集哈希校验。需要 DeepSeek Key 的真实模型 Eval 使用手动触发与仓库 Secret，不在 Pull Request 中自动消耗额度。
+Backend CI 启动 PostgreSQL/pgvector，运行 Alembic、Ruff、mypy 和 pytest；Workbench CI 运行 lint、Vitest、build，并验证 EventReducer 的重复、乱序、缺口、快照和终态不变量；ScriptedBackend E2E 验证断线恢复。Eval CI 默认运行 Runtime/Recovery 确定性套件和数据集哈希校验。需要 DeepSeek Key 的真实模型 Eval 使用手动触发与仓库 Secret，不在 Pull Request 中自动消耗额度。
 
 ```yaml
 name: eval
