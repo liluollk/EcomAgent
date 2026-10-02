@@ -1,8 +1,8 @@
 # Agent 工作台与 Runtime 需求文档
 
-> 版本：v0.7
+> 版本：v0.8
 > 日期：2026-10-02
-> 状态：范围已确认，详细设计评审中
+> 状态：范围与详细设计已确认
 
 ## 1. 项目定位
 
@@ -52,6 +52,8 @@ FastAPI、React、Mem0、WeKnora 和 Langfuse 等属于实现选型或外部集�
 - 真实企业账号体系和生产 SLA；
 - 同时实现店铺运营、活动运营和客服售后三套业务 Agent；
 - Redis、独立工作流引擎、多 Agent 协作和通用低代码 OpenAPI-to-Tool 平台；
+- 模型路由、GraphRAG、Skill 语义路由、插件市场、通用 Shell/浏览器沙箱；
+- 自研知识库以及 S3/MinIO 等独立 Artifact Store；首版 ToolResult 使用确定性大小限制和 Context 投影；
 - 把任意 REST API 在前端动态转换为 Tool；业务 API 由对应业务 Agent 的代码 Adapter 显式实现；
 - 将模拟平台结果描述为真实线上业务指标。
 
@@ -76,27 +78,23 @@ Eval 是 Runtime 外部的工程验证系统，通过固定场景、Runner 和 S
 ## 5. 总体架构
 
 ```text
-Agent 工作台
-    ├── Workspace：品牌 / 渠道 / 店铺级配置
-    ├── Session：多轮对话与上下文
-    ├── Run：一次逻辑任务及其交互状态
-    ├── RunAttempt / RunJob：实际调度、租约与恢复
-    └── 商品运营 Agent
-                    ↓
-              Agent Runtime
-    Workspace / Session / Run
-        → Skill / Source
-        → AgentBackend / Agent Harness
-        → ToolCall
-        → PreToolUse
-        → Input Request / Confirmation Request
-        → AgentEvent
-                    ↓
-    Model Provider / Local Tool / MCP Server
-    Mem0 / WeKnora / Langfuse / PostgreSQL
+Agent 工作台 / FastAPI
+    ↓
+Runtime Control Plane
+    Workspace、成员、权限、版本、Secret、配置
+    ↓
+Runtime Execution Plane
+    Session、Run、RunJob、状态机、恢复、Request、AgentEvent
+    └── Agent Harness
+        Context、Prompt、AgentBackend、Agent Loop、Tool 暴露与结果回填
+    ↓
+Capability Layer
+    Local Tool、MCP、商品 Adapter、Business Policy、Knowledge、Memory
+
+Eval ──通过公开 API / 协议验证 Runtime，不进入生产执行链
 ```
 
-Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
+Control Plane 与 Execution Plane 是同一模块化单体中的逻辑职责，不对应独立进程、微服务或顶层代码包。Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
 
 ## 6. 依赖边界
 
@@ -174,11 +172,18 @@ Tool Resolution
     → Execution Mode
     → Write Confirmation（按策略触发）
     → Tool Execution
-    → ToolResult Normalization
+    → PostToolUse / ToolResult Processing
+        → Result Protocol Validation
+        → Operation Outcome Classification
+        → Output Schema Validation
+        → Redaction
+        → Size Limit / Context Projection
     → AgentEvent Persistence
 ```
 
 Runtime 将 Tool Resolution 以及 Tool Execution 之前的校验与决策步骤统一纳入 PreToolUse 管线，但每项规则仍由所属层实现，不能把业务判断堆入 Runtime 核心。
+
+执行后的处理不是可任意注册插件的第二套扩展平台。Runtime 使用固定 `ToolResultProcessor`，将 Handler 返回值拆成三种视图：用于 Operation/恢复的权威执行结果、用于模型回填的脱敏 Context 投影、用于工作台展示的安全视图。三者不能互相覆盖；尤其是输出 Schema 或投影失败，不能把已经发生的外部写入解释为“未执行”。
 
 - Tool Resolution 只解析当前 Run 已固定的 ToolVersion；未知 Tool、未启用版本或版本不匹配均不得继续；
 - Schema Validation 使用已解析 ToolVersion 的 JSON Schema 校验参数类型和必填字段；
@@ -231,13 +236,15 @@ Runtime 使用统一 AgentEvent 表达：
 - 异常、重试和恢复；
 - 最终结果。
 
-工作台、Trace、审计和 Eval 消费同一事件语义，但不能绕过 Runtime 改变执行状态。
+工作台、Trace、审计和 Eval 消费同一事件语义，但不能绕过 Runtime 改变执行状态。工作台使用确定性 `EventReducer` 构造 UI 投影：按 `event_id` 去重、按 `(run_id, sequence_no)` 顺序应用、检测缺口后停止推进并重新获取快照、禁止迟到事件把终态逆转为活动状态。Reducer 只维护前端视图，PostgreSQL 中的 Runtime 状态仍是唯一权威。
 
 ### 7.7 Memory / Knowledge / Observability
 
 - Session 消息和 Run 状态属于短期执行上下文，由 Runtime 存入 PostgreSQL；
 - 长期记忆只保存已经确认的用户偏好、反馈、决策和经验，不保存权限、资源作用域、价格规则、凭证或本次执行参数等关键事实；
 - 应用数据库保存长期记忆的权威内容与同步状态，Mem0 OSS 负责提取和检索，`BAAI/bge-small-zh-v1.5` 作为本地 Embedding 模型，向量写入 pgvector；
+- 每条 Memory Record 保存来源、主题键、有效期和替代关系；用户纠正创建新版本并 `supersedes` 旧记录，用户删除写入 Tombstone 并通过 Outbox 删除 Mem0 副本；
+- Runtime 只注入本地仍为有效版本的 Mem0 检索结果。Mem0 同步延迟、过期或删除失败不能使本地已失效记忆重新进入 Context；首版不实现模型驱动的通用语义冲突解决；
 - WeKnora 保存商品知识、品牌规范、运营说明和 SOP 文档，通过 MCP 暴露检索能力。知识库提供事实资料，Skill 定义完成任务的方法和约束，二者不能互相替代；
 - Langfuse 记录模型、Tool 和 Run 的 Trace，并承载 Eval Experiment 与 Score；PostgreSQL 中的 Runtime 状态和审计记录才是业务权威数据，Langfuse 不参与状态恢复或授权判断。
 
@@ -318,6 +325,9 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 - Session 是否隔离并可恢复；
 - Local 与 MCP Tool 是否通过统一 Source 接口装载；
 - Tool 参数、权限和副作用是否在执行前校验；
+- ToolResult 是否经过协议、Schema、脱敏和 Context 投影处理，且不改变已经发生的外部副作用事实；
+- Context 超预算时是否保留安全规则、当前意图和活动交互，并生成可追溯 Summary；
+- Memory 纠正、过期或删除后是否不再进入 Context；
 - Input Request 和 Confirmation Request 是否从正确状态继续，并在恢复后重新执行完整校验；
 - 重试是否复用幂等键；
 - UNKNOWN 是否先回查；
@@ -359,6 +369,7 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 - 展示并处理 Input Request 和 Confirmation Request；
 - 补充信息或确认写操作后继续原 Run；
 - 中断后恢复正确执行状态；
+- 重复或乱序事件不会重复渲染，序号缺口触发快照恢复，终态不会被迟到事件逆转；
 - 最终展示结果与 Runtime 权威状态一致。
 
 ### 11.5 场景数据与报告
@@ -461,11 +472,15 @@ docs/
 15. 模型 Eval 固定模型、温度、Prompt/Skill/Tool 版本、初始数据、重复次数和 Scorer；任务完成率与合法任务误拒率在首次基线后写入版本化发布门槛，正式评测期间不得移动；冻结测试集不参与针对单条失败的调参；
 16. Provider 401、依赖不可用和用例跳过记为基础设施失败，不计入模型质量得分；
 17. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
+18. ToolResult 必须经过固定的协议校验、输出 Schema、脱敏和 Context 投影，模型与工作台不可看到内部诊断或 Secret；
+19. Context 预算不足时不得压缩安全规则、当前用户意图、活动 ToolCall 或待处理 Request；Summary 必须可追溯到被覆盖的消息范围；
+20. Memory 支持确定性的纠正、过期和删除；本地已失效记录即使仍存在于 Mem0，也不得重新进入 Context；
+21. 工作台 EventReducer 能处理重复、乱序、缺口、重连和迟到终态事件，且不成为 Runtime 权威状态源。
 
 ## 15. 首版完成定义
 
 首版完成时，项目应形成一套可独立复用的 Agent Runtime、一个通过公开 API 使用 Runtime 的 Agent 工作台，以及一个不侵入 Runtime 核心的商品运营参考 Agent。
 
-用户能够在工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，按 Execution Mode 对写操作进行确认，并在任务中断后恢复执行。Runtime 通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程；商品运营 Agent 只通过 Runtime 公开接口与协议接入；独立 Eval 分别验证 Runtime 不变量、商品运营任务结果和故障恢复行为。
+用户能够在工作台中选择 Workspace，创建商品运营 Session，以对话方式发起商品查询和调价任务，查看模型输出与工具执行进度，补充执行所需信息，按 Execution Mode 对写操作进行确认，并在任务中断后恢复执行。Runtime 通过统一 AgentBackend、Skill/Source、ToolCall、PreToolUse、ToolResultProcessor、Input Request、Confirmation Request 和 AgentEvent 支撑完整流程；Context 与 Memory 具有明确预算和生命周期，工作台通过确定性 EventReducer 恢复视图；商品运营 Agent 只通过 Runtime 公开接口与协议接入；独立 Eval 分别验证 Runtime 不变量、商品运营任务结果和故障恢复行为。
 
 该完成定义证明的是“通用 Runtime 能够承载一个具有真实约束的业务 Agent”，不等同于已经建设多种业务 Agent、接入真实生产流量或达到企业生产 SLA。

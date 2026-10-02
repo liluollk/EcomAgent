@@ -1,8 +1,8 @@
 # PostgreSQL 数据模型与事务设计
 
-> 版本：v0.1
+> 版本：v0.2
 > 日期：2026-10-02
-> 状态：待评审
+> 状态：已确认
 
 ## 1. 目标与选型
 
@@ -149,7 +149,9 @@ sessions
 messages
   id, workspace_id, session_id, run_id nullable,
   role, status, content, structured_content,
-  sequence_no, created_at, completed_at
+  sequence_no, covered_from_sequence nullable, covered_to_sequence nullable,
+  summary_schema_version nullable, source_hash nullable,
+  created_at, completed_at
 
 runs
   id, workspace_id, session_id, created_by_actor_id, created_by_membership_id,
@@ -167,6 +169,7 @@ Message 约束：
 - `(session_id, sequence_no)` 唯一；
 - Assistant Message 状态只允许 `STREAMING / COMPLETED / ABORTED`；
 - Context 查询只读取允许的 Role 且状态为 `COMPLETED` 的 Message。
+- `SYSTEM_SUMMARY` Message 必须同时保存覆盖区间、Schema 版本和来源 Hash，且只能覆盖同一 Session 内已完成的连续消息；
 
 Run 约束：
 
@@ -351,9 +354,11 @@ secrets
   created_by_actor_id, created_at, rotated_at
 
 memory_records
-  id, workspace_id, actor_id, kind,
-  content, source_session_id, status,
-  created_at, updated_at
+  id, workspace_id, actor_id, kind, subject_key,
+  content, content_hash, source_type, source_id, source_session_id,
+  revision, supersedes_id, lifecycle_status, sync_status,
+  valid_from, expires_at,
+  deleted_at, deleted_by_actor_id, created_at, updated_at
 
 integration_outbox
   id, workspace_id, kind, aggregate_type, aggregate_id,
@@ -362,9 +367,11 @@ integration_outbox
   last_error_code, created_at, updated_at
 ```
 
-Outbox `kind` 首版包括 `MEMORY_SYNC` 和 `TRACE_EXPORT`。业务事务只写权威状态和 Outbox 行，不在同一事务中调用 Mem0 或 Langfuse。
+Outbox `kind` 首版包括 `MEMORY_UPSERT`、`MEMORY_DELETE` 和 `TRACE_EXPORT`。业务事务只写权威状态和 Outbox 行，不在同一事务中调用 Mem0 或 Langfuse。
 
-Memory Record 状态为 `PENDING_SYNC / SYNCED / SYNC_FAILED / DELETED`；Outbox 状态为 `PENDING / LEASED / DONE / DEAD`。
+Memory Record 生命周期状态为 `ACTIVE / SUPERSEDED / EXPIRED / DELETED`，同步状态为 `PENDING / SYNCED / FAILED`；Outbox 状态为 `PENDING / LEASED / DONE / DEAD`。本地生命周期与外部同步状态分开，避免 Mem0 暂时失败导致一条本地有效记忆被错误视为失效。
+
+同一 `(workspace_id, actor_id, kind, subject_key)` 只有最新且生命周期为 `ACTIVE`、尚未过期的 Revision 可以进入 Context。用户纠正时在单个事务中创建新 Revision、设置 `supersedes_id`、把旧记录改为 `SUPERSEDED` 并写 `MEMORY_UPSERT`；用户删除时改为 `DELETED`、记录删除人和时间并写 `MEMORY_DELETE`。Runtime 在接收 Mem0 检索结果后仍按本地 Memory ID、Revision、生命周期和有效期过滤，因此外部索引延迟不能复活失效记忆。首版不根据向量相似度自动合并或裁决不同 `subject_key` 的语义冲突。
 
 Outbox Worker 成功后标记 `DONE`；失败按预算重试，最终 `DEAD` 并保留诊断。外部集成失败不能回滚已经完成的 Runtime 状态。
 

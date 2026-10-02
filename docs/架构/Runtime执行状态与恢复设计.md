@@ -1,8 +1,8 @@
 # Runtime 执行状态与恢复设计
 
-> 版本：v0.1
+> 版本：v0.2
 > 日期：2026-10-02
-> 状态：待评审
+> 状态：已确认
 
 ## 1. 目标与边界
 
@@ -234,6 +234,8 @@ Worker 在模型调用和 Tool 外部调用期间不持有数据库长事务，�
 
 状态变更与 AgentEvent 在同一 PostgreSQL 事务内提交。API/WebSocket 采用 at-least-once 交付，不宣称 exactly-once；客户端按 `event_id` 去重，使用 `(run_id, sequence_no)` 检测缺口，并可携带 cursor 从 PostgreSQL 重放。
 
+工作台 `EventReducer` 维护 `seen_event_ids`、每个 Run 的 `last_sequence_no`、当前投影与 `needs_snapshot`。重复事件直接忽略；序号小于等于已应用序号的迟到事件不回滚视图；序号出现缺口时停止应用后续事件并重新获取包含 cursor 的快照；终态一旦由连续事件或新快照确认，旧事件不能恢复为活动态。Reducer 只产生 UI 投影，不向 Runtime 回写执行状态。
+
 模型密钥、认证 Header、完整凭证和业务敏感字段不得写入 AgentEvent、日志或 Langfuse Trace。
 
 ## 10. 配置版本与恢复
@@ -300,5 +302,7 @@ Provider 可移植性只承诺共同能力集合内的行为一致，不承诺�
 10. Event 重复投递时客户端可按 event ID 去重，断线后可按 cursor 重放；
 11. `CANCELLED` Run 不能恢复；
 12. Mem0、WeKnora 或 Langfuse 故障不改变 Runtime 权威状态和授权结果。
+13. Event 乱序或缺口不会产生错误 UI 终态，缺口触发快照恢复；
+14. Memory 被纠正、过期或删除后，即使 Mem0 返回旧记录也不会进入 Context。
 
 危险副作用与重复逻辑写入必须报告为 `0/N`，其中 `N` 是实际执行的对抗或恢复用例数；基础设施失败不得混入通过率。

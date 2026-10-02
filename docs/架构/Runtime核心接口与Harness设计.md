@@ -1,12 +1,12 @@
 # Runtime 核心接口与 Harness 设计
 
-> 版本：v0.1
+> 版本：v0.2
 > 日期：2026-10-02
-> 状态：待评审
+> 状态：已确认
 
 ## 1. 目标与设计取舍
 
-本文定义 Runtime 的公开接口、Agent Harness、Context 装配、AgentBackend、Skill/Source/Tool 注册和 PreToolUse 扩展边界。目标是让商品运营 Agent 只依赖 Runtime 公开接口，同时避免为了“通用”提前建设低代码插件平台或通用工作流引擎。
+本文定义 Runtime 的公开接口、Agent Harness、Context 装配、AgentBackend、Skill/Source/Tool 注册、PreToolUse 与 ToolResult 处理边界。目标是让商品运营 Agent 只依赖 Runtime 公开接口，同时避免为了“通用”提前建设低代码插件平台或通用工作流引擎。
 
 采用“显式接口 + 启动时组装”的方案：
 
@@ -38,6 +38,8 @@ runtime internal services / repositories / harness
 6. `apps/api/` 只通过应用服务提交命令和读取状态，不直接调用 AgentBackend 或 ToolHandler。
 
 架构测试必须扫描 import，阻止 Runtime 对上层模块形成反向依赖。
+
+从职责上可将同一 Runtime 解释为 Control Plane 与 Execution Plane：前者管理 Workspace、成员、权限、版本、Secret 和配置，后者管理 Session、Run、Job、状态、恢复和事件；Agent Harness 属于 Execution Plane 内面向模型的编排部分。这是逻辑视图，不新增顶层包、独立服务或网络调用。
 
 ## 3. 公共定义与运行时实现分离
 
@@ -231,6 +233,10 @@ MCP、平台 API 和其他 ToolResult 同样视为不可信数据，只能作为
 
 ContextAssembler 不读取 Secret 明文，不把权限快照当成当前授权事实。
 
+`ContextBudgetPolicy` 使用模型配置中的 Context Window、最大输出 Token、Tool Schema Token 和安全余量计算本轮输入预算。安全规则、当前用户消息、活动 ToolCall、等待中的 Input/Confirmation 和恢复所需事实属于 Protected Context，不能被裁剪或摘要。预算不足时按以下顺序收敛：低相关长期记忆、旧 ToolResult Context 投影、较早已完成消息。
+
+仍然超预算时，`ConversationSummarizer` 生成结构化 Summary Message，保存 `covered_from_sequence / covered_to_sequence / summary_schema_version / source_hash`。Summary 只能覆盖已完成且不再活动的消息；生成失败时不得静默丢失 Protected Context，若 Protected Context 本身超限则以 `CONTEXT_BUDGET_EXCEEDED` 终止本次推进。Token 估算由注入的 `TokenEstimator` 完成，Provider 无精确计数接口时使用保守估算并保留安全余量。
+
 ## 8. Agent Loop
 
 一次 Worker 推进 Run 的主循环：
@@ -348,6 +354,30 @@ ToolHandler 不自行重试写操作、不创建 Request、不提交 Runtime Rep
 
 对外展示的 `safe_message` 与内部诊断分离；异常堆栈、凭证、请求 Header 和未脱敏响应不得进入模型上下文。
 
+### 10.1 固定 PostToolUse 结果管线
+
+ToolHandler 返回后统一进入 `ToolResultProcessor`，阶段固定为：
+
+```text
+Result Protocol Validation
+  → Operation Outcome Classification
+  → Output Schema Validation
+  → Redaction
+  → Size Policy
+  → Context Projection
+  → State / AgentEvent Persistence
+```
+
+- Result Protocol Validation 校验 `status/retry_class/external_reference/observed_state` 的组合是否合法；
+- Operation Outcome Classification 先保留外部副作用事实。写操作结果不能因后续 Schema 或投影失败被降格为 `NOT_APPLIED`；不能确定时进入 `UNKNOWN` 与 Reconciliation；
+- Output Schema Validation 只允许 ToolVersion 声明字段进入结构化结果，未知字段和类型错误形成 `INVALID_TOOL_RESULT`；
+- Redaction 在内容写入 Message、AgentEvent、Trace 或日志前执行；
+- Size Policy 分别限制权威结果和模型投影大小。首版不建设 Artifact Store，超出权威结果上限时返回确定错误，Context 投影按 Schema 字段和数组上限做确定性裁剪并标记 `truncated/content_hash`；
+- Context Projection 只产生不可信的 `TOOL` Message，不能生成 System 指令；
+- 状态、脱敏结果与 AgentEvent 在同一事务内提交。
+
+PostToolUse 不是可任意注册代码的 Hook 平台。业务 Agent 可以随 ToolBinding 提供纯数据式 Context Projection 配置，但不能改变 Operation、权限、重试和持久化语义。
+
 ## 11. 错误分类与重试归属
 
 错误分类至少包括：
@@ -393,3 +423,6 @@ Runtime 核心接口使用 `ScriptedBackend`、确定性 ToolHandler 和故障�
 10. 外部知识和 Memory 不能覆盖系统规则；
 11. 切换 OpenAIBackend 与 AnthropicBackend 不修改业务 Agent 代码；
 12. Provider 缺少业务 Agent 必需能力时 Run 创建失败。
+13. Context 超预算时按固定优先级收敛，Protected Context 不丢失，Summary 可追溯；
+14. ToolResult 协议或输出 Schema 非法时不会污染 Context，Secret 在持久化前被脱敏；
+15. 已发生写入的 ToolResult 即使投影失败也不会被解释为未执行或直接重试。
