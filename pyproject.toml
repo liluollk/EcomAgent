@@ -25,6 +25,7 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
+    "types-jsonschema>=4.26.0.20260518",
 ]
 
 [build-system]
