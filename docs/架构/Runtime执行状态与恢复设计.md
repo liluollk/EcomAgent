@@ -306,3 +306,17 @@ Provider 可移植性只承诺共同能力集合内的行为一致，不承诺�
 14. Memory 被纠正、过期或删除后，即使 Mem0 返回旧记录也不会进入 Context。
 
 危险副作用与重复逻辑写入必须报告为 `0/N`，其中 `N` 是实际执行的对抗或恢复用例数；基础设施失败不得混入通过率。
+
+## 15. 实现验证状态
+
+以下崩溃恢复目标已由 `tests/runtime/integration/test_crash_recovery.py`（计划 02 Task 10，crash_harness 故障注入 + 真实 Runtime 服务与真库）验证；本节仅为状态标记，不改变上述设计语义。
+
+| 已验证目标（对应本文小节/验收用例） | 验证测试 |
+|---|---|
+| 执行前 Worker 退出：租约被回收、Run 回 `QUEUED` 可重新领取、Attempt `ABANDONED`（§8、§13、验收 2） | `test_worker_exit_before_execution_requeues_run` |
+| Operation 已改 `EXECUTING` 后 Worker 退出：Attempt `ABANDONED`，恢复 Job 为 `RECONCILE_OPERATION`（§8、§13） | `test_executing_operation_exit_schedules_reconcile_job` |
+| 外部写入生效但响应丢失：先回查 `APPLIED`，不直接重试、无二次写（§7、§13、验收 8） | `test_response_loss_reconciles_without_second_write` |
+| 回查 `UNKNOWN → APPLIED`：预算内继续调度，确认后 Run 恢复推进（§4.1、§7） | `test_reconcile_unknown_then_applied_resumes_run` |
+| 失去 fencing token 的旧 Worker 无法提交状态：`LeaseStaleError` / complete `False`，无二次写（§8、验收 7） | `test_stale_fencing_token_rejected_without_second_write` |
+| ToolResult Schema 失败不清除已发生写入：`APPLIED` 保持、`INVALID_TOOL_RESULT`、`retry_allowed=False`、权威事实不改写（§7） | `test_schema_failure_keeps_applied_write_and_authoritative_fact` |
+| Context 压缩不丢 Protected Context：安全规则、当前用户消息、待确认 fingerprint 存活（Task 5 Protected 语义） | `test_compression_preserves_protected_context` |
