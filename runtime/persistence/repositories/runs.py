@@ -1,6 +1,7 @@
 """Run Repository:状态推进只允许 CAS(架构文档 §5、§13)。"""
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
@@ -11,6 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from runtime.persistence.base import RunStatus
 from runtime.persistence.models.execution import Run
+
+
+@dataclass(frozen=True)
+class EventSequenceAllocation:
+    """一次原子事件序号分配的结果。"""
+
+    sequence_no: int
+    session_id: uuid.UUID
 
 
 class RunRepository:
@@ -92,3 +101,32 @@ class RunRepository:
         )
         result = cast("CursorResult[Any]", await self._session.execute(stmt))
         return result.rowcount == 1
+
+    async def allocate_event_sequence(
+        self, *, workspace_id: uuid.UUID, run_id: uuid.UUID
+    ) -> EventSequenceAllocation | None:
+        """CAS 式分配下一个事件序号(计划 02 Task 3;架构文档 §9)。
+
+        单条 ``UPDATE runs SET next_event_sequence = next_event_sequence + 1
+        RETURNING next_event_sequence - 1, session_id``:PostgreSQL 行锁使同一
+        Run 的并发分配串行化,每个写入者取得互不相同的序号;序列分配与随后的
+        AgentEvent INSERT 位于同一事务。返回 ``None`` 表示 (workspace_id, run_id)
+        无匹配行(run 不存在或跨 workspace 越权)。
+        """
+        stmt = (
+            sa.update(Run)
+            .where(Run.workspace_id == workspace_id, Run.id == run_id)
+            .values(next_event_sequence=Run.next_event_sequence + 1)
+            .returning(
+                (Run.next_event_sequence - 1).label("allocated_sequence_no"),
+                Run.session_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        return EventSequenceAllocation(
+            sequence_no=int(row.allocated_sequence_no),
+            session_id=cast("uuid.UUID", row.session_id),
+        )
