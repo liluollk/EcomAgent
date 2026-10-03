@@ -127,8 +127,12 @@ class ReconciliationService:
         )
         operation_row = await self._load_operation()
         tool_call = await self._load_tool_call(operation_row.tool_call_id)
-        reconcile_count = await self._count_reconcile_attempts(operation_row.id)
-        attempt_no = reconcile_count + 1
+        # 预算计数按 RECONCILE kind;行唯一性(uq_operation_attempts_operation_attempt
+        # 覆盖全部 kind)则按该 Operation 的全局 max(attempt_no)+1,避免与
+        # EXECUTE Attempt 撞号(计划 02 Task 9 修复:真实 execute→UNKNOWN→
+        # reconcile 链路此前必然违反唯一约束)。
+        reconcile_count = await self._count_reconcile_attempts(operation_row.id) + 1
+        attempt_no = await self._max_operation_attempt_no(operation_row.id) + 1
         self._session.add(
             OperationAttempt(
                 workspace_id=self._workspace_id,
@@ -142,12 +146,12 @@ class ReconciliationService:
         )
         await self._session.flush()
 
-        if result is ReconcileResult.UNKNOWN and attempt_no >= self._reconcile_budget:
+        if result is ReconcileResult.UNKNOWN and reconcile_count >= self._reconcile_budget:
             # 预算 N 允许 N 次回查;第 N 次仍 UNKNOWN 即无剩余名额,Run FAILED。
             return await self._fail_run_on_budget(
                 operation_row=operation_row,
                 tool_call_id=tool_call.id,
-                reconcile_count=attempt_no,
+                reconcile_count=reconcile_count,
             )
 
         if result is ReconcileResult.APPLIED:
@@ -314,6 +318,19 @@ class ReconciliationService:
 
             raise OperationConflictError(f"tool call {tool_call_id} not found")
         return tool_call
+
+    async def _max_operation_attempt_no(self, operation_row_id: uuid.UUID) -> int:
+        """该 Operation 全部 kind Attempt 的最大序号(行唯一性跨 kind)。"""
+        stmt = (
+            select(sa.func.max(OperationAttempt.attempt_no))
+            .select_from(OperationAttempt)
+            .where(
+                OperationAttempt.workspace_id == self._workspace_id,
+                OperationAttempt.operation_row_id == operation_row_id,
+            )
+        )
+        current = await self._session.scalar(stmt)
+        return 0 if current is None else int(current)
 
     async def _count_reconcile_attempts(self, operation_row_id: uuid.UUID) -> int:
         stmt = (

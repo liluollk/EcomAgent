@@ -552,16 +552,23 @@ class OperationService:
     async def _next_attempt_no(
         self, operation_row_id: uuid.UUID, kind: OperationAttemptKind
     ) -> int:
+        """下一个 Attempt 序号;唯一约束覆盖全部 kind,因此取全局 max+1。
+
+        (计划 02 Task 9 修复:此前按 kind 计数,EXECUTE 与 RECONCILE 在同一
+        Operation 上会生成相同 attempt_no 并违反
+        ``uq_operation_attempts_operation_attempt``。)
+        """
+        del kind
         stmt = (
-            select(sa.func.count())
+            select(sa.func.max(OperationAttempt.attempt_no))
             .select_from(OperationAttempt)
             .where(
                 OperationAttempt.workspace_id == self._workspace_id,
                 OperationAttempt.operation_row_id == operation_row_id,
-                OperationAttempt.kind == kind,
             )
         )
-        return int(await self._session.scalar(stmt) or 0) + 1
+        current = await self._session.scalar(stmt)
+        return 1 if current is None else int(current) + 1
 
     async def _finish_running_attempt(
         self,
