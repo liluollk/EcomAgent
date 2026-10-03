@@ -81,6 +81,10 @@ async def _reset_test_database() -> None:
                     "|| ' CASCADE'; END LOOP; END $$;"
                 )
             )
+            # 业务 Schema(计划 03):随迁移重建,先整体丢弃。
+            await connection.execute(
+                sa.text("DROP SCHEMA IF EXISTS product_operations CASCADE")
+            )
     finally:
         await engine.dispose()
 
