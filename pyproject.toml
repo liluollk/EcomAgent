@@ -17,6 +17,7 @@ dependencies = [
     "jsonschema",
     "openai",
     "anthropic",
+    "mcp>=2.3.0",
 ]
 
 [dependency-groups]
