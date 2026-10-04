@@ -19,6 +19,7 @@ dependencies = [
     "anthropic",
     "mcp>=2.3.0",
     "mem0ai>=2.2.1",
+    "langfuse>=4.16.0",
 ]
 
 [dependency-groups]
