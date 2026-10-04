@@ -40,6 +40,7 @@ from adapters.commerce.mock_adapter import MockCommerceAdapter
 from adapters.commerce.protocol import ExecutionReceipt as AdapterExecutionReceipt
 from adapters.commerce.protocol import UpdatePriceCommand as AdapterPriceCommand
 from agents.product_operations.agent import AGENT_KEY, PRODUCT_AGENT_DEFINITION
+from agents.product_operations.input.normalizer import KEY_ARGUMENT_FIELDS
 from agents.product_operations.input.requirements import (
     ProductInputRequirementResolver,
     ProductPreToolInputRequirementResolver,
@@ -54,6 +55,9 @@ from agents.product_operations.policy.models import (
 )
 from agents.product_operations.policy.price_policy import (
     LISTING_NOT_FOUND as POLICY_LISTING_NOT_FOUND,
+)
+from agents.product_operations.policy.price_policy import (
+    LISTING_VERSION_CONFLICT as POLICY_LISTING_VERSION_CONFLICT,
 )
 from agents.product_operations.policy.price_policy import PricePolicy
 from agents.product_operations.policy.resources import StoreResourceResolver
@@ -104,8 +108,15 @@ from runtime.capabilities.registry import (
 )
 from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.validation import compute_schema_hash
-from runtime.execution.pretool.decisions import PolicyDecision, PreToolDecision
+from runtime.execution.pretool.decisions import (
+    STAGE_ARGUMENT_PROVENANCE,
+    PolicyDecision,
+    PreToolDecision,
+)
+from runtime.execution.pretool.decisions import SchemaDiagnostic
 from runtime.execution.pretool.pipeline import (
+    NamedStage,
+    PreToolContext,
     PreToolDependencies,
     PreToolUsePipeline,
     ToolCallRequest,
@@ -445,7 +456,13 @@ class _NoopSummaryBackend:
 
 
 class _ProductPipelineFactory:
-    """每次 advance 构造绑定当前 Run Actor 的 PreToolUse 管线。"""
+    """每次 advance 构造绑定当前 Run Actor 的 PreToolUse 管线。
+
+    ``_version_bindings`` 记录 update_price ToolCall 首次通过 Business Policy
+    时的 Listing 版本(架构文档 §6 第 7 条"确认后 Listing Version 未失效")。
+    确认后恢复推进时重评:版本已变化即 LISTING_VERSION_CONFLICT。绑定表为
+    组合根进程内状态,与 Worker 进程按 Run 亲和的内存视图同一生命周期。
+    """
 
     def __init__(
         self,
@@ -459,6 +476,7 @@ class _ProductPipelineFactory:
         self._tool_registry = tool_registry
         self._price_config = price_config
         self._scope = scope
+        self._version_bindings: dict[uuid.UUID, int] = {}
 
     def __call__(self) -> ToolCallEvaluator:
         return _ScopedProductPipeline(
@@ -466,6 +484,7 @@ class _ProductPipelineFactory:
             context=self._scope.require(),
             tool_registry=self._tool_registry,
             price_config=self._price_config,
+            version_bindings=self._version_bindings,
         )
 
 
@@ -479,11 +498,13 @@ class _ScopedProductPipeline:
         context: _ScopeContext,
         tool_registry: ToolRegistry,
         price_config: PricePolicyConfig,
+        version_bindings: Mapping[uuid.UUID, int],
     ) -> None:
         self._engine = engine
         self._context = context
         self._tool_registry = tool_registry
         self._price_config = price_config
+        self._version_bindings = version_bindings
 
     async def evaluate(self, tool_call: ToolCallRequest) -> PreToolDecision:
         session = AsyncSession(self._engine, expire_on_commit=False)
@@ -513,20 +534,92 @@ class _ScopedProductPipeline:
                 ),
                 authorization_resource_resolver=StoreResourceResolver(),
                 business_policy=_PriceBusinessPolicy(
-                    session=session, config=self._price_config, actor=actor
+                    session=session,
+                    config=self._price_config,
+                    actor=actor,
+                    tool_call_id=tool_call.tool_call_id,
+                    version_bindings=self._version_bindings,
                 ),
                 accepted_confirmation_lookup=_AcceptedConfirmationLookup(
                     session=session, workspace_id=self._context.workspace_id
                 ),
             )
-            pipeline = PreToolUsePipeline(actor=actor, stages=default_stages(dependencies))
+            pipeline = PreToolUsePipeline(
+                actor=actor, stages=_product_stages(dependencies)
+            )
             return await pipeline.evaluate(tool_call)
         finally:
             await session.close()
 
 
+_UNTRUSTED_SOURCE: Final = "UNTRUSTED"
+_PROVENANCE_GUARD_FIELDS: Final[tuple[str, ...]] = ("store_id", "sku")
+_GUARD_DIAGNOSTIC_MESSAGE: Final = "key arguments lack trusted user or authoritative evidence"
+
+
+def _product_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
+    """默认 10 阶段管线 + 证据守卫(阶段顺序不变)。
+
+    架构文档 §5:"任一关键参数缺失、歧义或来源不可信时,返回
+    InputRequirement,不进入 Access Control 之后的写执行阶段。"缺失字段由
+    Schema 校验诊断覆盖;守卫补充覆盖"模型提供了值但无可信证据"的猜测
+    参数(store_id/sku),把它们并入 SchemaDiagnostic,交由既有
+    input_requirement 阶段转成可回答的 Input Request。target_price 不在
+    守卫范围:合法金额总是 DETERMINISTIC_DERIVED,非法金额属校验诊断
+    (架构文档 §5),不产生 Input Request。
+    """
+    stages = list(default_stages(dependencies))
+    return tuple(
+        _provenance_guard_stage(stage)
+        if stage.name == STAGE_ARGUMENT_PROVENANCE
+        else stage
+        for stage in stages
+    )
+
+
+def _provenance_guard_stage(wrapped: NamedStage) -> NamedStage:
+    """argument_provenance 阶段守卫:不可信的已提供关键参数 → 校验诊断。"""
+    original = wrapped.handler
+
+    async def handler(context: PreToolContext) -> PreToolDecision | None:
+        decision = await original(context)
+        if decision is not None:
+            return decision
+        provenance = context.provenance
+        if provenance is None:
+            return None
+        arguments = context.normalized_arguments or {}
+        untrusted = tuple(
+            field
+            for field in _PROVENANCE_GUARD_FIELDS
+            if field in arguments
+            and provenance.field_sources.get(field) == _UNTRUSTED_SOURCE
+        )
+        if not untrusted:
+            return None
+        diagnostic = context.schema_diagnostic
+        merged_paths = tuple(
+            dict.fromkeys(
+                (*(diagnostic.field_paths if diagnostic is not None else ()), *untrusted)
+            )
+        )
+        context.schema_diagnostic = SchemaDiagnostic(
+            field_paths=merged_paths,
+            message=_GUARD_DIAGNOSTIC_MESSAGE,
+        )
+        return None
+
+    return NamedStage(name=wrapped.name, handler=handler)
+
+
 class _PriceBusinessPolicy:
-    """BusinessPolicy 注入适配:update_price 走价格 Policy,其余 Tool 放行。"""
+    """BusinessPolicy 注入适配:update_price 走价格 Policy,其余 Tool 放行。
+
+    确认前后一致性:首次评估(进入确认前)把当前 Listing 版本绑定到
+    ToolCall;确认后恢复推进的重评先比对绑定版本,已变化即以
+    ``LISTING_VERSION_CONFLICT`` 拒绝(架构文档 §6 第 7 条;PricePolicy
+    自身的乐观并发校验仍照常执行)。
+    """
 
     def __init__(
         self,
@@ -534,10 +627,14 @@ class _PriceBusinessPolicy:
         session: AsyncSession,
         config: PricePolicyConfig,
         actor: ActorContext,
+        tool_call_id: uuid.UUID,
+        version_bindings: Mapping[uuid.UUID, int],
     ) -> None:
         self._session = session
         self._config = config
         self._actor = actor
+        self._tool_call_id = tool_call_id
+        self._version_bindings = version_bindings
 
     async def evaluate(
         self,
@@ -560,6 +657,13 @@ class _PriceBusinessPolicy:
                 "listing does not exist in this workspace",
                 expected_new_price=price,
             )
+        stale = self._check_confirmation_version(listing.version)
+        if stale is not None:
+            return self._deny(
+                POLICY_LISTING_VERSION_CONFLICT,
+                "listing version has changed since confirmation",
+                expected_new_price=price,
+            )
         request = PriceWriteRequest(
             workspace_id=self._actor.workspace_id,
             store_id=store_id,
@@ -569,6 +673,18 @@ class _PriceBusinessPolicy:
             sku=sku,
         )
         return await PricePolicy(self._session, self._config).evaluate(request)
+
+    def _check_confirmation_version(self, current_version: int) -> int | None:
+        """绑定/比对确认时 Listing 版本;返回 None 表示可继续,否则返回当前版本。
+
+        首次评估(尚无绑定)记录当前版本并放行;已有绑定且与当前版本不一致
+        表示确认后 Listing 已被并发修改。
+        """
+        bound = self._version_bindings.get(self._tool_call_id)
+        if bound is None:
+            self._version_bindings[self._tool_call_id] = current_version
+            return None
+        return current_version if bound != current_version else None
 
     def _arguments_of(
         self, arguments: Mapping[str, Any]
