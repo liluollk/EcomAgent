@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { SessionsPage } from "../features/sessions/SessionsPage";
 import { WorkspaceContainer } from "../features/workspaces/WorkspaceContainer";
 
 type FeatureKey = "workspace" | "sessions" | "settings";
@@ -32,7 +33,7 @@ export function App() {
           // 不建立全局单店上下文,Workspace 内多店并列展示。
           <WorkspaceContainer currentRole="OPERATOR" workspaceId="ws-brand-1" />
         )}
-        {activeFeature === "sessions" && <p>Sessions 页面将在后续任务实现。</p>}
+        {activeFeature === "sessions" && <SessionsPage />}
         {activeFeature === "settings" && <p>Settings 页面将在后续任务实现。</p>}
       </main>
     </div>

@@ -23,12 +23,13 @@ describe("App", () => {
     expect(await screen.findByText("淘宝旗舰店")).toBeInTheDocument();
   });
 
-  it("opens the sessions placeholder from the sidebar", async () => {
+  it("opens the sessions page from the sidebar", async () => {
     stubWorkspaceFetch();
     render(<App />);
 
     fireEvent.click(await screen.findByText("Sessions"));
 
-    expect(screen.getByText("Sessions 页面将在后续任务实现。")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开会话" })).toBeInTheDocument();
   });
 });
