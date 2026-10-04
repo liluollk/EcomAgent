@@ -301,6 +301,10 @@ class SessionCommandService:
             events_cursor=int(cursor),
         )
 
+    async def resolve_run(self, run_id: uuid.UUID) -> Run:
+        """按 actor 成员身份范围解析 Run;供事件流路由复用越权 404 语义。"""
+        return await self._run_in_scope(run_id)
+
     async def cancel_run(self, run_id: uuid.UUID) -> Run:
         """取消 Run:经 transitions 合法路径迁移 CANCELLED 并尽力取消挂起 Request。"""
         run = await self._run_in_scope(run_id)

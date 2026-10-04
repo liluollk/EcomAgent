@@ -14,6 +14,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.websockets import WebSocket
 
 from apps.api.errors import (
     ACTOR_UNAVAILABLE,
@@ -158,4 +159,55 @@ async def require_workspace_owner(actor: WorkspaceActorDep) -> ActorContext:
 
 WorkspaceOwnerDep = Annotated[ActorContext, Depends(require_workspace_owner)]
 """仅 WorkspaceOwner 的工作区授权上下文;配置写端点使用。"""
+
+
+async def get_ws_db_session(websocket: WebSocket) -> AsyncIterator[AsyncSession]:
+    """WebSocket 请求级会话,语义与 :func:`get_db_session` 一致。
+
+    FastAPI 只对 HTTP 作用域注入 ``Request``,WS 作用域须标注 ``WebSocket``
+    从 ``app.state`` 取会话工厂;事务边界同样归应用服务,关闭时丢弃未提交变更。
+    """
+    sessionmaker: async_sessionmaker[AsyncSession] = websocket.app.state.sessionmaker
+    async with sessionmaker() as session:
+        yield session
+
+
+WsSessionDep = Annotated[AsyncSession, Depends(get_ws_db_session)]
+"""WebSocket 请求级数据库会话;同一连接握手阶段内共享同一 Session 实例。"""
+
+
+async def require_ws_actor(
+    websocket: WebSocket,
+    session: WsSessionDep,
+) -> AuthenticatedActor:
+    """WebSocket 版 :func:`require_authenticated`:握手阶段校验 Bearer JWT。
+
+    语义与 HTTP 版一致:任何失败一律 401,错误码区分原因;失败抛出的
+    ``ApiError`` 由全局异常处理器渲染为统一错误体,并以 WebSocket 拒绝响应
+    在 ``accept`` 之前下发(客户端在握手阶段即看到 401)。
+    """
+    request_id = websocket.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+    authorization = websocket.headers.get("Authorization")
+    if authorization is None:
+        raise ApiError(status_code=401, code=UNAUTHENTICATED, message="需要 Bearer 访问令牌")
+    scheme, _, credentials = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not credentials.strip():
+        raise ApiError(status_code=401, code=UNAUTHENTICATED, message="需要 Bearer 访问令牌")
+    try:
+        token = verify_token(credentials.strip())
+    except TokenRejected as error:
+        raise ApiError(status_code=401, code=TOKEN_INVALID, message="访问令牌无效或已过期") from error
+
+    user = (
+        await session.scalars(select(User).where(User.id == token.actor_id))
+    ).one_or_none()
+    if user is None or user.status != AccountStatus.ACTIVE:
+        raise ApiError(status_code=401, code=ACTOR_UNAVAILABLE, message="账号不存在或已禁用")
+    return AuthenticatedActor(
+        actor_id=token.actor_id, token_id=token.token_id, request_id=request_id
+    )
+
+
+WsActorDep = Annotated[AuthenticatedActor, Depends(require_ws_actor)]
+"""经 JWT 与库态双重校验的 WebSocket 调用方身份。"""
 

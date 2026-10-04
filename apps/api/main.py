@@ -28,6 +28,7 @@ from apps.api.errors import (
 )
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
+from apps.api.routes.events import router as events_router
 from apps.api.routes.memberships import router as memberships_router
 from apps.api.routes.requests import router as requests_router
 from apps.api.routes.runs import router as runs_router
@@ -143,4 +144,5 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(runs_router)
     app.include_router(requests_router)
+    app.include_router(events_router)
     return app
