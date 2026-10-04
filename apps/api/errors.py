@@ -23,6 +23,12 @@ INVALID_CREDENTIALS: Final = "INVALID_CREDENTIALS"
 PERMISSION_DENIED: Final = "PERMISSION_DENIED"
 """身份可信但当前库态下无任何可用授权。"""
 
+LAST_OWNER_REQUIRED: Final = "LAST_OWNER_REQUIRED"
+"""移除或降级最后一个 WorkspaceOwner 被拒绝(409)。"""
+
+CONFLICT: Final = "CONFLICT"
+"""与 Workspace 内已有配置冲突,如重复 stable_key 或成员已存在(409)。"""
+
 VALIDATION_ERROR: Final = "VALIDATION_ERROR"
 """请求体或参数未通过校验。"""
 

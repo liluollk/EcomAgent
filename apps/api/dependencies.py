@@ -15,10 +15,16 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from apps.api.errors import ACTOR_UNAVAILABLE, TOKEN_INVALID, UNAUTHENTICATED, ApiError
+from apps.api.errors import (
+    ACTOR_UNAVAILABLE,
+    PERMISSION_DENIED,
+    TOKEN_INVALID,
+    UNAUTHENTICATED,
+    ApiError,
+)
 from runtime.access.actor import ActorContext, ActorContextBuilder, ActorContextError
 from runtime.access.tokens import TokenRejected, verify_token
-from runtime.persistence.base import AccountStatus
+from runtime.persistence.base import AccountStatus, MembershipRole
 from runtime.persistence.models.identity import User
 
 
@@ -113,4 +119,43 @@ async def get_actor_context(
         )
     except ActorContextError as error:
         raise ApiError(status_code=401, code=ACTOR_UNAVAILABLE, message="成员身份不可用") from error
+
+
+async def get_workspace_actor_context(
+    workspace_id: UUID,
+    actor: ActorDep,
+    session: SessionDep,
+) -> ActorContext:
+    """工作区级路由(计划 04 Task 2 起)使用的工作区 ActorContext。
+
+    与 :func:`get_actor_context` 同链路,但非成员、成员禁用或工作区缺失
+    统一返回 403 PERMISSION_DENIED,不泄漏工作区是否存在。
+    """
+    try:
+        return await ActorContextBuilder(session).build(
+            actor_id=actor.actor_id,
+            workspace_id=workspace_id,
+            request_id=actor.request_id,
+        )
+    except ActorContextError as error:
+        raise ApiError(status_code=403, code=PERMISSION_DENIED, message="无权访问该工作区") from error
+
+
+WorkspaceActorDep = Annotated[ActorContext, Depends(get_workspace_actor_context)]
+"""任意有效成员的工作区授权上下文;读取端点使用。"""
+
+
+async def require_workspace_owner(actor: WorkspaceActorDep) -> ActorContext:
+    """配置写端点守卫:仅 WORKSPACE_OWNER 通过;其余 403。"""
+    if actor.role is not MembershipRole.WORKSPACE_OWNER:
+        raise ApiError(
+            status_code=403,
+            code=PERMISSION_DENIED,
+            message="只有 WorkspaceOwner 可以修改工作区配置",
+        )
+    return actor
+
+
+WorkspaceOwnerDep = Annotated[ActorContext, Depends(require_workspace_owner)]
+"""仅 WorkspaceOwner 的工作区授权上下文;配置写端点使用。"""
 
