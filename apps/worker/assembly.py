@@ -40,7 +40,6 @@ from adapters.commerce.mock_adapter import MockCommerceAdapter
 from adapters.commerce.protocol import ExecutionReceipt as AdapterExecutionReceipt
 from adapters.commerce.protocol import UpdatePriceCommand as AdapterPriceCommand
 from agents.product_operations.agent import AGENT_KEY, PRODUCT_AGENT_DEFINITION
-from agents.product_operations.input.normalizer import KEY_ARGUMENT_FIELDS
 from agents.product_operations.input.requirements import (
     ProductInputRequirementResolver,
     ProductPreToolInputRequirementResolver,
@@ -112,8 +111,8 @@ from runtime.execution.pretool.decisions import (
     STAGE_ARGUMENT_PROVENANCE,
     PolicyDecision,
     PreToolDecision,
+    SchemaDiagnostic,
 )
-from runtime.execution.pretool.decisions import SchemaDiagnostic
 from runtime.execution.pretool.pipeline import (
     NamedStage,
     PreToolContext,
@@ -498,13 +497,13 @@ class _ScopedProductPipeline:
         context: _ScopeContext,
         tool_registry: ToolRegistry,
         price_config: PricePolicyConfig,
-        version_bindings: Mapping[uuid.UUID, int],
+        version_bindings: dict[uuid.UUID, int],
     ) -> None:
         self._engine = engine
         self._context = context
         self._tool_registry = tool_registry
         self._price_config = price_config
-        self._version_bindings = version_bindings
+        self._version_bindings: dict[uuid.UUID, int] = version_bindings
 
     async def evaluate(self, tool_call: ToolCallRequest) -> PreToolDecision:
         session = AsyncSession(self._engine, expire_on_commit=False)
@@ -628,7 +627,7 @@ class _PriceBusinessPolicy:
         config: PricePolicyConfig,
         actor: ActorContext,
         tool_call_id: uuid.UUID,
-        version_bindings: Mapping[uuid.UUID, int],
+        version_bindings: dict[uuid.UUID, int],
     ) -> None:
         self._session = session
         self._config = config
