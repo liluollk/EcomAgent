@@ -5,7 +5,9 @@
 - ``resolve``:按架构文档 §5 判定关键字段(白名单:``store_id``/``sku``/
   ``target_price``)的 Provenance;任一关键字段缺失、歧义或来源不可信时,
   返回可由用户回答的 :class:`InputRequirement`;金额格式非法时返回校验
-  诊断而不是 Input Request;
+  诊断而不是 Input Request。证据匹配候选是当前 Workspace 全部 ACTIVE
+  店铺(架构文档 §5 的"Workspace 别名表"):越权店铺的用户显式证据仍会
+  产生 USER_EXPLICIT,由 Access Control 阶段以资源范围拒绝;
 - ``store_requirement``:生成店铺选择需求,候选项严格限定在 Actor 授权
   店铺内(店铺标识 = ``str(store.id)``,与 Task 2 只读 Tool 约定一致)。
 
@@ -98,11 +100,17 @@ class ProductInputRequirementResolver:
         answered: Mapping[str, str] | None = None,
         history: Sequence[str] = (),
     ) -> ProductInputResolution:
-        """判定关键字段来源;缺失/歧义/不可信 → Input,金额非法 → 诊断。"""
+        """判定关键字段来源;缺失/歧义/不可信 → Input,金额非法 → 诊断。
+
+        证据匹配候选为当前 Workspace 全部 ACTIVE 店铺(架构文档 §5 的
+        "Workspace 别名表");授权范围只缩窄 Input Request 候选项,不缩窄
+        证据匹配——越权店铺的用户显式证据产生 USER_EXPLICIT 后由 Access
+        Control 以资源范围拒绝,而不是退回"无证据"。
+        """
         normalized = normalize_arguments(dict(arguments))
         stores: tuple[StoreCandidate, ...] = ()
         if actor is not None:
-            stores = await self._load_store_candidates(actor)
+            stores = await self._load_workspace_store_candidates(actor)
         sku_value = normalized.get("sku")
         sku_unique: bool | None = None
         if actor is not None and isinstance(sku_value, str) and sku_value:
@@ -160,6 +168,7 @@ class ProductInputRequirementResolver:
     async def _load_store_candidates(
         self, actor: ActorContext
     ) -> tuple[StoreCandidate, ...]:
+        """授权店铺候选(Input Request 选项专用;严格限定 Actor 范围)。"""
         authorized = authorized_store_ids(actor)
         stmt = (
             select(Store)
@@ -173,6 +182,27 @@ class ProductInputRequirementResolver:
             if not authorized:
                 return ()
             stmt = stmt.where(Store.id.in_([UUID(value) for value in sorted(authorized)]))
+        rows = (await self._session.scalars(stmt)).all()
+        return tuple(
+            StoreCandidate(
+                store_id=str(store.id), name=store.name, aliases=tuple(store.aliases)
+            )
+            for store in rows
+        )
+
+    async def _load_workspace_store_candidates(
+        self, actor: ActorContext
+    ) -> tuple[StoreCandidate, ...]:
+        """证据匹配候选:当前 Workspace 全部 ACTIVE 店铺(架构文档 §5 的
+        "Workspace 别名表");不做授权过滤,越权引用由 Access Control 拒绝。"""
+        stmt = (
+            select(Store)
+            .where(
+                Store.workspace_id == actor.workspace_id,
+                Store.status == StoreStatus.ACTIVE,
+            )
+            .order_by(Store.id)
+        )
         rows = (await self._session.scalars(stmt)).all()
         return tuple(
             StoreCandidate(

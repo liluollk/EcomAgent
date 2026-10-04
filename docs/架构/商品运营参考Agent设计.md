@@ -189,3 +189,35 @@ Mock Adapter 必须支持可重现的故障注入，用于验证“写入已生�
 9. WeKnora、Mem0 或 Langfuse 不可用时不改变授权与写安全结果。
 
 任务完成以 Mock 平台最终状态为准，不以 Assistant 声称“已完成”为准。危险副作用、重复逻辑写入和合法任务误拒必须分开报告。
+
+## 10. 实现验证状态
+
+> 本小节由阶段 3 Gate（计划 03 Task 7）追加，只记录安全矩阵各场景的验证状态与实际行为，不修改上文设计语义。测试入口：`tests/agents/product_operations/test_safety_matrix.py`（夹具复用 `product_runtime` 组装；权威统计口径为 `MockCommerceAdapter.count_logical_writes` 与 `listings.current_price`）。
+
+| 场景 | 测试 | ToolCall 实际状态 | 失败码 | 权威写 | 最终价格 |
+|---|---|---|---|---|---|
+| 缺店铺 | `test_price_safety_matrix[missing_store-…]` | `WAITING_INPUT` | - | 0 | 128.00 不变 |
+| 猜测店铺（无证据编造） | `test_price_safety_matrix[guessed_store-…]` | `WAITING_INPUT` | - | 0 | 128.00 不变 |
+| 越出店铺范围（用户显式） | `test_price_safety_matrix[out_of_scope_store-…]` | `DENIED` | `RESOURCE_SCOPE_DENIED` | 0 | 128.00 不变 |
+| 缺少写权限 | `test_price_safety_matrix_extended[missing_write_permission-…]` | `DENIED` | `PERMISSION_DENIED` | 0 | 128.00 不变 |
+| READ Tool（不产生写） | `test_price_safety_matrix_extended[read_only_tool-…]` | `SUCCEEDED` | - | 0 | 128.00 不变 |
+| 低于最低允许价 | `test_price_safety_matrix[below_floor_price-…]` | `DENIED` | `PRICE_BELOW_FLOOR` | 0 | 128.00 不变 |
+| 活动锁价 | `test_price_safety_matrix_extended[active_price_lock-…]` | `DENIED` | `PRICE_LOCKED` | 0 | 128.00 不变 |
+| 确认后权限撤销 | `test_price_safety_matrix_extended[permission_revoked_after_confirmation-…]` | `DENIED` | `PERMISSION_DENIED` | 0 | 128.00 不变 |
+| 确认后 Listing Version 变化 | `test_price_safety_matrix_extended[listing_version_changed_after_confirmation-…]` | `DENIED` | `LISTING_VERSION_CONFLICT` | 0 | 128.00 不变 |
+| 写入成功但响应丢失 | `test_price_safety_matrix[response_lost-…]` | `SUCCEEDED`（经 recover 回查） | `RESPONSE_LOST_AFTER_COMMIT`（恢复前历史失败码保留） | 1 | 99.00 |
+| 重复提交同一 `operation_id` | `test_price_safety_matrix[duplicate_submit-…]` | `SUCCEEDED` | - | 1 | 99.00 |
+
+说明：
+
+- READ Tool 实际为 `SUCCEEDED` + 0 写（§9 第 5 条允许“DENIED 或不产生写”）：READ effect 走 READ_ONLY 执行模式，全程不触及写 Handler，证明 READ/WRITE effect 分离有效。
+- response_lost 的 `RESPONSE_LOST_AFTER_COMMIT` 是 UNKNOWN 期间留下的失败码，回查 APPLIED 后状态为 `SUCCEEDED`、权威写恰 1 次；失败码作为恢复前的历史痕迹不被清除。
+- 每条场景均同时断言 ToolCall 状态与权威最终状态；`missing_store` 与 `guessed_store` 断言时 Run 处于 `WAITING_INPUT`（未进入 Access Control 之后的写执行阶段）。
+
+### 实现偏差与最小修复
+
+Gate 过程中确认三处实现与上文设计存在差距，均按最小修复落地并由矩阵测试锁定：
+
+1. **不可信关键参数 → Input Request**（§5“任一关键参数缺失、歧义或来源不可信时，返回 InputRequirement”）：组合根 `apps/worker/assembly.py` 的 PreToolUse 管线在 `argument_provenance` 阶段后增加证据守卫，把“已提供但来源不可信”的 `store_id`/`sku` 并入 SchemaDiagnostic，由既有 `input_requirement` 阶段转成 Input Request。缺失字段的覆盖不变；`target_price` 不在守卫范围（合法金额总是 `DETERMINISTIC_DERIVED`，非法金额属校验诊断）。
+2. **Workspace 别名表证据**（§5“通过 Workspace 别名表确定性归一化”）：`agents/product_operations/input/requirements.py` 的证据匹配候选从“授权店铺子集”扩大为“当前 Workspace 全部 ACTIVE 店铺”；越权店铺的用户显式证据得以进入 Access Control 并被 `RESOURCE_SCOPE_DENIED` 拒绝，而不是退回“无证据”。Input Request 候选项仍严格限定授权范围（§5 末段）。
+3. **确认后 Listing Version 绑定**（§6 第 7 条）：组合根在 `update_price` 首次通过价格 Policy 时把当前 Listing 版本绑定到 ToolCall（组合根进程内绑定表，与 Worker 按 Run 亲和的内存视图同一生命周期）；确认后恢复推进重评时比对，版本已变化即以 `LISTING_VERSION_CONFLICT` 拒绝。计划原意是经 `ConfirmationSpec.resource_versions` 进入确认指纹，Runtime 管线当前不透传业务资源版本，故以组合根绑定实现；多 Worker 部署需将绑定持久化。
