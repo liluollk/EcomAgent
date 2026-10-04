@@ -99,4 +99,8 @@ COMPARE_LISTING_PRICES_BINDING: Final = ToolBinding(
 )
 
 
-__all__ = ["COMPARE_LISTING_PRICES_BINDING", "compare_listing_prices"]
+__all__ = [
+    "COMPARE_LISTING_PRICES_BINDING",
+    "COMPARE_LISTING_PRICES_DEFINITION",
+    "compare_listing_prices",
+]
