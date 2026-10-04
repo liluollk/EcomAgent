@@ -29,6 +29,9 @@ from apps.api.errors import (
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
 from apps.api.routes.memberships import router as memberships_router
+from apps.api.routes.requests import router as requests_router
+from apps.api.routes.runs import router as runs_router
+from apps.api.routes.sessions import router as sessions_router
 from apps.api.routes.workspaces import router as workspaces_router
 from runtime.persistence.database import create_engine, get_database_url
 
@@ -137,4 +140,7 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.include_router(workspaces_router)
     app.include_router(memberships_router)
     app.include_router(configuration_router)
+    app.include_router(sessions_router)
+    app.include_router(runs_router)
+    app.include_router(requests_router)
     return app
