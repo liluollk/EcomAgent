@@ -1,31 +1,32 @@
 import { useState } from "react";
-import type { ExecutionMode, WorkspaceDetailView, WorkspaceRole } from "./types";
+import type { ExecutionMode, WorkspaceOverview } from "./types";
 
 export interface WorkspacePageProps {
-  currentRole: WorkspaceRole;
-  workspace: WorkspaceDetailView;
+  overview: WorkspaceOverview;
   onSaveExecutionMode?: (workspaceId: string, mode: ExecutionMode) => Promise<void> | void;
 }
 
 const executionModeLabels: Record<ExecutionMode, string> = {
+  READ_ONLY: "只读(READ_ONLY)",
+  CONFIRM_WRITES: "写操作需确认(CONFIRM_WRITES)",
   AUTO_EXECUTE: "自动执行(AUTO_EXECUTE)",
-  AWAIT_CONFIRMATION: "等待确认(AWAIT_CONFIRMATION)",
 };
 
-const executionModeOptions: ExecutionMode[] = ["AUTO_EXECUTE", "AWAIT_CONFIRMATION"];
+const executionModeOptions: ExecutionMode[] = [
+  "READ_ONLY",
+  "CONFIRM_WRITES",
+  "AUTO_EXECUTE",
+];
 
-export function WorkspacePage({
-  currentRole,
-  workspace,
-  onSaveExecutionMode,
-}: WorkspacePageProps) {
-  const isOwner = currentRole === "OWNER";
+export function WorkspacePage({ overview, onSaveExecutionMode }: WorkspacePageProps) {
+  const workspace = overview.workspace;
+  const isOwner = overview.current_membership.role === "WORKSPACE_OWNER";
   const [editingMode, setEditingMode] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<ExecutionMode>(workspace.executionMode);
+  const [selectedMode, setSelectedMode] = useState<ExecutionMode>(workspace.execution_mode);
   const [saving, setSaving] = useState(false);
 
   const startEditing = () => {
-    setSelectedMode(workspace.executionMode);
+    setSelectedMode(workspace.execution_mode);
     setEditingMode(true);
   };
 
@@ -51,7 +52,7 @@ export function WorkspacePage({
       <section aria-label="店铺">
         <h2>店铺</h2>
         <ul>
-          {workspace.stores.map((store) => (
+          {overview.stores.map((store) => (
             <li key={store.id}>
               <span>{store.name}</span>
               <span>{store.platform}</span>
@@ -62,23 +63,25 @@ export function WorkspacePage({
 
       <section aria-label="Agent">
         <h2>Agent</h2>
-        <ul>
-          {workspace.agents.map((agent) => (
-            <li key={agent.name}>
-              <span>{agent.name}</span>
-              <span>{agent.agentVersion}</span>
+        {overview.agent ? (
+          <ul>
+            <li>
+              <span>{overview.agent.name}</span>
+              <span>v{overview.agent.version}</span>
             </li>
-          ))}
-        </ul>
+          </ul>
+        ) : (
+          <p>当前 Workspace 未启用 Agent</p>
+        )}
       </section>
 
       <section aria-label="Model">
         <h2>Model</h2>
         <ul>
-          {workspace.models.map((model) => (
-            <li key={model.name}>
+          {overview.model_connections.map((model) => (
+            <li key={model.id}>
               <span>{model.name}</span>
-              <span>{model.provider}</span>
+              <span>{model.backend_type}</span>
             </li>
           ))}
         </ul>
@@ -87,10 +90,10 @@ export function WorkspacePage({
       <section aria-label="Skill">
         <h2>Skill</h2>
         <ul>
-          {workspace.skills.map((skill) => (
-            <li key={skill.name}>
+          {overview.skills.map((skill) => (
+            <li key={skill.id}>
               <span>{skill.name}</span>
-              <span>{skill.skillVersion}</span>
+              <span>{skill.latest_version === null ? "未发布" : `v${skill.latest_version}`}</span>
             </li>
           ))}
         </ul>
@@ -99,10 +102,22 @@ export function WorkspacePage({
       <section aria-label="Source">
         <h2>Source</h2>
         <ul>
-          {workspace.sources.map((source) => (
-            <li key={source.name}>
+          {overview.sources.map((source) => (
+            <li key={source.id}>
               <span>{source.name}</span>
               <span>{source.kind}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section aria-label="业务规则">
+        <h2>业务规则</h2>
+        <ul>
+          {overview.business_policies.map((policy) => (
+            <li key={policy.id}>
+              <span>{policy.name}</span>
+              <span>{policy.latest_version === null ? "未发布" : `v${policy.latest_version}`}</span>
             </li>
           ))}
         </ul>
@@ -136,7 +151,7 @@ export function WorkspacePage({
           </div>
         ) : (
           <div>
-            <p>当前执行模式:{executionModeLabels[workspace.executionMode]}</p>
+            <p>当前执行模式:{executionModeLabels[workspace.execution_mode]}</p>
             {isOwner ? (
               <button type="button" onClick={startEditing}>
                 编辑执行模式
@@ -148,14 +163,14 @@ export function WorkspacePage({
         )}
       </section>
 
-      <section aria-label="成员与资源范围">
-        <h2>成员与资源范围</h2>
+      <section aria-label="当前成员权限">
+        <h2>当前成员权限</h2>
+        <p>角色:{overview.current_membership.role}</p>
+        <p>动作权限:{overview.current_membership.permissions.join("、") || "无"}</p>
         <ul>
-          {workspace.members.map((member) => (
-            <li key={member.id}>
-              <span>{member.displayName}</span>
-              <span>{member.role}</span>
-              <span>资源范围:{member.resourceScopes.join("、")}</span>
+          {Object.entries(overview.current_membership.resource_scopes).map(([type, scope]) => (
+            <li key={type}>
+              {type}:{scope.mode === "ALL" ? "全部" : scope.resource_ids.join("、") || "无"}
             </li>
           ))}
         </ul>

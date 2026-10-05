@@ -121,7 +121,6 @@ export function App() {
           activeWorkspace !== null ? (
             <WorkspaceView
               workspaceId={activeWorkspace.id}
-              currentRole="OPERATOR"
               onSessionOpened={openSession}
             />
           ) : (

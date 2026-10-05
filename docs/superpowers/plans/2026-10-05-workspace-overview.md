@@ -171,29 +171,29 @@ git commit -m "feat: pin workspace agent version to session"
 - Modify: apps/workbench/src/test/fixtures.ts
 - Test: apps/workbench/src/features/workspaces/WorkspacePage.test.tsx
 
-- [ ] **Step 1：先调整前端测试 fixture 为 overview 真实响应形状**
+- [x] **Step 1：先调整前端测试 fixture 为 overview 真实响应形状**
 
 在 fixtures.ts 定义 workspaceOverview，字段包括 workspace.execution_mode、current_membership.role、stores、agent、model_connections、skills、sources、business_policies。枚举使用 READ_ONLY | CONFIRM_WRITES | AUTO_EXECUTE 与 WORKSPACE_OWNER | OPERATOR。
 
-- [ ] **Step 2：先写三种模式与角色来源测试**
+- [x] **Step 2：先写三种模式与角色来源测试**
 
 在 WorkspacePage.test.tsx 断言：Owner 能修改三种模式；Operator 不能编辑；模式文本显示 READ_ONLY、CONFIRM_WRITES、AUTO_EXECUTE；WorkspaceContainer 请求 /workspaces/{id}/overview 并渲染 current_membership.role。
 
-- [ ] **Step 3：运行前端定向测试确认旧类型/请求形状不符合期望**
+- [x] **Step 3：运行前端定向测试确认旧类型/请求形状不符合期望**
 
 Run: npm --prefix apps/workbench run test -- --run src/features/workspaces/WorkspacePage.test.tsx
 
 Expected: 新增断言在现状下失败，证明前端仍使用基础详情、AWAIT_CONFIRMATION 或调用方硬编码角色。
 
-- [ ] **Step 4：更新前端 API 类型与页面模型**
+- [x] **Step 4：更新前端 API 类型与页面模型**
 
 用 ExecutionMode = "READ_ONLY" | "CONFIRM_WRITES" | "AUTO_EXECUTE"、WorkspaceRole = "WORKSPACE_OWNER" | "OPERATOR"；定义 overview 类型。删除 AWAIT_CONFIRMATION、前端别名 OWNER、强制类型转换和默认补值。WorkspaceContainer 对缺少必需字段返回明确错误，不把不完整响应转换为空页面。
 
-- [ ] **Step 5：更新 Container、Page 和 App 的角色数据流**
+- [x] **Step 5：更新 Container、Page 和 App 的角色数据流**
 
 Container 拉取 /workspaces/{workspaceId}/overview，WorkspacePage 接收 overview，Owner 判断来自 overview.current_membership.role。移除 WorkspaceView.currentRole 属性和 App 传入的 "OPERATOR" 常量。保存执行模式仍调用现有 PATCH 接口，成功后重新拉 overview。
 
-- [ ] **Step 6：运行前端定向测试、lint 与 build**
+- [x] **Step 6：运行前端定向测试、lint 与 build**
 
 Run: npm --prefix apps/workbench run test -- --run src/features/workspaces/WorkspacePage.test.tsx
 
@@ -203,7 +203,7 @@ Run: npm --prefix apps/workbench run build
 
 Expected: 新增页面测试通过，lint 和 TypeScript build 成功。
 
-- [ ] **Step 7：提交 Task 3**
+- [x] **Step 7：提交 Task 3 与 Task 4 的共享数据流改动**
 
 ~~~powershell
 git add apps/workbench/src/features/workspaces apps/workbench/src/app/App.tsx apps/workbench/src/app/WorkspaceView.tsx apps/workbench/src/test/fixtures.ts
@@ -219,21 +219,21 @@ git commit -m "feat: render workspace overview in workbench"
 - Modify: apps/workbench/src/test/fixtures.ts
 - Test: tests/apps/api/test_run_commands.py
 
-- [ ] **Step 1：添加 TaskComposer 的缺少 Agent 与请求断言测试**
+- [x] **Step 1：添加 TaskComposer 的缺少 Agent 与请求断言测试**
 
 注入 overview 的 Agent 摘要。Agent 为 null 时断言发送按钮禁用并显示明确提示；Agent 存在时断言 POST /sessions 的 agent_id 等于 overview 中的 ID，且 fetch 未调用 /agents。
 
-- [ ] **Step 2：运行定向前端测试确认它发现全局目录调用**
+- [x] **Step 2：运行定向前端测试确认它发现全局目录调用**
 
 Run: npm --prefix apps/workbench run test -- --run src/app/TaskComposer.test.tsx
 
 Expected: 当前实现因为请求 /agents 而失败。
 
-- [ ] **Step 3：将 overview Agent 显式传入 TaskComposer**
+- [x] **Step 3：将 overview Agent 显式传入 TaskComposer**
 
 给 TaskComposerProps 增加 agent: OverviewAgentView | null。删去 /agents 请求与 agents[0]；Agent 为 null 时禁用输入/发送并显示“当前 Workspace 未启用商品运营 Agent”；创建 Session 时发送 Workspace ID 和该 Agent ID。
 
-- [ ] **Step 4：验证成功/缺失状态和 Session 绑定服务端拒绝**
+- [x] **Step 4：验证成功/缺失状态和 Session 绑定服务端拒绝**
 
 Run: npm --prefix apps/workbench run test -- --run src/app/TaskComposer.test.tsx src/features/workspaces/WorkspacePage.test.tsx
 
@@ -241,7 +241,7 @@ Run: uv run pytest tests/apps/api/test_run_commands.py -k workspace_agent_bindin
 
 Expected: 前端只用 Workspace Agent；后端阻止缺失/未启用绑定。
 
-- [ ] **Step 5：提交 Task 4**
+- [x] **Step 5：与 Task 3 合并提交**
 
 ~~~powershell
 git add apps/workbench/src/app/TaskComposer.tsx apps/workbench/src/app/WorkspaceView.tsx apps/workbench/src/app/TaskComposer.test.tsx apps/workbench/src/test/fixtures.ts

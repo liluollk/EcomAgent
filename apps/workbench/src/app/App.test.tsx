@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { workspaceDetail } from "../test/fixtures";
+import { workspaceOverview } from "../test/fixtures";
 import { App } from "./App";
 
 interface StubRequest {
@@ -23,7 +23,7 @@ function stubWorkspaces() {
     if (url.endsWith("/api/workspaces")) {
       return { workspaces: [{ id: "ws-brand-1", name: "品牌一" }] };
     }
-    return workspaceDetail;
+    return workspaceOverview;
   });
 }
 
