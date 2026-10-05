@@ -17,6 +17,10 @@ from apps.api.schemas.workspaces import (
     WorkspaceView,
 )
 from apps.api.service_errors import translated
+from apps.api.services.workspace_overview import (
+    WorkspaceOverviewService,
+    WorkspaceOverviewView,
+)
 from runtime.workspace.service import MembershipDetailView, WorkspaceService
 
 
@@ -104,3 +108,23 @@ async def remove_membership(
     with translated():
         await service.remove_member(workspace_id, membership_id)
     await session.commit()
+
+
+@router.get(
+    "/api/workspaces/{workspace_id}/overview",
+    response_model=WorkspaceOverviewView,
+)
+async def get_workspace_overview(
+    workspace_id: UUID,
+    actor: WorkspaceActorDep,
+    session: SessionDep,
+) -> WorkspaceOverviewView:
+    """工作台聚合读取:Workspace 状态、当前成员身份、店铺与配置摘要。
+
+    角色与执行模式使用后端枚举原值;多个有效商品 Agent 绑定返回 409
+    ``WORKSPACE_AGENT_CONFIGURATION_INVALID``(设计 §5、§8)。
+    """
+    service = WorkspaceOverviewService(session, actor)
+    with translated():
+        overview = await service.overview(workspace_id)
+    return overview
