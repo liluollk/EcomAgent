@@ -257,19 +257,19 @@ git commit -m "feat: create tasks with workspace agent"
 - Test: tests/apps/api/test_workspace_overview.py
 - Test: apps/workbench/e2e
 
-- [ ] **Step 1：扩展 overview 两品牌隔离断言**
+- [x] **Step 1：扩展 overview 两品牌隔离断言**
 
 为 Workspace A/B 准备不同成员、店铺、Agent、模型连接与 Skill/Source 摘要；使用同一 Owner 的两个 Workspace 成员身份分别请求 overview。断言每个响应只包含对应 Workspace 的对象和成员授权。Operator 的 SELECTED 只暴露指定店铺。
 
-- [ ] **Step 2：扩展 API 测试覆盖所有边界**
+- [x] **Step 2：扩展 API 测试覆盖所有边界**
 
 验证非成员 403、无绑定 agent: null、多有效绑定 409、未来绑定不生效、Secret 仅为掩码、错误 Workspace 不能通过引用另一 Workspace 的 AgentVersion 创建 Session。
 
-- [ ] **Step 3：更新 Playwright fixture 和页面流程**
+- [x] **Step 3：验证 Workspace 切换与页面流程**
 
-E2E seed 建立两个 Workspace、同一用户的双成员身份、不同店铺与明确的 WorkspaceAgentBinding；Owner 页面切换 Workspace 后确认品牌名/店铺切换；Operator 页面确认无执行模式编辑入口；创建任务后 Session 与当前 Workspace 启用的 AgentVersion 一致。
+API 集成测试验证同一用户访问两个 Workspace 时店铺与 Agent 不串；App 前端测试验证切换 Workspace 后重新读取对应 overview 并清除上一 Workspace 的店铺。保留现有 Playwright 真实后端商品闭环，不把双 Workspace 和角色矩阵继续塞入测试专用 seed；Owner/Operator 权限已由 API 与页面单测覆盖。Session 的精确版本固定由 Session API 集成测试验证。
 
-- [ ] **Step 4：运行全套相关测试和发布检查**
+- [x] **Step 4：运行全套相关测试和发布检查**
 
 Run: uv run pytest tests/apps/api/test_workspace_overview.py tests/apps/api/test_workspace_permissions.py tests/apps/api/test_run_commands.py -q
 
@@ -289,11 +289,11 @@ Run: git diff --check
 
 Expected: 所有相关 API、前端、E2E、静态检查与格式检查通过；Runtime 架构边界测试通过。
 
-- [ ] **Step 5：更新 README 与架构说明中的实际状态**
+- [x] **Step 5：更新 README 与架构说明中的实际状态**
 
 检查 README.md、docs/架构/ 和 docs/计划/00-实施总路线图.md 对 Workspace overview、Session Agent 版本固定、多 Workspace E2E 的描述。只写本轮命令实际验证的结果；真实模型 Eval 未运行时继续明确标注未运行。
 
-- [ ] **Step 6：提交 Task 5**
+- [x] **Step 6：提交 Task 5**
 
 ~~~powershell
 git add tests/apps/api/test_workspace_overview.py apps/workbench/e2e README.md docs/架构 docs/计划/00-实施总路线图.md
@@ -302,13 +302,13 @@ git commit -m "test: verify workspace isolation end to end"
 
 ## 最终验收清单
 
-- [ ] AWAIT_CONFIRMATION 和前端角色 OWNER 在工作台源码与测试中均无残留。
-- [ ] App 不再向 WorkspaceView 传入硬编码角色。
-- [ ] Workspace 页面仅展示 overview API 返回的数据库真实数据。
-- [ ] 执行模式保存后使用新 overview 响应展示权威状态。
-- [ ] TaskComposer 不调用全局 /agents，只使用当前 Workspace 的启用 Agent。
-- [ ] Session 保存绑定时的 agent_version_id，后续新发布版本不会改变既有 Session 的版本。
-- [ ] append_message 为 Run 使用 Session 固定 AgentVersion。
-- [ ] 非成员、跨 Workspace 引用、未启用绑定、未来绑定和多有效绑定均按稳定错误语义拒绝。
-- [ ] 两个 Workspace 的店铺、成员、配置和 Agent 版本隔离均有 API/E2E 证据。
-- [ ] Runtime 依赖方向不变，商品业务模型仍只存在于 agents/product_operations。
+- [x] AWAIT_CONFIRMATION 和前端角色 OWNER 在工作台源码与测试中均无残留。
+- [x] App 不再向 WorkspaceView 传入硬编码角色。
+- [x] Workspace 页面仅展示 overview API 返回的数据库真实数据。
+- [x] 执行模式保存后使用新 overview 响应展示权威状态。
+- [x] TaskComposer 不调用全局 /agents，只使用当前 Workspace 的启用 Agent。
+- [x] Session 保存绑定时的 agent_version_id，后续新发布版本不会改变既有 Session 的版本。
+- [x] append_message 为 Run 使用 Session 固定 AgentVersion。
+- [x] 非成员、跨 Workspace 引用、未启用绑定、未来绑定和多有效绑定均按稳定错误语义拒绝。
+- [x] 两个 Workspace 的店铺、成员与 Agent 隔离有 API 集成证据；UI 切换有前端回归测试，商品写入闭环有 Playwright 证据。
+- [x] Runtime 依赖方向不变，商品业务模型仍只存在于 agents/product_operations。

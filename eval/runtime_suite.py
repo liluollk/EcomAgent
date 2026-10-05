@@ -408,6 +408,7 @@ async def _seed_identity_and_run(
                 session_row = await SessionRepository(session).create(
                     workspace_id=ids.workspace_id,
                     agent_id=ids.agent_id,
+                    agent_version_id=ids.agent_version_id,
                     created_by_actor_id=ids.user_id,
                     created_by_membership_id=ids.membership_id,
                 )

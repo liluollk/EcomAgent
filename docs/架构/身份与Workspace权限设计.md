@@ -113,6 +113,8 @@ Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Wo
 
 首版 Session 为创建者私有：只有创建者能读取消息、提交后续输入或处理 Request。WorkspaceOwner 可查看必要的脱敏审计事件，不因角色自动获得完整会话内容。首版不实现共享 Session。
 
+创建 Session 时，API 只接受当前 Workspace 唯一启用、已到生效时间且状态为 `PUBLISHED` 的 AgentVersion，并把精确 `agent_version_id` 固定保存在 Session。未绑定、尚未生效或存在多个有效版本时拒绝创建；之后 Workspace 更换绑定只影响新 Session，已有 Session 后续创建的 Run 继续使用其固定版本。
+
 首版使用应用层隔离和自动化测试，不要求 PostgreSQL RLS；未来若增加真正多租户部署，再评估数据库 RLS。
 
 ## 6. Actor 传递与 Worker 授权

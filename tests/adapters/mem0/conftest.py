@@ -113,6 +113,7 @@ async def seeded_workspace(db_session: AsyncSession) -> Any:
         id=uuid.uuid4(),
         workspace_id=workspace.id,
         agent_id=agent.id,
+        agent_version_id=agent_version.id,
         created_by_actor_id=user.id,
         created_by_membership_id=membership.id,
     )

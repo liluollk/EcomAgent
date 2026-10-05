@@ -142,8 +142,8 @@ from runtime.orchestration.runtime_host import RuntimeHost
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.orchestration.token_estimator import HeuristicTokenEstimator
 from runtime.persistence.base import (
-    ConfigVersionStatus,
     ConfigScope,
+    ConfigVersionStatus,
     ConfirmationRequestStatus,
     InputRequestStatus,
     MessageRole,

@@ -39,8 +39,8 @@ _INSERT_MODEL_CONFIG_VERSION = sa.text(
     " 'gpt-test', '{}', 'hash')"
 )
 _INSERT_SESSION = sa.text(
-    "INSERT INTO sessions (id, workspace_id, agent_id, created_by_actor_id,"
-    " created_by_membership_id) VALUES (:id, :workspace_id, :agent_id,"
+    "INSERT INTO sessions (id, workspace_id, agent_id, agent_version_id, created_by_actor_id,"
+    " created_by_membership_id) VALUES (:id, :workspace_id, :agent_id, :agent_version_id,"
     " :created_by_actor_id, :created_by_membership_id)"
 )
 _INSERT_RUN = sa.text(
@@ -105,6 +105,7 @@ async def _seed_session(
             "id": session_id,
             "workspace_id": workspace_id,
             "agent_id": agent_id,
+            "agent_version_id": agent_version_id,
             "created_by_actor_id": actor_id,
             "created_by_membership_id": membership_id,
         },
