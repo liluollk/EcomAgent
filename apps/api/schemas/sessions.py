@@ -5,6 +5,7 @@ messages 与 runs(私有 Session 语义:非创建者一律 404,Schema 不泄漏)
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -65,6 +66,34 @@ class RunSummaryView(BaseModel):
     created_at: datetime
 
 
+class PendingInputOptionView(BaseModel):
+    """Input Request 的单个候选项(value 为提交值,label 为展示名)。"""
+
+    value: str
+    label: str
+
+
+class PendingInputView(BaseModel):
+    """Session 快照内的 PENDING Input Request(workbench 渲染回答表单)。"""
+
+    id: UUID
+    run_id: UUID
+    field_paths: list[str]
+    question: str
+    options: list[PendingInputOptionView]
+    status: str
+
+
+class PendingConfirmationView(BaseModel):
+    """Session 快照内的 PENDING Confirmation Request(workbench 渲染确认)。"""
+
+    id: UUID
+    run_id: UUID
+    normalized_arguments: dict[str, Any] | None = None
+    resource_versions: dict[str, Any] = {}
+    status: str
+
+
 class SessionSnapshotView(BaseModel):
     """GET /api/sessions/{id}:私有 Session 的完整快照。"""
 
@@ -77,3 +106,5 @@ class SessionSnapshotView(BaseModel):
     active_run_id: UUID | None
     messages: list[MessageView]
     runs: list[RunSummaryView]
+    pending_inputs: list[PendingInputView] = []
+    pending_confirmations: list[PendingConfirmationView] = []

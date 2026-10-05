@@ -33,6 +33,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from apps.worker.e2e import E2EJobHandler
 from apps.worker.health import HealthReporter, database_probe_from_engine
 from apps.worker.settings import WorkerSettings
 from runtime.jobs.lease_service import (
@@ -330,18 +331,26 @@ def _install_signal(
 async def serve(settings: WorkerSettings | None = None) -> int:
     """组装并运行 Worker 进程;收到停止信号后优雅退出,返回退出码。
 
-    装配校验随 RuntimeAssembly 组合根接入时注入;HTTP 健康端点不在本任务
-    范围,``health_port`` 预留。
+    ``RUNTIME_E2E=1`` 时使用 E2E 装配开关(:mod:`apps.worker.e2e`):Job
+    回调按租约组装 ScriptedBackend + Mock 平台的 ProductRuntime 并推进
+    已存在的 Run,供端到端验证在无真实模型下走通完整语义。装配校验随
+    RuntimeAssembly 组合根接入时注入;HTTP 健康端点不在本任务范围,
+    ``health_port`` 预留。
     """
     settings = settings if settings is not None else WorkerSettings.from_env()
     engine = create_async_engine(settings.database_url)
+    handler: LeaseHandler = _unhandled_job
+    e2e_handler: E2EJobHandler | None = None
+    if settings.e2e_mode:
+        e2e_handler = E2EJobHandler(engine, worker_id=settings.worker_id)
+        handler = e2e_handler
     try:
         state = {"assembly_valid": False}
         host = WorkerHost(
             gateway=TransactionalLeaseGateway(
                 engine, lease_duration=settings.lease_duration
             ),
-            handler=_unhandled_job,
+            handler=handler,
             worker_id=settings.worker_id,
             validator=None,
             heartbeat_interval=settings.heartbeat_interval,
@@ -364,6 +373,8 @@ async def serve(settings: WorkerSettings | None = None) -> int:
         await host.wait_stopped(timeout=settings.shutdown_timeout.total_seconds() + 5.0)
         return 0
     finally:
+        if e2e_handler is not None:
+            await e2e_handler.aclose()
         await engine.dispose()
 
 

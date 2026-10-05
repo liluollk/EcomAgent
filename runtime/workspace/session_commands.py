@@ -191,6 +191,23 @@ class SessionCommandService:
         )
         return list(rows)
 
+    async def session_active_run_id(self, session: Session) -> uuid.UUID | None:
+        """会话当前活动 Run(QUEUED/RUNNING/WAITING_*);终态 Run 不算活动。
+
+        ``sessions.active_run_id`` 列未在运行时维护,快照读取时以查询
+        计算为准,保证前端事件流连接与"活动 Run 唯一"语义一致。
+        """
+        return await self._session.scalar(
+            select(Run.id)
+            .where(
+                Run.workspace_id == session.workspace_id,
+                Run.session_id == session.id,
+                Run.status.in_(_ACTIVE_RUN_DB_STATUSES),
+            )
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .limit(1)
+        )
+
     async def append_message(
         self,
         session_id: uuid.UUID,

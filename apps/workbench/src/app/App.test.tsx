@@ -2,33 +2,54 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { workspaceDetail } from "../test/fixtures";
 import { App } from "./App";
 
-function stubWorkspaceFetch() {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      ({ ok: true, status: 200, json: async () => workspaceDetail }) as unknown as Response,
-    ),
-  );
+interface StubRequest {
+  url: string;
+  init?: RequestInit;
+}
+
+function stubAppFetch(handler: (request: StubRequest) => unknown) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const body = handler({ url, init });
+    return { ok: true, status: 200, json: async () => body } as unknown as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function stubWorkspaces() {
+  return stubAppFetch(({ url }) => {
+    if (url.endsWith("/api/workspaces")) {
+      return { workspaces: [{ id: "ws-brand-1", name: "品牌一" }] };
+    }
+    return workspaceDetail;
+  });
 }
 
 describe("App", () => {
   it("shows only workspace, sessions and settings in the sidebar", async () => {
-    stubWorkspaceFetch();
+    stubWorkspaces();
+    sessionStorage.setItem("workbench.token", "test-token");
     render(<App />);
 
     const sidebar = screen.getByRole("navigation", { name: "功能导航" });
     const items = within(sidebar).getAllByRole("button");
     expect(items.map((item) => item.textContent)).toEqual(["Workspace", "Sessions", "Settings"]);
 
+    // 默认展示工作区选择;选择"品牌一"后加载工作区配置(含店铺列表)。
+    fireEvent.click(await screen.findByRole("button", { name: "品牌一" }));
     expect(await screen.findByText("淘宝旗舰店")).toBeInTheDocument();
   });
 
-  it("opens the sessions placeholder from the sidebar", async () => {
-    stubWorkspaceFetch();
+  it("opens the sessions page from the sidebar", async () => {
+    stubWorkspaces();
+    sessionStorage.setItem("workbench.token", "test-token");
     render(<App />);
 
     fireEvent.click(await screen.findByText("Sessions"));
 
-    expect(screen.getByText("Sessions 页面将在后续任务实现。")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开会话" })).toBeInTheDocument();
   });
 });

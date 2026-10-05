@@ -130,7 +130,7 @@ from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interaction.input_service import InputService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
-from runtime.jobs.lease_service import LeaseService
+from runtime.jobs.lease_service import Lease, LeaseOutcome, LeaseService
 from runtime.orchestration.agent_loop import ToolCallEvaluator, ToolPin
 from runtime.orchestration.context import ContextAssembler
 from runtime.orchestration.limits import RunLimits
@@ -1115,6 +1115,30 @@ class ProductRuntime:
             await self._ensure_advance_job(run_id)
             await self._push(run_id)
         return await self.run_view(run_id)
+
+    async def advance_leased(
+        self, lease: Lease, *, answered: Mapping[str, str] | None = None
+    ) -> LeaseOutcome:
+        """推进一个已被外层 Worker 领取的租约(Worker 组合根入口)。
+
+        与 :meth:`_push` 的区别:不再次领取 Job——外层 WorkerHost 已完成
+        claim(含 QUEUED→RUNNING 迁移),本方法直接以该租约驱动
+        ``RuntimeHost.handle_lease``(单事务 AgentLoop 推进),并把"已回答
+        字段"视图注入本次推进的 PreToolUse 管线。LeaseOutcome 交由外层
+        Worker complete;异常向上冒泡按暂时性错误释放重试。
+        """
+        self._scope.begin(
+            _ScopeContext(
+                workspace_id=lease.workspace_id,
+                run_id=lease.run_id,
+                actor_id=self._actor_id,
+                answered=dict(answered or {}),
+            )
+        )
+        try:
+            return await self._host.handle_lease(lease)
+        finally:
+            self._scope.end()
 
     # -- 断言辅助 ---------------------------------------------------------
 

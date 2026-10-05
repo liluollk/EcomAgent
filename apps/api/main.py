@@ -6,9 +6,11 @@ lifespan 中从 ``RUNTIME_DATABASE_URL`` 创建并挂到 ``app.state``,测试可
 不返回异常堆栈。
 """
 
+import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Final
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,9 +28,11 @@ from apps.api.errors import (
     VALIDATION_ERROR,
     ApiError,
 )
+from apps.api.routes.agents import router as agents_router
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
 from apps.api.routes.events import router as events_router
+from apps.api.routes.health import router as health_router
 from apps.api.routes.memberships import router as memberships_router
 from apps.api.routes.memories import router as memories_router
 from apps.api.routes.requests import router as requests_router
@@ -39,6 +43,8 @@ from runtime.persistence.database import create_engine, get_database_url
 
 
 _FRAMEWORK_ERROR_CODES: dict[int, str] = {404: NOT_FOUND, 405: METHOD_NOT_ALLOWED}
+
+_E2E_ENABLED_VALUES: Final = frozenset({"1", "true", "yes", "on"})
 
 
 def _error_payload(request: Request, code: str, message: str) -> dict[str, str]:
@@ -128,7 +134,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app(engine: AsyncEngine | None = None) -> FastAPI:
-    """构建 FastAPI 应用;测试可注入既有引擎,跳过 lifespan 内的引擎创建。"""
+    """构建 FastAPI 应用;测试可注入既有引擎,跳过 lifespan 内的引擎创建。
+
+    ``RUNTIME_E2E=1`` 时追加注册 E2E 种子端点(阶段 4 Gate;仅本地/CI
+    端到端验证使用)。
+    """
     app = FastAPI(title="Agent Runtime API", lifespan=_lifespan)
     if engine is not None:
         app.state.engine = engine
@@ -138,7 +148,9 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.exception_handler(RequestValidationError)(_validation_error_handler)
     app.exception_handler(StarletteHTTPException)(_http_exception_handler)
     app.exception_handler(Exception)(_unhandled_error_handler)
+    app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(agents_router)
     app.include_router(workspaces_router)
     app.include_router(memberships_router)
     app.include_router(configuration_router)
@@ -147,4 +159,13 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.include_router(requests_router)
     app.include_router(events_router)
     app.include_router(memories_router)
+    if os.environ.get("RUNTIME_E2E", "").strip().lower() in _E2E_ENABLED_VALUES:
+        from apps.api.e2e import router as e2e_router
+
+        app.include_router(e2e_router)
     return app
+
+
+# uvicorn 入口(uvicorn apps.api.main:app):引擎由 lifespan 从
+# RUNTIME_DATABASE_URL 创建;测试/嵌入式场景请直接调用 create_app(engine)。
+app = create_app()
