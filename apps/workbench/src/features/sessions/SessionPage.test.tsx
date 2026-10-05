@@ -202,7 +202,7 @@ describe("SessionPage 交互卡片", () => {
     expect(screen.queryByText("请选择操作店铺")).not.toBeInTheDocument();
   });
 
-  it("Input 提交携带声明字段调用 answer API", async () => {
+  it("Input 候选按钮点击即携带声明字段调用 answer API", async () => {
     const fetchMock = stubFetch((url) =>
       url.endsWith("/api/sessions/session-1")
         ? {
@@ -221,8 +221,7 @@ describe("SessionPage 交互卡片", () => {
 
     render(<SessionPage sessionId="session-1" />);
 
-    fireEvent.click(await screen.findByRole("radio", { name: "淘宝旗舰店" }));
-    fireEvent.click(screen.getByRole("button", { name: "提交回答" }));
+    fireEvent.click(await screen.findByRole("button", { name: "淘宝旗舰店" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -406,11 +405,29 @@ describe("SessionPage WebSocket 集成", () => {
   });
 
   it("快照加载后按 cursor 连接事件流,WS 消息驱动状态更新", async () => {
+    // 终态事件会触发一次快照重取(加载最终消息):首次 RUNNING,其后 COMPLETED。
+    let sessionFetchCount = 0;
     stubFetch((url) =>
       url.endsWith("/api/sessions/session-1")
-        ? { body: sessionSnapshot() }
+        ? ((sessionFetchCount += 1),
+          {
+            body: sessionSnapshot(
+              sessionFetchCount === 1
+                ? {}
+                : {
+                    runs: [
+                      { id: "run-1", status: "COMPLETED", created_at: "2026-10-03T00:00:00Z" },
+                    ],
+                  },
+            ),
+          })
         : url.includes("/api/runs/run-1")
-          ? { body: runSnapshot("RUNNING", 4) }
+          ? {
+              body: runSnapshot(
+                sessionFetchCount === 1 ? "RUNNING" : "COMPLETED",
+                4,
+              ),
+            }
           : { status: 404, body: {} },
     );
     vi.stubGlobal("WebSocket", StubWebSocket);

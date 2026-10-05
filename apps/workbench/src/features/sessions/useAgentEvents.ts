@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentEventProjection } from "./eventReducer";
 import { projectionFromSnapshot, reduceAgentEvent } from "./eventReducer";
-import type { AgentEvent, SessionSnapshot } from "./types";
+import { TERMINAL_RUN_STATUSES, type AgentEvent, type SessionSnapshot } from "./types";
 
 /**
  * useAgentEvents(计划 04 Task 10 Step 3):
@@ -94,8 +94,11 @@ export function useAgentEvents({
   const refreshRef = useRef<() => Promise<void>>(async () => {});
 
   // 每次渲染刷新最新回调,避免 WS 处理器闭包过期。
+  // (render 期间不可写 ref:经 effect 同步,事件回调读取时已是最新值。)
   const optionsRef = useRef({ loadSnapshot, socketFactory, reconnectDelayMs });
-  optionsRef.current = { loadSnapshot, socketFactory, reconnectDelayMs };
+  useEffect(() => {
+    optionsRef.current = { loadSnapshot, socketFactory, reconnectDelayMs };
+  });
 
   const closeSocket = useCallback(() => {
     const socket = socketRef.current;
@@ -144,6 +147,8 @@ export function useAgentEvents({
       }
       socketRef.current = socket;
 
+      /* eslint-disable react-hooks/immutability -- WebSocket 事件回调挂载在
+       -- 既有 socket 实例上是 WS 客户端的标准用法,不是对共享可变状态的修改。 */
       socket.onopen = () => {
         attemptRef.current = 0;
         setConnectionError(null);
@@ -166,6 +171,11 @@ export function useAgentEvents({
         if (next.needsSnapshot) {
           // 缺口/等待详情:重新取快照并以新 cursor 重连。
           void refreshRef.current();
+        } else if (
+          TERMINAL_RUN_STATUSES.includes(next.runs[agentEvent.runId]?.status ?? "")
+        ) {
+          // 终态:重新取快照以加载最终消息(如写操作回执),不再重连事件流。
+          void refreshRef.current();
         }
       };
       socket.onclose = () => {
@@ -179,6 +189,7 @@ export function useAgentEvents({
       socket.onerror = () => {
         // onerror 后通常跟随 onclose,由 onclose 统一处理。
       };
+      /* eslint-enable react-hooks/immutability */
     },
     [scheduleRetry],
   );
@@ -190,7 +201,8 @@ export function useAgentEvents({
       if (disposedRef.current) {
         return;
       }
-      const rebuilt = projectionFromSnapshot(snapshot);
+      // 重建时带入旧投影(保留事件已知的工具名等知识);快照事实覆盖之。
+      const rebuilt = projectionFromSnapshot(snapshot, projectionRef.current);
       projectionRef.current = rebuilt;
       setProjection(rebuilt);
       setConnectionError(null);

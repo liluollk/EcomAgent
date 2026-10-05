@@ -15,5 +15,41 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  api:
+    build: .
+    # 先应用迁移再启动;exec 让 uvicorn 成为 shell 的直接进程,SIGTERM 直达。
+    command: >
+      sh -c ".venv/bin/alembic upgrade head &&
+             exec .venv/bin/uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
+      # E2E 装配开关:API 注册 /api/e2e/seed 种子端点(阶段 4 Gate)。
+      RUNTIME_E2E: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+  worker:
+    build: .
+    # RUNTIME_E2E=1:Worker 用 E2E 装配开关推进 Job(ScriptedBackend +
+    # Mock 平台),无真实模型依赖;依赖 api healthy 以确保迁移已应用。
+    command: .venv/bin/python -m apps.worker
+    environment:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
+      RUNTIME_E2E: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:

@@ -47,7 +47,8 @@ export interface InputInteraction {
   runId: string;
   fieldPaths: string[];
   question: string;
-  options: string[];
+  /** 候选项统一为 {value,label};纯文本选项(旧快照)value=label。 */
+  options: Array<{ value: string; label: string }>;
   status: string;
 }
 
@@ -122,7 +123,25 @@ function mergeSnapshotToolCalls(
   }
 }
 
-export function projectionFromSnapshot(snapshot: SessionSnapshot): AgentEventProjection {
+/** 候选项归一:纯文本 label → {value=label};对象 → 原样。 */
+function normalizeOption(item: unknown): { value: string; label: string } | null {
+  if (typeof item === "string") {
+    return { value: item, label: item };
+  }
+  if (typeof item === "object" && item !== null && "value" in item) {
+    const record = item as { value: unknown; label?: unknown };
+    return {
+      value: String(record.value),
+      label: record.label === undefined ? String(record.value) : String(record.label),
+    };
+  }
+  return null;
+}
+
+export function projectionFromSnapshot(
+  snapshot: SessionSnapshot,
+  previous?: AgentEventProjection | null,
+): AgentEventProjection {
   const runs: Record<string, AgentRunProjection> = {};
   let cursor: number | null = null;
 
@@ -138,7 +157,17 @@ export function projectionFromSnapshot(snapshot: SessionSnapshot): AgentEventPro
     }
   }
 
+  // 快照的 ToolCallView 不含工具名:重建时先带入旧投影中由
+  // TOOL_CALL_PROPOSED 等事件获得的知识(工具名/call_id),再由
+  // mergeSnapshotToolCalls 用快照事实(状态/参数/失败码)覆盖。
   const toolCalls: Record<string, ToolCallProjection> = {};
+  if (previous) {
+    for (const [key, prior] of Object.entries(previous.toolCalls)) {
+      if (prior.toolName !== null || prior.callId !== null) {
+        toolCalls[key] = prior;
+      }
+    }
+  }
   const activeRun = snapshot.active_run_id ? runs[snapshot.active_run_id] : undefined;
   if (activeRun) {
     mergeSnapshotToolCalls(toolCalls, activeRun.id, snapshot.tool_calls);
@@ -162,7 +191,9 @@ export function projectionFromSnapshot(snapshot: SessionSnapshot): AgentEventPro
         runId: request.run_id,
         fieldPaths: request.field_paths,
         question: request.question,
-        options: request.options ?? [],
+        options: (request.options ?? [])
+          .map(normalizeOption)
+          .filter((option): option is { value: string; label: string } => option !== null),
         status: request.status,
       })),
       confirmations: (snapshot.pending_confirmations ?? []).map((request) => ({

@@ -100,6 +100,32 @@ function messageRoleLabel(role: string): string {
   return messageRoleLabels[role] ?? role;
 }
 
+interface ToolReceiptData {
+  sku?: unknown;
+  after_price?: unknown;
+}
+
+/**
+ * 从写操作 ToolResult 消息中解析权威回读价(平台写后回执的 after_price,
+ * 即 Mock/平台侧真实落库的当前价);解析失败返回 null,不影响渲染。
+ */
+function parseWritePrice(content: string): { sku: string; price: string } | null {
+  try {
+    const parsed = JSON.parse(content) as { data?: ToolReceiptData };
+    const data = parsed.data;
+    if (
+      data !== undefined &&
+      typeof data.sku === "string" &&
+      typeof data.after_price === "string"
+    ) {
+      return { sku: data.sku, price: data.after_price };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SessionPageProps {
   sessionId: string;
 }
@@ -180,6 +206,12 @@ export function SessionPage({ sessionId }: SessionPageProps) {
     (left, right) => left.ordinal - right.ordinal,
   );
   const inputs: InputInteraction[] = projection.interactions.inputs;
+  // 权威价回读:最新一次写操作回执中的 after_price(平台侧真实当前价)。
+  const writePrices = projection.messages
+    .filter((message) => message.role === "TOOL")
+    .map((message) => parseWritePrice(message.content))
+    .filter((price): price is { sku: string; price: string } => price !== null);
+  const latestPrice = writePrices.at(-1) ?? null;
 
   return (
     <section aria-label={`Session ${sessionId}`}>
@@ -200,6 +232,13 @@ export function SessionPage({ sessionId }: SessionPageProps) {
           ))}
         </ul>
       </section>
+
+      {latestPrice && (
+        <section aria-label="权威价格">
+          <h2>权威价格</h2>
+          <p>{`${latestPrice.sku} 当前价格：${latestPrice.price} 元`}</p>
+        </section>
+      )}
 
       <section aria-label="对话消息">
         <h2>对话</h2>

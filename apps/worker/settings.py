@@ -48,6 +48,8 @@ class WorkerSettings(BaseModel):
     shutdown_timeout: timedelta = timedelta(seconds=30)
     validate_assembly: bool = True
     health_port: int | None = None
+    e2e_mode: bool = False
+    """``RUNTIME_E2E=1`` 时启用 E2E 装配开关(ScriptedBackend + Mock 平台)。"""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WorkerSettings:
@@ -77,6 +79,10 @@ class WorkerSettings(BaseModel):
             kwargs["validate_assembly"] = _parse_bool(
                 "RUNTIME_VALIDATE_ASSEMBLY", validate_raw
             )
+
+        e2e_raw = source.get("RUNTIME_E2E")
+        if e2e_raw is not None:
+            kwargs["e2e_mode"] = _parse_bool("RUNTIME_E2E", e2e_raw)
 
         port_raw = source.get("RUNTIME_HEALTH_PORT")
         if port_raw:

@@ -38,14 +38,19 @@ export interface ToolCallView {
   failure_code: string | null;
 }
 
+/** Input Request 的候选项(value 为提交值,label 为展示名)。 */
+export interface InputOptionView {
+  value: string;
+  label: string;
+}
+
 export interface InputRequestView {
   id: string;
   run_id: string;
   field_paths: string[];
   question: string;
-  response_schema?: Record<string, unknown>;
-  /** 可选项(如店铺名);缺省时按文本输入渲染。 */
-  options?: string[];
+  /** 候选项(如店铺);兼容纯文本 label(旧快照)与 {value,label}。 */
+  options?: Array<InputOptionView | string>;
   status: string;
   created_at?: string;
 }

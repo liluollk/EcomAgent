@@ -79,7 +79,11 @@ describe("useAgentEvents", () => {
   });
 
   it("WS 事件驱动 reducer 投影并按 id 去重", async () => {
-    const loadSnapshot = vi.fn(async () => snapshotFor(4));
+    // 终态事件会触发一次快照重取(加载最终消息):第二次快照 cursor 已是 5。
+    const loadSnapshot = vi
+      .fn<() => Promise<SessionSnapshot>>()
+      .mockResolvedValueOnce(snapshotFor(4))
+      .mockResolvedValueOnce(snapshotFor(5, "COMPLETED"));
     const { result } = renderHook(() =>
       useAgentEvents({
         sessionId: "session-1",
@@ -104,7 +108,8 @@ describe("useAgentEvents", () => {
     );
     expect(result.current.projection?.runs["run-1"].lastSequenceNo).toBe(5);
     expect(result.current.projection?.cursor).toBe(5);
-    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    // 初始 1 次 + 终态回读 1 次;重复事件不得再触发。
+    await waitFor(() => expect(loadSnapshot).toHaveBeenCalledTimes(2));
   });
 
   it("事件缺口触发快照重建并以新 cursor 重连", async () => {
