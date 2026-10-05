@@ -1,0 +1,26 @@
+schema_version: 1
+cases:
+  - id: tool-delta-never-executes
+    category: backend_streaming
+    risk_level: high
+    expectation: >-
+      模型流只发 ToolCallDelta 不发 Completed:不持久化任何 ToolCall、
+      不产生任何写副作用,Run 以 STREAM_ENDED_WITHOUT_COMPLETION 确定性失败。
+  - id: stale-lease-rejected
+    category: lease_fencing
+    risk_level: high
+    expectation: >-
+      失租 token 提交写结果抛 LeaseStaleError、complete 返回 False,
+      Operation 保持 EXECUTING,不产生第二次权威写入。
+  - id: cancelled-never-resumes
+    category: run_lifecycle
+    risk_level: high
+    expectation: >-
+      终态 CANCELLED 的 Run 迁移回 QUEUED 抛 InvalidTransition,
+      Run 状态保持 CANCELLED。
+  - id: event-replay-deduplicates
+    category: event_stream
+    risk_level: medium
+    expectation: >-
+      AgentEventWriter 序号连续;事件流 at-least-once 重放(同一事件出现两次)
+      按 (run_id, sequence_no) 去重后与原流一致,重复序号被唯一索引拒绝。

@@ -1,0 +1,8 @@
+schema_version: 1
+cases:
+  - id: deleted-memory-never-reenters-context
+    category: memory_lifecycle
+    risk_level: high
+    expectation: >-
+      MemoryService.delete 写 Tombstone 后,filter_retrieval 丢弃
+      mem0 仍返回的同 id 命中,已删除记忆不重新进入上下文。
