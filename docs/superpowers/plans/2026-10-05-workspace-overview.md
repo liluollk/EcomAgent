@@ -96,7 +96,7 @@ Run: uv run pytest tests/apps/api/test_workspace_overview.py tests/apps/api/test
 
 Expected: Ruff 无错误，mypy 无错误，两个 API 测试文件全绿。
 
-- [ ] **Step 8：提交 Task 1**
+- [x] **Step 8：提交 Task 1**
 
 ~~~powershell
 git add apps/api/routes/workspaces.py apps/api/service_errors.py apps/api/services tests/apps/api/test_workspace_overview.py
