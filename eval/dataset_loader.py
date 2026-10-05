@@ -6,7 +6,10 @@
   (数据集与 Schema 版本共同参与协议指纹,防止静默漂移);
 - JSONL:每行一个场景 JSON 对象,空行忽略(schema_version 不逐行声明);
 - ``load_dataset`` 按后缀分派单文件,目录则按文件名排序加载全部受支持文件
-  (``.yaml``/``.yml``/``.jsonl``),其余后缀报错。
+  (``.yaml``/``.yml``/``.jsonl``),其余后缀报错;
+- ``load_manifest`` 加载分区 manifest(:class:`DatasetManifest`,计划 05
+  Task 5:三分区 ID 清单 + frozen_test 文件字节 SHA-256),schema_version
+  漂移即拒绝。
 
 错误约定:结构类型错误(顶层/scenarios 不是列表)抛 ``TypeError``;取值
 错误(schema_version 漂移、不受支持的后缀)抛 ``ValueError``。
@@ -17,11 +20,29 @@ from pathlib import Path
 from typing import Any, Final
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field
 
 from eval.schema import SCHEMA_VERSION, Scenario
 
 
 _SUPPORTED_SUFFIXES: Final[frozenset[str]] = frozenset({".yaml", ".yml", ".jsonl"})
+
+
+class DatasetManifest(BaseModel):
+    """数据集分区 manifest(计划 05 Task 5):分区 ID 清单与冻结集哈希。
+
+    ``frozen_test_sha256`` 是对 ``frozen_test.yaml`` 文件字节计算的 SHA-256
+    十六进制摘要,正式评测前重算比对以检测冻结集漂移。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int
+    scorer_version: str
+    development_ids: tuple[str, ...]
+    regression_ids: tuple[str, ...]
+    frozen_test_ids: tuple[str, ...]
+    frozen_test_sha256: str = Field(min_length=64, max_length=64)
 
 
 def load_yaml(path: Path | str) -> list[Scenario]:
@@ -54,6 +75,18 @@ def load_jsonl(path: Path | str) -> list[Scenario]:
             continue
         scenarios.append(Scenario.model_validate(json.loads(line)))
     return scenarios
+
+
+def load_manifest(path: Path | str) -> DatasetManifest:
+    """加载数据集分区 manifest;``schema_version`` 漂移即拒绝。"""
+    document: Any = json.loads(Path(path).read_text(encoding="utf-8"))
+    manifest = DatasetManifest.model_validate(document)
+    if manifest.schema_version != SCHEMA_VERSION:
+        raise ValueError(
+            f"manifest {path} 的 schema_version={manifest.schema_version!r} 与当前 "
+            f"SCHEMA_VERSION={SCHEMA_VERSION} 不一致"
+        )
+    return manifest
 
 
 def load_dataset(source: Path | str) -> list[Scenario]:
