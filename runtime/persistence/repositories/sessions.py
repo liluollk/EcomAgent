@@ -19,6 +19,7 @@ class SessionRepository:
         *,
         workspace_id: uuid.UUID,
         agent_id: uuid.UUID,
+        agent_version_id: uuid.UUID,
         created_by_actor_id: uuid.UUID,
         created_by_membership_id: uuid.UUID,
         title: str | None = None,
@@ -27,6 +28,7 @@ class SessionRepository:
         row = Session(
             workspace_id=workspace_id,
             agent_id=agent_id,
+            agent_version_id=agent_version_id,
             created_by_actor_id=created_by_actor_id,
             created_by_membership_id=created_by_membership_id,
             title=title,

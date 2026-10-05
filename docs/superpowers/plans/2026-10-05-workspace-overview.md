@@ -115,33 +115,33 @@ git commit -m "feat: add workspace overview endpoint"
 - Test: tests/apps/api/test_run_commands.py
 - Test: tests/apps/api/test_workspace_overview.py
 
-- [ ] **Step 1：先写 Session 创建拒绝未绑定 Agent 的 API 测试**
+- [x] **Step 1：先写 Session 创建拒绝未绑定 Agent 的 API 测试**
 
 通过现有 API test fixture 创建两个 Agent，其中仅一个 AgentVersion 在目标 Workspace 启用。POST /api/sessions 使用未绑定 Agent ID 时，断言返回 409 且稳定错误码为 AGENT_NOT_ENABLED_FOR_WORKSPACE；使用绑定 Agent ID 时断言 201。
 
-- [ ] **Step 2：运行单个新测试确认因当前缺少绑定校验失败**
+- [x] **Step 2：运行单个新测试确认因当前缺少绑定校验失败**
 
 Run: uv run pytest tests/apps/api/test_run_commands.py -k workspace_agent_binding -q --tb=short
 
 Expected: 未绑定 Agent 用例当前失败，指出 API 接受了它；失败必须来自断言而非测试 fixture 崩溃。
 
-- [ ] **Step 3：给 Session 增加必需的 agent_version_id 外键**
+- [x] **Step 3：给 Session 增加必需的 agent_version_id 外键**
 
 在 Session 模型新增 agent_version_id: Mapped[uuid.UUID]，外键到 agent_versions.id，非空。创建迁移 0003_session_agent_version.py：升级时优先按该 Session 最近一条 Run 的 agent_version_id 回填；没有历史 Run 时，按该 Agent 最高版本的 PUBLISHED AgentVersion 回填；无已发布版本的历史 Session 必须使迁移失败并给出明确错误，不得静默选 DRAFT；回填后设为 NOT NULL 并添加命名外键。降级只删除新列和外键。
 
-- [ ] **Step 4：在 SessionCommandService 中根据 Workspace 绑定解析版本**
+- [x] **Step 4：在 SessionCommandService 中根据 Workspace 绑定解析版本**
 
 新增内部解析方法，查询 workspace_id + agent_id + enabled + effective_at <= now_utc 的绑定，再要求 AgentVersion 为 PUBLISHED。0 条抛 SessionCommandError(409, AGENT_NOT_ENABLED_FOR_WORKSPACE, ...)；多条抛配置错误 409；唯一结果同时校验 AgentVersion.agent_id == agent_id。调用 SessionRepository.create 时把解析出的 version ID 与 agent ID 一并传入。
 
-- [ ] **Step 5：Repository 持久化精确版本，Run 创建复用该版本**
+- [x] **Step 5：Repository 持久化精确版本，Run 创建复用该版本**
 
 SessionRepository.create 接受必需参数 agent_version_id 并写入 Session。append_message 不再调用 _latest_agent_version_id(session_row.agent_id)，直接使用 session_row.agent_version_id 创建 Run。删除因此无用的 _latest_agent_version_id 方法；更新 Session schema/fixture 中需要暴露的新字段。
 
-- [ ] **Step 6：补充版本固定与越 Workspace 回归测试**
+- [x] **Step 6：补充版本固定与越 Workspace 回归测试**
 
 测试同一 Agent 有已启用版本 v1，之后目录中出现更高版本 v2 但未启用时，新 Run 仍绑定 v1；测试 Workspace B 的绑定不能授权 Workspace A 创建 Session；测试未来生效和已禁用绑定均被拒绝。
 
-- [ ] **Step 7：运行迁移、Session API 测试和类型检查**
+- [x] **Step 7：运行迁移、Session API 测试和类型检查**
 
 Run: uv run alembic upgrade head
 
@@ -153,7 +153,7 @@ Run: uv run mypy runtime apps/api
 
 Expected: 迁移升级成功；绑定/版本用例通过；Ruff、mypy 无错误。
 
-- [ ] **Step 8：提交 Task 2**
+- [x] **Step 8：提交 Task 2**
 
 ~~~powershell
 git add runtime apps/api/routes/sessions.py apps/api/schemas/sessions.py migrations/versions/0003_session_agent_version.py tests/apps/api/test_run_commands.py tests/apps/api/test_workspace_overview.py

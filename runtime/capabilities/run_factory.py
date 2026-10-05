@@ -109,6 +109,7 @@ class RunFactory:
         session_row = await SessionRepository(self._session).create(
             workspace_id=self._workspace_id,
             agent_id=resolved.agent.agent_id,
+            agent_version_id=resolved.agent.version_id,
             created_by_actor_id=self._actor_id,
             created_by_membership_id=self._membership_id,
         )

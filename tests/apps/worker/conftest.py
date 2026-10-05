@@ -113,6 +113,7 @@ async def worker_seed(engine: AsyncEngine) -> AsyncIterator[WorkerSeed]:
             agent_session = await SessionRepository(session).create(
                 workspace_id=workspace.id,
                 agent_id=agent.id,
+                agent_version_id=agent_version.id,
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
             )

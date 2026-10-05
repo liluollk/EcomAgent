@@ -31,6 +31,7 @@ from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
     AccountStatus,
     ConfigScope,
+    ConfigVersionStatus,
     MembershipRole,
     ModelBackendType,
     RunJobKind,
@@ -43,6 +44,7 @@ from runtime.persistence.models.configuration import (
     ModelConnection,
     ToolDefinition,
     ToolVersion,
+    WorkspaceAgentBinding,
 )
 from runtime.persistence.models.events import AgentEvent, AuditEvent
 from runtime.persistence.models.execution import Run, RunAttempt, RunJob, ToolCall
@@ -66,6 +68,7 @@ class SeededWorkspace:
     owner_membership: WorkspaceMembership
     agent: Agent
     agent_version: AgentVersion
+    agent_binding: WorkspaceAgentBinding
     model_config_version: ModelConfigVersion
     tool_version: ToolVersion
 
@@ -121,7 +124,12 @@ async def _cleanup(session: AsyncSession, workspace_id: UUID, extra: SeededWorks
     await session.execute(
         sa.delete(ToolDefinition).where(ToolDefinition.id == extra.tool_version.tool_id)
     )
-    await session.execute(sa.delete(AgentVersion).where(AgentVersion.id == extra.agent_version.id))
+    await session.execute(
+        sa.delete(WorkspaceAgentBinding).where(
+            WorkspaceAgentBinding.workspace_id == workspace_id
+        )
+    )
+    await session.execute(sa.delete(AgentVersion).where(AgentVersion.agent_id == extra.agent.id))
     await session.execute(sa.delete(Agent).where(Agent.id == extra.agent.id))
     await session.execute(
         sa.delete(WorkspaceMembership).where(WorkspaceMembership.workspace_id == workspace_id)
@@ -169,6 +177,7 @@ async def workspace(engine: AsyncEngine) -> AsyncIterator[SeededWorkspace]:
         id=uuid.uuid4(),
         agent_id=agent.id,
         version=1,
+        status=ConfigVersionStatus.PUBLISHED,
         definition_json={"role": "test"},
         definition_hash="test-definition-hash",
     )
@@ -214,6 +223,14 @@ async def workspace(engine: AsyncEngine) -> AsyncIterator[SeededWorkspace]:
         await session.flush()
         session.add_all([agent, agent_version, connection])
         await session.flush()
+        agent_binding = WorkspaceAgentBinding(
+            id=uuid.uuid4(),
+            workspace_id=ws.id,
+            agent_version_id=agent_version.id,
+            enabled=True,
+        )
+        session.add(agent_binding)
+        await session.flush()
         session.add_all([model_config_version, tool_definition, tool_version])
         await session.commit()
         seeded = SeededWorkspace(
@@ -224,6 +241,7 @@ async def workspace(engine: AsyncEngine) -> AsyncIterator[SeededWorkspace]:
             owner_membership=owner_membership,
             agent=agent,
             agent_version=agent_version,
+            agent_binding=agent_binding,
             model_config_version=model_config_version,
             tool_version=tool_version,
         )
@@ -391,8 +409,120 @@ async def test_create_session_binds_current_actor(
     body = response.json()
     assert body["workspace_id"] == str(workspace.id)
     assert body["agent_id"] == str(workspace.agent_id)
+    assert body["agent_version_id"] == str(workspace.agent_version.id)
     assert body["created_by_actor_id"] == str(workspace.owner.id)
     assert body["status"] == "ACTIVE"
+
+
+@pytest.mark.parametrize("binding_state", ["disabled", "future"])
+async def test_create_session_rejects_inactive_workspace_agent_binding(
+    owner_client: AsyncClient,
+    workspace: SeededWorkspace,
+    engine: AsyncEngine,
+    binding_state: str,
+) -> None:
+    db = AsyncSession(engine, expire_on_commit=False)
+    try:
+        binding = await db.get(WorkspaceAgentBinding, workspace.agent_binding.id)
+        assert binding is not None
+        if binding_state == "disabled":
+            binding.enabled = False
+        else:
+            binding.effective_at = datetime.now(UTC) + timedelta(days=1)
+        await db.commit()
+    finally:
+        await db.close()
+
+    response = await owner_client.post(
+        "/api/sessions",
+        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "AGENT_NOT_ENABLED_FOR_WORKSPACE"
+
+
+async def test_create_session_rejects_multiple_enabled_agent_versions(
+    owner_client: AsyncClient,
+    workspace: SeededWorkspace,
+    engine: AsyncEngine,
+) -> None:
+    v2 = AgentVersion(
+        id=uuid.uuid4(),
+        agent_id=workspace.agent_id,
+        version=2,
+        status=ConfigVersionStatus.PUBLISHED,
+        definition_json={"role": "second version"},
+        definition_hash="second-version-hash",
+    )
+    db = AsyncSession(engine, expire_on_commit=False)
+    try:
+        db.add(v2)
+        await db.flush()
+        db.add(
+            WorkspaceAgentBinding(
+                id=uuid.uuid4(),
+                workspace_id=workspace.id,
+                agent_version_id=v2.id,
+                enabled=True,
+            )
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    response = await owner_client.post(
+        "/api/sessions",
+        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "WORKSPACE_AGENT_CONFIGURATION_INVALID"
+
+
+async def test_agent_binding_in_another_workspace_does_not_authorize_session(
+    owner_client: AsyncClient,
+    workspace: SeededWorkspace,
+    engine: AsyncEngine,
+) -> None:
+    other_workspace = Workspace(id=uuid.uuid4(), name="other workspace")
+    other_binding = WorkspaceAgentBinding(
+        id=uuid.uuid4(),
+        workspace_id=other_workspace.id,
+        agent_version_id=workspace.agent_version.id,
+        enabled=True,
+    )
+    db = AsyncSession(engine, expire_on_commit=False)
+    try:
+        binding = await db.get(WorkspaceAgentBinding, workspace.agent_binding.id)
+        assert binding is not None
+        binding.enabled = False
+        db.add(other_workspace)
+        await db.flush()
+        db.add(other_binding)
+        await db.commit()
+    finally:
+        await db.close()
+
+    try:
+        response = await owner_client.post(
+            "/api/sessions",
+            json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == "AGENT_NOT_ENABLED_FOR_WORKSPACE"
+    finally:
+        db = AsyncSession(engine, expire_on_commit=False)
+        try:
+            await db.execute(
+                sa.delete(WorkspaceAgentBinding).where(
+                    WorkspaceAgentBinding.id == other_binding.id
+                )
+            )
+            await db.execute(sa.delete(Workspace).where(Workspace.id == other_workspace.id))
+            await db.commit()
+        finally:
+            await db.close()
 
 
 async def test_non_member_cannot_create_session_in_workspace(
@@ -413,6 +543,35 @@ async def test_submit_message_creates_run_and_advance_job(
 ) -> None:
     created_session = await _create_session(owner_client, workspace.id, workspace.agent_id)
     session_id = UUID(str(created_session["id"]))
+
+    # Publish and bind v2 after Session creation. Existing Session must remain pinned to v1.
+    v2 = AgentVersion(
+        id=uuid.uuid4(),
+        agent_id=workspace.agent_id,
+        version=2,
+        status=ConfigVersionStatus.PUBLISHED,
+        definition_json={"role": "updated test"},
+        definition_hash="test-definition-hash-v2",
+    )
+    db = AsyncSession(engine, expire_on_commit=False)
+    try:
+        binding = await db.get(WorkspaceAgentBinding, workspace.agent_binding.id)
+        assert binding is not None
+        binding.enabled = False
+        db.add(v2)
+        await db.flush()
+        db.add(
+            WorkspaceAgentBinding(
+                id=uuid.uuid4(),
+                workspace_id=workspace.id,
+                agent_version_id=v2.id,
+                enabled=True,
+            )
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
     dispatched = await _submit_message(owner_client, session_id, "price check")
     run_id = UUID(str(dispatched["run_id"]))
     message_id = UUID(str(dispatched["message_id"]))
@@ -427,6 +586,7 @@ async def test_submit_message_creates_run_and_advance_job(
         ).one()
         assert run.status.value == "QUEUED"
         assert run.session_id == session_id
+        assert run.agent_version_id == workspace.agent_version.id
         assert run.trigger_message_id == message_id
         message = (
             await db.scalars(
@@ -439,6 +599,9 @@ async def test_submit_message_creates_run_and_advance_job(
         assert message.status.value == "COMPLETED"
         assert message.content == "price check"
         assert message.run_id == run_id
+        session_row = await db.get(Session, session_id)
+        assert session_row is not None
+        assert session_row.agent_version_id == workspace.agent_version.id
         job = (
             await db.scalars(
                 select(RunJob).where(
@@ -522,7 +685,17 @@ async def test_resource_from_other_workspace_returns_404(
         await db.flush()
         db.add(other_connection)
         await db.flush()
-        db.add(other_model_config_version)
+        db.add_all(
+            [
+                other_model_config_version,
+                WorkspaceAgentBinding(
+                    id=uuid.uuid4(),
+                    workspace_id=other_ws.id,
+                    agent_version_id=workspace.agent_version.id,
+                    enabled=True,
+                ),
+            ]
+        )
         await db.commit()
     finally:
         await db.close()
@@ -587,6 +760,11 @@ async def test_resource_from_other_workspace_returns_404(
                 await db.execute(
                     sa.delete(ModelConnection).where(
                         ModelConnection.workspace_id == other_ws.id
+                    )
+                )
+                await db.execute(
+                    sa.delete(WorkspaceAgentBinding).where(
+                        WorkspaceAgentBinding.workspace_id == other_ws.id
                     )
                 )
                 await db.execute(

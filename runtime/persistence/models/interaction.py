@@ -38,6 +38,11 @@ class Session(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     agent_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("agents.id", name="fk_sessions_agent_id"), nullable=False
     )
+    agent_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_versions.id", name="fk_sessions_agent_version_id"),
+        nullable=False,
+    )
     created_by_actor_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", name="fk_sessions_created_by_actor_id"), nullable=False
     )

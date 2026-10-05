@@ -107,6 +107,7 @@ async def _cleanup_seeded_rows(engine: AsyncEngine, seed: dict[str, Any]) -> Non
         "DELETE FROM run_policy_snapshots WHERE workspace_id = :ws",
         "DELETE FROM runs WHERE workspace_id = :ws",
         "DELETE FROM sessions WHERE workspace_id = :ws",
+        "DELETE FROM workspace_agent_bindings WHERE workspace_id = :ws",
         "DELETE FROM product_operations.price_locks WHERE workspace_id = :ws",
         "DELETE FROM product_operations.listings WHERE workspace_id = :ws",
         "DELETE FROM product_operations.products WHERE workspace_id = :ws",

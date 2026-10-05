@@ -215,6 +215,7 @@ async def _seed_committed(engine: AsyncEngine) -> dict[str, uuid.UUID]:
             session_row = await SessionRepository(session).create(
                 workspace_id=workspace.id,
                 agent_id=agent.id,
+                agent_version_id=agent_version.id,
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
             )
