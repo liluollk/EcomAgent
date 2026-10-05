@@ -1,0 +1,69 @@
+name: workbench
+
+on:
+  pull_request:
+
+jobs:
+  # PR 快速反馈:lint、Vitest 单测(含 EventReducer 重复/乱序/缺口/快照/终态
+  # 不变量)与 build。E2E 需要 postgres + api + worker,拆到下面的 e2e job。
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/workbench/package-lock.json
+      - run: npm ci --prefix apps/workbench
+      - run: npm --prefix apps/workbench run lint
+      - run: npm --prefix apps/workbench run test -- --run
+      - run: npm --prefix apps/workbench run build
+
+  # 完整 E2E(不设 continue-on-error):ScriptedBackend E2E 装配无真实模型
+  # 依赖,在 ubuntu runner 上确定性复现 docker compose 的 postgres + api +
+  # worker 装配(RUNTIME_E2E=1:api 注册 /api/e2e/seed,worker 推进 Job)。
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: runtime
+          POSTGRES_PASSWORD: runtime
+          POSTGRES_DB: agent_runtime
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runtime -d agent_runtime"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime
+      RUNTIME_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      # 等价于 compose 的 api/worker 服务:先迁移,再后台常驻 uvicorn 与
+      # Worker(RUNTIME_E2E=1);api 健康检查通过才继续。任一进程意外退出
+      # 都会导致 E2E 断言失败,因此这里只做健康等待,不做额外兜底。
+      - name: Start api and worker in background
+        run: |
+          uv run uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 &
+          uv run python -m apps.worker &
+          sleep 5
+          curl --fail --retry 24 --retry-delay 5 --retry-connrefused http://127.0.0.1:8000/api/health
+        shell: bash
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/workbench/package-lock.json
+      - run: npm ci --prefix apps/workbench
+      - name: Install Playwright chromium
+        working-directory: apps/workbench
+        run: npx playwright install --with-deps chromium
+      - run: npm --prefix apps/workbench run test:e2e
