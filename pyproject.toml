@@ -20,6 +20,7 @@ dependencies = [
     "mcp>=2.3.0",
     "mem0ai>=2.2.1",
     "langfuse>=4.16.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -29,6 +30,7 @@ dev = [
     "ruff",
     "mypy",
     "types-jsonschema>=4.26.0.20260518",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [build-system]
