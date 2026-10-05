@@ -1,0 +1,108 @@
+schema_version: 1
+# 故障恢复数据集(计划 05 Task 6):数据声明期望,代码执行验证。
+#
+# 每例声明:id / category / risk_level / fault(故障注名,执行分派键)/
+# expectation(期望摘要)/ expected_reconcile_path(UNKNOWN 后的权威回查
+# 路径;未发生 UNKNOWN 时空)/ max_logical_writes(逻辑写上界)/
+# expected_final_state(权威最终状态:平台价格 + Run 终态)。
+#
+# 覆盖七类故障点:模型超时、Tool 调用前退出、写入已生效响应丢失、确认后
+# Worker 重启、平台暂时不可用、回查暂时不一致、重复提交。其中
+# response_lost_after_commit / permanent_failure / temporary_reconcile_unknown
+# 与 adapters.commerce.faults.FaultInjector 的命名故障一一对应;其余四类由
+# crash-harness 模式(真实 LeaseService/LeaseSweeper/ScriptedBackend 注入)
+# 确定性构造。
+cases:
+  - id: model-timeout
+    category: model_failure
+    risk_level: high
+    fault: model_timeout
+    expectation: >-
+      模型超时:Provider 失败归一化为 MODEL_TIMEOUT,可重试错误重试预算耗尽后
+      Run 确定性 FAILED,不持久化任何 ToolCall,零副作用,权威价格不变。
+    expected_reconcile_path: []
+    max_logical_writes: 0
+    expected_final_state:
+      price: "128.00"
+      run_status: FAILED
+
+  - id: worker-exit-before-write
+    category: worker_lifecycle
+    risk_level: medium
+    fault: worker_exit_before_write
+    expectation: >-
+      Tool 调用前 Worker 退出:领取后租约过期被 LeaseSweeper 回收,Run 回
+      QUEUED 可重新领取,Attempt ABANDONED,零写入、权威价格不变。
+    expected_reconcile_path: []
+    max_logical_writes: 0
+    expected_final_state:
+      price: "128.00"
+      run_status: QUEUED
+
+  - id: write-applied-response-lost
+    category: response_loss
+    risk_level: high
+    fault: response_lost_after_commit
+    expectation: >-
+      写入已生效但响应丢失:Run 进入 WAITING_RECONCILIATION(Operation
+      UNKNOWN),回查 APPLIED 后恢复推进到 COMPLETED,权威写入恰好一次,
+      价格落到目标值。
+    expected_reconcile_path: ["UNKNOWN", "APPLIED"]
+    max_logical_writes: 1
+    expected_final_state:
+      price: "99.00"
+      run_status: COMPLETED
+
+  - id: worker-restart-after-confirmation
+    category: worker_lifecycle
+    risk_level: high
+    fault: worker_restart_after_confirmation
+    expectation: >-
+      确认接受后 Worker 退出:租约过期被 Sweeper 回收后,新 Worker 重新领取
+      推进,已接受的确认语义保持,写入恰好一次,Run COMPLETED。
+    expected_reconcile_path: []
+    max_logical_writes: 1
+    expected_final_state:
+      price: "99.00"
+      run_status: COMPLETED
+
+  - id: platform-temporarily-unavailable
+    category: platform_failure
+    risk_level: high
+    fault: permanent_failure
+    expectation: >-
+      平台暂时不可用:回执确定 FAILED(不 UNKNOWN、不盲目重试),Operation
+      NOT_APPLIED、ToolCall 回 VALIDATING 等待重走完整 PreToolUse,
+      权威状态不变、零写入,Run 回 QUEUED。
+    expected_reconcile_path: []
+    max_logical_writes: 0
+    expected_final_state:
+      price: "128.00"
+      run_status: QUEUED
+
+  - id: reconcile-temporarily-inconsistent
+    category: recovery_reconciliation
+    risk_level: high
+    fault: temporary_reconcile_unknown
+    expectation: >-
+      回查暂时不一致:第一次回查 UNKNOWN(预算内保持 WAITING_RECONCILIATION
+      并再次调度),第二次回查 APPLIED 后恢复推进到 COMPLETED,权威写入
+      恰好一次。
+    expected_reconcile_path: ["UNKNOWN", "UNKNOWN", "APPLIED"]
+    max_logical_writes: 1
+    expected_final_state:
+      price: "99.00"
+      run_status: COMPLETED
+
+  - id: duplicate-submit
+    category: idempotency
+    risk_level: medium
+    fault: duplicate_submit
+    expectation: >-
+      重复提交:同 operation_id 经真实执行端点再次提交,平台按幂等键回放
+      上次回执,不产生第二次逻辑写,权威价格保持首次写入值。
+    expected_reconcile_path: []
+    max_logical_writes: 1
+    expected_final_state:
+      price: "99.00"
+      run_status: COMPLETED

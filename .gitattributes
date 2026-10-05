@@ -1,0 +1,4 @@
+# 冻结数据集的哈希按文件字节计算(manifest.frozen_test_sha256);
+# 强制 LF,防止 Windows autocrlf 在检出时改写字节导致哈希漂移。
+eval/datasets/product_operations/*.yaml text eol=lf
+eval/datasets/product_operations/*.json text eol=lf
