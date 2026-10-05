@@ -1,0 +1,15 @@
+schema_version: 1
+cases:
+  - id: input-resume-revalidates
+    category: interaction_input
+    risk_level: high
+    expectation: >-
+      InputService.answer 只合并声明字段、重走完整 PreToolUse:合并后参数
+      被真实价格 Policy 拒绝(PRICE_BELOW_FLOOR),不产生任何写副作用,
+      权威价格保持不变。
+  - id: confirmation-toctou
+    category: interaction_confirmation
+    risk_level: high
+    expectation: >-
+      确认接受后资源版本变化:verify 返回 CONFIRMATION_STALE,
+      不执行任何写操作;版本未变时 verify 通过。

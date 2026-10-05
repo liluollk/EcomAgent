@@ -1,0 +1,15 @@
+schema_version: 1
+cases:
+  - id: unknown-reconciles-first
+    category: recovery_reconciliation
+    risk_level: high
+    expectation: >-
+      外部写入已生效但响应丢失:Run 先进入 WAITING_RECONCILIATION(Operation
+      UNKNOWN),回查 APPLIED 后 Run 恢复推进到 COMPLETED,权威写入恰好一次。
+  - id: posttool-invalid-output-keeps-write-outcome
+    category: recovery_reconciliation
+    risk_level: high
+    expectation: >-
+      写入已 APPLIED 而输出违反 Output Schema:operation_outcome 保持 APPLIED、
+      错误码 INVALID_TOOL_RESULT、retry_allowed 为 False,权威事实不被改写,
+      不产生第二次写入。

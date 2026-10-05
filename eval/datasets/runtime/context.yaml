@@ -1,0 +1,8 @@
+schema_version: 1
+cases:
+  - id: context-summary-preserves-protected-facts
+    category: context_budget
+    risk_level: high
+    expectation: >-
+      超预算压缩(Summary 替代历史)后,Runtime 安全规则、当前用户消息与
+      待确认 fingerprint 三个 Protected 事实仍存活于组装结果。
