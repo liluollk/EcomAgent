@@ -1,0 +1,47 @@
+name: eval
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
+      - run: uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
+      # 数据集分层互斥与冻结哈希校验(失败即漂移)。
+      - run: uv run pytest tests/eval/test_dataset_partitions.py -q
+
+  # 真实模型 Eval(DeepSeek):仅手动触发,不在 Pull Request 中自动消耗额度。
+  # 需要仓库 Secrets:EVAL_BASE_URL、EVAL_MODEL、EVAL_API_KEY。
+  # 运行前需在 GitHub 仓库 Settings → Secrets and variables → Actions 配置。
+  product-real-model:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
+      EVAL_MODEL: ${{ secrets.EVAL_MODEL }}
+      EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: Verify eval provider secrets are configured
+        run: |
+          for name in EVAL_BASE_URL EVAL_MODEL EVAL_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing repository secret: $name" >&2
+              exit 1
+            fi
+          done
+      # 先 Development 集,人工确认结果后再跑 Frozen Test 并派生基线
+      # (见 docs/评测/评测方法.md)。产物按运行编号归档。
+      - run: uv run python -m eval.product_suite --split development --output reports/development.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: development-report-${{ github.run_id }}
+          path: reports/development.json

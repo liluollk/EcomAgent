@@ -140,6 +140,7 @@ async def seeded_session(
     return await session_repository.create(
         workspace_id=seeded_workspace.workspace.id,
         agent_id=seeded_workspace.agent.id,
+        agent_version_id=seeded_workspace.agent_version.id,
         created_by_actor_id=seeded_workspace.user.id,
         created_by_membership_id=seeded_workspace.membership.id,
     )

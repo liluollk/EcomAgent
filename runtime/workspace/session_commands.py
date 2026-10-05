@@ -18,10 +18,10 @@
 与 :class:`~runtime.capabilities.run_factory.RunFactory` 的关系:RunFactory 面向
 "解析能力版本 + 创建新 Session + Run + 版本快照"的组合根引导路径,固定绑定
 进程内 Registry 组装的 :class:`~runtime.capabilities.assembly.RuntimeAssembly`;
-API 进程没有 Registry,这里用"数据库内最新 AgentVersion + 工作区最新
-ModelConfigVersion"解析 ``runs`` 必需的两个版本外键,直接经
-:class:`~runtime.persistence.repositories.runs.RunRepository` 创建 QUEUED Run,
-不写 run_*_versions 快照(版本钉版由 Worker 侧组装路径负责)。
+API 创建 Session 时依据 Workspace 当前生效的 Agent 绑定固定 AgentVersion,
+之后每次提交消息都从 Session 读取该版本创建 QUEUED Run;ModelConfigVersion
+仍按 Workspace 当前配置解析。Worker 组装执行上下文时再写入 run_*_versions
+快照。
 
 事务边界:与调用方共享同一 AsyncSession,只 flush 不 commit;命令短事务由
 路由层在服务返回后统一提交。
@@ -51,13 +51,19 @@ from runtime.persistence.base import (
     ACTIVE_JOB_STATUS_VALUES,
     ACTIVE_RUN_STATUS_VALUES,
     AccountStatus,
+    ConfigVersionStatus,
     ConfirmationRequestStatus,
     InputRequestStatus,
     MessageRole,
     MessageStatus,
     RunJobKind,
 )
-from runtime.persistence.models.configuration import Agent, AgentVersion, ModelConfigVersion
+from runtime.persistence.models.configuration import (
+    Agent,
+    AgentVersion,
+    ModelConfigVersion,
+    WorkspaceAgentBinding,
+)
 from runtime.persistence.models.execution import Run, RunJob, ToolCall
 from runtime.persistence.models.identity import WorkspaceMembership
 from runtime.persistence.models.interaction import (
@@ -80,6 +86,8 @@ REQUEST_NOT_FOUND: Final = "REQUEST_NOT_FOUND"
 AGENT_NOT_FOUND: Final = "AGENT_NOT_FOUND"
 AGENT_VERSION_NOT_FOUND: Final = "AGENT_VERSION_NOT_FOUND"
 MODEL_CONFIG_VERSION_NOT_FOUND: Final = "MODEL_CONFIG_VERSION_NOT_FOUND"
+AGENT_NOT_ENABLED_FOR_WORKSPACE: Final = "AGENT_NOT_ENABLED_FOR_WORKSPACE"
+WORKSPACE_AGENT_CONFIGURATION_INVALID: Final = "WORKSPACE_AGENT_CONFIGURATION_INVALID"
 ACTIVE_RUN_EXISTS: Final = "ACTIVE_RUN_EXISTS"
 INVALID_TRANSITION: Final = "INVALID_TRANSITION"
 
@@ -155,9 +163,13 @@ class SessionCommandService:
             raise SessionCommandError(
                 status_code=404, code=AGENT_NOT_FOUND, message="agent 不存在"
             )
+        agent_version_id = await self._enabled_agent_version_id(
+            workspace_id=ctx.workspace_id, agent_id=agent_id
+        )
         return await self._sessions.create(
             workspace_id=ctx.workspace_id,
             agent_id=agent_id,
+            agent_version_id=agent_version_id,
             created_by_actor_id=self._actor_id,
             created_by_membership_id=ctx.membership_id,
             title=title,
@@ -236,7 +248,6 @@ class SessionCommandService:
                 code=ACTIVE_RUN_EXISTS,
                 message="该会话仍有活动 Run,不能提交新用户消息",
             )
-        agent_version_id = await self._latest_agent_version_id(session_row.agent_id)
         resolved_model_config_version_id = (
             model_config_version_id
             if model_config_version_id is not None
@@ -265,7 +276,7 @@ class SessionCommandService:
                 session_id=session_row.id,
                 created_by_actor_id=self._actor_id,
                 created_by_membership_id=session_row.created_by_membership_id,
-                agent_version_id=agent_version_id,
+                agent_version_id=session_row.agent_version_id,
                 model_config_version_id=resolved_model_config_version_id,
                 trigger_message_id=message.id,
             )
@@ -494,21 +505,39 @@ class SessionCommandService:
 
     # ---- 内部:版本解析与推进 ----
 
-    async def _latest_agent_version_id(self, agent_id: uuid.UUID) -> uuid.UUID:
-        """数据库内该 Agent 的最新版本(无进程内 Registry 时的最小钉版语义)。"""
-        version_id = await self._session.scalar(
+    async def _enabled_agent_version_id(
+        self, *, workspace_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> uuid.UUID:
+        """解析 Workspace 当前唯一启用且已发布的 Agent 版本。"""
+        rows = await self._session.scalars(
             select(AgentVersion.id)
-            .where(AgentVersion.agent_id == agent_id)
+            .join(
+                WorkspaceAgentBinding,
+                WorkspaceAgentBinding.agent_version_id == AgentVersion.id,
+            )
+            .where(
+                WorkspaceAgentBinding.workspace_id == workspace_id,
+                WorkspaceAgentBinding.enabled.is_(True),
+                WorkspaceAgentBinding.effective_at <= func.now(),
+                AgentVersion.agent_id == agent_id,
+                AgentVersion.status == ConfigVersionStatus.PUBLISHED,
+            )
             .order_by(AgentVersion.version.desc(), AgentVersion.id.desc())
-            .limit(1)
         )
-        if version_id is None:
+        version_ids = list(rows)
+        if not version_ids:
             raise SessionCommandError(
                 status_code=409,
-                code=AGENT_VERSION_NOT_FOUND,
-                message="agent 没有可用版本",
+                code=AGENT_NOT_ENABLED_FOR_WORKSPACE,
+                message="该 Workspace 未启用此 Agent",
             )
-        return version_id
+        if len(version_ids) != 1:
+            raise SessionCommandError(
+                status_code=409,
+                code=WORKSPACE_AGENT_CONFIGURATION_INVALID,
+                message="该 Workspace 存在多个生效的 Agent 版本",
+            )
+        return version_ids[0]
 
     async def _latest_model_config_version_id(
         self, workspace_id: uuid.UUID

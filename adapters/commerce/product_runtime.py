@@ -32,7 +32,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
@@ -143,6 +143,7 @@ from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.orchestration.token_estimator import HeuristicTokenEstimator
 from runtime.persistence.base import (
     ConfigScope,
+    ConfigVersionStatus,
     ConfirmationRequestStatus,
     InputRequestStatus,
     MessageRole,
@@ -247,11 +248,18 @@ async def _bootstrap_capabilities(
                     id=uuid.uuid4(),
                     agent_id=agent.id,
                     version=1,
+                    status=ConfigVersionStatus.PUBLISHED,
                     definition_json=definition_json,
                     definition_hash=_json_hash(definition_json),
+                    published_at=datetime.now(UTC),
                 )
                 session.add(agent_version)
                 await session.flush()
+            elif agent_version.status == ConfigVersionStatus.DRAFT:
+                # Built-in reference Agent v1 is released by this bootstrap; do not
+                # leave legacy rows unbindable after the Workspace binding gate.
+                agent_version.status = ConfigVersionStatus.PUBLISHED
+                agent_version.published_at = datetime.now(UTC)
 
             skill = (
                 await session.scalars(select(Skill).where(Skill.stable_key == SKILL_KEY))

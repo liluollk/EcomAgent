@@ -143,7 +143,8 @@ business_policy_versions
 
 ```text
 sessions
-  id, workspace_id, agent_id, created_by_actor_id, created_by_membership_id,
+  id, workspace_id, agent_id, agent_version_id,
+  created_by_actor_id, created_by_membership_id,
   title, status, active_run_id, created_at, updated_at
 
 messages

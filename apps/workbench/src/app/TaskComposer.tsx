@@ -1,12 +1,7 @@
 import { useState } from "react";
 
-import { getJSON, postJSON } from "../api/client";
-
-interface AgentSummary {
-  id: string;
-  stable_key: string;
-  name: string;
-}
+import { postJSON } from "../api/client";
+import type { WorkspaceOverviewAgent } from "../features/workspaces/types";
 
 interface SessionCreated {
   id: string;
@@ -18,14 +13,14 @@ interface RunDispatched {
 
 export interface TaskComposerProps {
   workspaceId: string;
+  agent: WorkspaceOverviewAgent | null;
   onSessionOpened: (sessionId: string) => void;
 }
 
 /**
- * 新任务编辑器:提交任务时创建会话(默认绑定目录内第一个 Agent)并
- * 发送首条用户消息,成功后打开该会话的 SessionPage。
+ * 新任务编辑器:使用 Workspace overview 中已启用的 Agent 创建会话并发送首条消息。
  */
-export function TaskComposer({ workspaceId, onSessionOpened }: TaskComposerProps) {
+export function TaskComposer({ workspaceId, agent, onSessionOpened }: TaskComposerProps) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,10 +33,8 @@ export function TaskComposer({ workspaceId, onSessionOpened }: TaskComposerProps
     setSending(true);
     setError(null);
     try {
-      const { agents } = await getJSON<{ agents: AgentSummary[] }>("/agents");
-      const agent = agents[0];
       if (!agent) {
-        throw new Error("工作区没有可用的 Agent");
+        return;
       }
       const session = await postJSON<SessionCreated>("/sessions", {
         workspace_id: workspaceId,
@@ -63,13 +56,14 @@ export function TaskComposer({ workspaceId, onSessionOpened }: TaskComposerProps
       <textarea
         aria-label="新任务输入"
         value={draft}
-        disabled={sending}
+        disabled={sending || !agent}
         onChange={(changeEvent) => setDraft(changeEvent.target.value)}
       />
+      {!agent && <p>当前 Workspace 未启用商品运营 Agent</p>}
       <button
         type="button"
         onClick={send}
-        disabled={sending || draft.trim().length === 0}
+        disabled={sending || !agent || draft.trim().length === 0}
       >
         发送任务
       </button>

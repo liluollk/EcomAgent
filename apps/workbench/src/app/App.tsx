@@ -108,6 +108,17 @@ export function App() {
             {feature.label}
           </button>
         ))}
+        {activeWorkspace !== null && (
+          <button
+            type="button"
+            onClick={() => {
+              setActiveWorkspace(null);
+              leaveSession();
+            }}
+          >
+            切换工作区
+          </button>
+        )}
       </nav>
       <main>
         {sessionId !== null ? (
@@ -121,7 +132,6 @@ export function App() {
           activeWorkspace !== null ? (
             <WorkspaceView
               workspaceId={activeWorkspace.id}
-              currentRole="OPERATOR"
               onSessionOpened={openSession}
             />
           ) : (

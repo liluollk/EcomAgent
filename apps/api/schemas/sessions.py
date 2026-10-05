@@ -27,6 +27,7 @@ class SessionView(BaseModel):
     id: UUID
     workspace_id: UUID
     agent_id: UUID
+    agent_version_id: UUID
     title: str | None
     status: str
     created_by_actor_id: UUID
@@ -100,6 +101,7 @@ class SessionSnapshotView(BaseModel):
     id: UUID
     workspace_id: UUID
     agent_id: UUID
+    agent_version_id: UUID
     title: str | None
     status: str
     created_by_actor_id: UUID

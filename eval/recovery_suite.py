@@ -584,6 +584,7 @@ async def _seed_run_and_job(engine: AsyncEngine, environment: IsolatedEnvironmen
             session_row = await SessionRepository(session).create(
                 workspace_id=environment.workspace_id,
                 agent_id=uuid.UUID(str(capability["agent_id"])),
+                agent_version_id=uuid.UUID(str(capability["agent_version_id"])),
                 created_by_actor_id=environment.actor_id,
                 created_by_membership_id=environment.membership_id,
             )

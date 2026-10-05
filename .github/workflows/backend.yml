@@ -1,0 +1,33 @@
+name: backend
+
+on:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: runtime
+          POSTGRES_PASSWORD: runtime
+          POSTGRES_DB: agent_runtime
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runtime -d agent_runtime"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime
+      RUNTIME_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - run: uv run ruff check runtime agents adapters apps eval tests
+      - run: uv run mypy runtime agents adapters apps eval
+      - run: uv run pytest -q

@@ -21,5 +21,15 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    // Playwright E2E 用例(e2e/*.spec.ts)由 `npm run test:e2e` 执行,不进入
+    // Vitest 收集范围;其余保持 Vitest 默认排除不变。
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/cypress/**",
+      "**/.{idea,git,cache,output,temp}/**",
+      "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*",
+      "e2e/**",
+    ],
   },
 });

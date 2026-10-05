@@ -1,48 +1,62 @@
-export type WorkspaceRole = "OWNER" | "OPERATOR";
+export type WorkspaceRole = "WORKSPACE_OWNER" | "OPERATOR";
 
-export type ExecutionMode = "AUTO_EXECUTE" | "AWAIT_CONFIRMATION";
+export type ExecutionMode = "READ_ONLY" | "CONFIRM_WRITES" | "AUTO_EXECUTE";
 
-export interface StoreView {
+export interface WorkspaceOverviewAgent {
   id: string;
+  stable_key: string;
   name: string;
-  platform: string;
+  version: number;
+  status: string;
 }
 
-export interface AgentView {
-  name: string;
-  agentVersion: string;
-}
-
-export interface ModelView {
-  name: string;
-  provider: string;
-}
-
-export interface SkillView {
-  name: string;
-  skillVersion: string;
-}
-
-export interface SourceView {
-  name: string;
-  kind: "LOCAL" | "MCP";
-}
-
-export interface MemberView {
-  id: string;
-  displayName: string;
-  role: WorkspaceRole;
-  resourceScopes: string[];
-}
-
-export interface WorkspaceDetailView {
-  id: string;
-  name: string;
-  executionMode: ExecutionMode;
-  stores: StoreView[];
-  agents: AgentView[];
-  models: ModelView[];
-  skills: SkillView[];
-  sources: SourceView[];
-  members: MemberView[];
+export interface WorkspaceOverview {
+  workspace: {
+    id: string;
+    name: string;
+    status: string;
+    execution_mode: ExecutionMode;
+    state_version: number;
+  };
+  current_membership: {
+    id: string;
+    role: WorkspaceRole;
+    permissions: string[];
+    resource_scopes: Record<string, { mode: string; resource_ids: string[] }>;
+  };
+  stores: Array<{ id: string; name: string; platform: string; status: string }>;
+  agent: WorkspaceOverviewAgent | null;
+  model_connections: Array<{
+    id: string;
+    stable_key: string;
+    name: string;
+    backend_type: string;
+    base_url: string;
+    masked_key: string | null;
+    model: string;
+    version: number;
+    updated_at: string | null;
+  }>;
+  skills: Array<{
+    id: string;
+    stable_key: string;
+    name: string;
+    latest_version: number | null;
+    status: string | null;
+  }>;
+  sources: Array<{
+    id: string;
+    stable_key: string;
+    kind: string;
+    name: string;
+    latest_version: number | null;
+    status: string | null;
+  }>;
+  business_policies: Array<{
+    id: string;
+    stable_key: string;
+    name: string;
+    latest_version: number | null;
+    status: string | null;
+  }>;
 }

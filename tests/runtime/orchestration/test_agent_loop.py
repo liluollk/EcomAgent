@@ -1063,12 +1063,14 @@ async def _seed_committed_host_scenario(engine: AsyncEngine) -> dict[str, Any]:
             session_one = await SessionRepository(session).create(
                 workspace_id=workspace.id,
                 agent_id=agent.id,
+                agent_version_id=agent_version.id,
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
             )
             session_two = await SessionRepository(session).create(
                 workspace_id=workspace.id,
                 agent_id=agent.id,
+                agent_version_id=agent_version.id,
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
             )

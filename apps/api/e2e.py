@@ -40,6 +40,7 @@ from runtime.persistence.base import (
     MembershipRole,
     ResourceScopeMode,
 )
+from runtime.persistence.models.configuration import WorkspaceAgentBinding
 from runtime.persistence.models.identity import (
     MembershipPermission,
     MembershipResourceScopeMode,
@@ -155,6 +156,26 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
     try:
         async with seed_session.begin():
             await _reset_workspace_runtime_rows(seed_session, workspace.id)
+            binding = (
+                await seed_session.scalars(
+                    select(WorkspaceAgentBinding).where(
+                        WorkspaceAgentBinding.workspace_id == workspace.id,
+                        WorkspaceAgentBinding.agent_version_id
+                        == capability["agent_version_id"],
+                    )
+                )
+            ).one_or_none()
+            if binding is None:
+                seed_session.add(
+                    WorkspaceAgentBinding(
+                        id=uuid.uuid4(),
+                        workspace_id=workspace.id,
+                        agent_version_id=capability["agent_version_id"],
+                        enabled=True,
+                    )
+                )
+            else:
+                binding.enabled = True
             store = (
                 await seed_session.scalars(
                     select(Store).where(
@@ -259,6 +280,7 @@ async def _reset_workspace_runtime_rows(session: Any, workspace_id: uuid.UUID) -
         "DELETE FROM run_policy_snapshots WHERE workspace_id = :ws",
         "DELETE FROM runs WHERE workspace_id = :ws",
         "DELETE FROM sessions WHERE workspace_id = :ws",
+        "DELETE FROM workspace_agent_bindings WHERE workspace_id = :ws",
     )
     for text in statements:
         await session.execute(sa.text(text), {"ws": workspace_id})
