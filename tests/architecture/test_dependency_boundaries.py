@@ -1,3 +1,4 @@
+import ast
 import re
 from pathlib import Path
 
@@ -32,6 +33,44 @@ def test_runtime_source_has_no_product_domain_vocabulary() -> None:
             if pattern.search(line):
                 violations.append(f"{path}:{line_number}: {line.strip()}")
     assert violations == []
+
+
+def _called_names(method: ast.AsyncFunctionDef) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(method):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+def test_product_application_delegates_request_resume_commands() -> None:
+    tree = ast.parse(
+        Path("composition/product_operations.py").read_text(encoding="utf-8")
+    )
+    product_application = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ProductApplication"
+    )
+    methods = {
+        node.name: node
+        for node in product_application.body
+        if isinstance(node, ast.AsyncFunctionDef)
+    }
+    forbidden_direct_services = {
+        "InputService",
+        "RunService",
+        "ConfirmationService",
+        "JobRepository",
+    }
+    for method_name in ("answer", "confirm", "reject_confirmation"):
+        calls = _called_names(methods[method_name])
+        assert "SessionCommandService" in calls
+        assert calls.isdisjoint(forbidden_direct_services)
 
 
 def test_runtime_does_not_import_upper_layers() -> None:

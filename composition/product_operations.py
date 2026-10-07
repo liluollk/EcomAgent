@@ -143,11 +143,9 @@ from runtime.execution.pretool.pipeline import (
 )
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.reconciliation import ReconciliationService
-from runtime.execution.run_service import RunService
 from runtime.execution.tool_registry import RuntimeToolRegistry
 from runtime.execution.tool_result_processor import ToolExecutionReceipt
 from runtime.interaction.confirmation_service import ConfirmationService
-from runtime.interaction.input_service import InputService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
 from runtime.jobs.lease_service import Lease, LeaseOutcome, LeaseService
@@ -197,7 +195,6 @@ ADAPTER_KEY: Final = "mock-commerce"
 BACKEND_KEY: Final = "product-scripted"
 MODEL_CONNECTION_KEY: Final = "product-worker-model"
 
-_RUN_RESUMED_EVENT: Final = "RUN_RESUMED"
 _WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset({"operation", "reconciliation"})
 
 _LIMITS: Final = RunLimits(
@@ -1113,62 +1110,30 @@ class ProductApplication:
 
     async def answer(self, request_id: uuid.UUID, values: Mapping[str, str]) -> RunView:
         """回答 Input Request 并恢复推进(合并挂起参数后重走完整管线)。"""
-        run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
             async with session.begin():
-                answered = await InputService(
-                    session, workspace_id=self._workspace_id, actor_id=self._actor_id
-                ).answer(request_id, dict(values))
-                run_id = answered.run_id
-                await RunService(
-                    session=session, workspace_id=self._workspace_id
-                ).transition_run(
-                    run_id=run_id,
-                    target_status=RunStatus.QUEUED,
-                    event_kind=_RUN_RESUMED_EVENT,
-                    event_payload={"input_request_id": str(request_id)},
-                    expected_status=RunStatus.WAITING_INPUT,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).answer_input_request(request_id, dict(values))
+                run_id = decision.run_id
         finally:
             await session.close()
-        assert run_id is not None
         self._answered.update({key: str(value) for key, value in values.items()})
         await self._push(run_id)
         return await self.run_view(run_id)
 
     async def confirm(self, confirmation_id: uuid.UUID) -> RunView:
         """接受确认并恢复推进(挂起 ToolCall 重走完整 PreToolUse 后执行)。"""
-        run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
             async with session.begin():
-                request = await ConfirmationService(
-                    session, workspace_id=self._workspace_id, actor_id=self._actor_id
-                ).accept(confirmation_id)
-                run_id = request.run_id
-                await RunService(
-                    session=session, workspace_id=self._workspace_id
-                ).transition_run(
-                    run_id=run_id,
-                    target_status=RunStatus.QUEUED,
-                    event_kind=_RUN_RESUMED_EVENT,
-                    event_payload={"confirmation_id": str(confirmation_id)},
-                    expected_status=RunStatus.WAITING_CONFIRMATION,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).accept_confirmation(confirmation_id)
+                run_id = decision.run_id
         finally:
             await session.close()
-        assert run_id is not None
         await self._push(run_id)
         return await self.run_view(run_id)
 
@@ -1188,34 +1153,15 @@ class ProductApplication:
 
     async def reject_confirmation(self, confirmation_id: uuid.UUID) -> RunView:
         """拒绝写前确认并恢复原 Run;挂起写调用经 PreToolUse 拒绝后结束。"""
-        run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
             async with session.begin():
-                request = await ConfirmationService(
-                    session, workspace_id=self._workspace_id, actor_id=self._actor_id
-                ).reject(confirmation_id)
-                run_id = request.run_id
-                await RunService(
-                    session=session, workspace_id=self._workspace_id
-                ).transition_run(
-                    run_id=run_id,
-                    target_status=RunStatus.QUEUED,
-                    event_kind=_RUN_RESUMED_EVENT,
-                    event_payload={
-                        "confirmation_id": str(confirmation_id),
-                        "decision": "REJECTED",
-                    },
-                    expected_status=RunStatus.WAITING_CONFIRMATION,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).reject_confirmation(confirmation_id)
+                run_id = decision.run_id
         finally:
             await session.close()
-        assert run_id is not None
         await self._push(run_id)
         return await self.run_view(run_id)
 
