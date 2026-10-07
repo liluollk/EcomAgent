@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from runtime.backend.protocol import BackendToolCall
 from runtime.interfaces.state import AssistantMessageStatus, MessageType
 from runtime.orchestration.context import ConversationMessage
 from runtime.persistence.base import MessageRole, MessageStatus
@@ -113,6 +114,20 @@ class MessageStore:
         await self._session.flush()
         return row
 
+    async def set_assistant_tool_calls(
+        self, message_id: uuid.UUID, tool_calls: tuple[BackendToolCall, ...]
+    ) -> None:
+        """把模型原始函数调用保存在 Assistant Message 上,用于恢复合法对话历史。"""
+        row = await self._session.get(Message, message_id)
+        if row is None or row.workspace_id != self._workspace_id:
+            raise LookupError(f"assistant message {message_id} not found")
+        if row.role is not MessageRole.ASSISTANT or row.status is not MessageStatus.COMPLETED:
+            raise ValueError("tool calls can only be attached to a completed assistant message")
+        row.structured_content = {
+            "tool_calls": [tool_call.model_dump(mode="json") for tool_call in tool_calls]
+        }
+        await self._session.flush()
+
     async def append_session_summary(
         self,
         *,
@@ -176,10 +191,22 @@ class MessageStore:
             role=MessageType(row.role.value),
             content=row.content,
             status=status,
+            call_id=(row.structured_content or {}).get("call_id")
+            if row.role is MessageRole.TOOL
+            else None,
+            name=(row.structured_content or {}).get("tool_name")
+            if row.role is MessageRole.TOOL
+            else None,
             covered_from_sequence=row.covered_from_sequence,
             covered_to_sequence=row.covered_to_sequence,
             summary_schema_version=row.summary_schema_version,
             source_hash=row.source_hash,
+            tool_calls=tuple(
+                BackendToolCall.model_validate(tool_call)
+                for tool_call in (row.structured_content or {}).get("tool_calls", [])
+            )
+            if row.role is MessageRole.ASSISTANT
+            else (),
         )
 
 

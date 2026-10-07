@@ -115,6 +115,7 @@ class PreToolDecision(BaseModel):
     schema_diagnostic: SchemaDiagnostic | None = None
     confirmation_spec: ConfirmationSpec | None = None
     policy_decision: PolicyDecision | None = None
+    normalized_arguments: Mapping[str, Any] | None = None
 
 
 def allow() -> PreToolDecision:

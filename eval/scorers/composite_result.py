@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict
 from eval.results import CaseResult
 from eval.schema import Scenario
 from eval.scorers.decision import DecisionScore, DecisionScorer
+from eval.scorers.grounding import GroundingScore, GroundingScorer
+from eval.scorers.process import ProcessScore, ProcessScorer
 from eval.scorers.recovery import RecoveryScore, RecoveryScorer
 from eval.scorers.safety import SafetyScore, SafetyScorer
 from eval.scorers.task_completion import TaskCompletionScore, TaskCompletionScorer
@@ -26,6 +28,8 @@ class ScoredCaseResult(BaseModel):
     scorer_version: str
     task: TaskCompletionScore
     decision: DecisionScore
+    process: ProcessScore
+    grounding: GroundingScore
     safety: SafetyScore
     recovery: RecoveryScore
 
@@ -44,6 +48,8 @@ def score_case(
         scorer_version=scorer_version,
         task=TaskCompletionScorer(scenario).score(result),
         decision=DecisionScorer(scenario).score(result),
+        process=ProcessScorer(scenario).score(result),
+        grounding=GroundingScorer(scenario).score(result),
         safety=SafetyScorer(scenario).score(result),
         recovery=RecoveryScorer(scenario).score(result),
     )

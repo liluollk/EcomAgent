@@ -22,6 +22,7 @@ from runtime.capabilities.registry import SkillDefinition
 
 
 SKILL_KEY: Final = "product_maintenance"
+SKILL_VERSION: Final = 2
 
 PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
 你是商品改价维护技能。按以下任务方法完成改价请求:
@@ -46,6 +47,7 @@ PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
 
 PRODUCT_MAINTENANCE_SKILL: Final = SkillDefinition(
     name="商品维护改价技能",
+    description="查询商品现状、对比店铺价格并在受控流程中执行改价。",
     required_tool_keys=frozenset(
         {
             SEARCH_PRODUCTS_DEFINITION.stable_key,
@@ -62,4 +64,5 @@ __all__ = [
     "PRODUCT_MAINTENANCE_SKILL",
     "PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS",
     "SKILL_KEY",
+    "SKILL_VERSION",
 ]

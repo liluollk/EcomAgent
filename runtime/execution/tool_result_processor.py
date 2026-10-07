@@ -103,8 +103,16 @@ class ToolResultProcessor:
         self._limits = limits
         self._max_authoritative_bytes = max_authoritative_bytes
 
-    async def process(self, receipt: ToolExecutionReceipt) -> ProcessedToolResult:
+    async def process(
+        self,
+        receipt: ToolExecutionReceipt,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProcessedToolResult:
         """按固定顺序执行协议校验 → 分类 → Schema 校验 → 脱敏 → 限制 → 投影。"""
+        selected_schema = (
+            self._output_schema if output_schema is None else dict(output_schema)
+        )
         # 1. 协议校验:payload 必须是 JSON 对象或 None。
         tool_call_error = receipt.error_code
         payload: Mapping[str, Any] | None = receipt.payload
@@ -118,8 +126,8 @@ class ToolResultProcessor:
         # 3. Output Schema 校验:失败只置错误码,不改变已确定的执行结果。
         if (
             payload is not None
-            and self._output_schema
-            and not _validate_against_schema(payload, self._output_schema)
+            and selected_schema
+            and not _validate_against_schema(payload, selected_schema)
         ):
             tool_call_error = INVALID_TOOL_RESULT
 
@@ -135,7 +143,7 @@ class ToolResultProcessor:
                 )
 
         # 6. 模型投影:仅 schema 声明字段 + 确定性裁剪;前端安全视图同源组装。
-        allowed_fields = _declared_fields(self._output_schema)
+        allowed_fields = _declared_fields(selected_schema)
         projection = build_context_projection(
             payload, allowed_fields=allowed_fields, limits=self._limits
         )

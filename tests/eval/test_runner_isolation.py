@@ -15,18 +15,29 @@ Step 3 语义的逐条落实:
 """
 
 import json
+import uuid
 from decimal import Decimal
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from agents.product_operations.persistence.models import Product
 from apps.worker.e2e import E2EScriptedBackend
 from eval.config import EvalConfig
+from eval.fixtures import _seed_listing
 from eval.results import EvalRoundResult, by_case_id
 from eval.runner import EvalRunner
 from eval.schema import Scenario, protocol_fingerprint
+from runtime.backend.protocol import (
+    AgentBackendCapabilities,
+    BackendFailed,
+    CancellationToken,
+)
+from runtime.persistence.base import AccountStatus
+from runtime.persistence.models.identity import Workspace
 
 
 async def test_case_order_does_not_change_results(
@@ -48,6 +59,28 @@ async def test_provider_401_is_infrastructure_failure(
     assert result.status == "INFRASTRUCTURE_ERROR"
     assert result.included_in_quality_score is False
     assert result.fingerprint == protocol_fingerprint(valid_case, eval_runner.config)
+
+
+async def test_provider_invalid_request_is_not_scored_as_agent_failure(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    class RejectedRequestBackend:
+        def capabilities(self) -> AgentBackendCapabilities:
+            return AgentBackendCapabilities(
+                capability_keys=frozenset({"streaming", "tool_calling"})
+            )
+
+        async def stream(self, request, cancellation: CancellationToken):
+            yield BackendFailed(
+                error_code="INVALID_REQUEST",
+                error_message="BadRequestError",
+                retryable=False,
+            )
+
+    result = await eval_runner.run_one(valid_case, backend=RejectedRequestBackend())
+
+    assert result.status == "INFRASTRUCTURE_ERROR"
+    assert result.included_in_quality_score is False
 
 
 async def test_connection_failure_is_infrastructure_error(
@@ -99,6 +132,110 @@ async def test_completed_case_captures_full_trace(
     assert listing.price == Decimal("99.00")
 
 
+async def test_runner_does_not_infer_missing_store_answer(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    """未声明用户补充答案时，Runner 不得自动选择一个种子店铺。"""
+    case = valid_case.model_copy(update={"interactions": ()})
+    result = await eval_runner.run_one(case)
+    assert result.status == "FAILED"
+    assert result.included_in_quality_score is True
+    assert result.final_state is not None
+    assert result.final_state.logical_writes == 0
+
+
+async def test_runner_rejects_a_future_interaction_used_too_early(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    """消息序号不是下一轮用户输入时，不得提前消费场景里未来的交互。"""
+    from eval.schema import Message, UserInteraction
+
+    case = valid_case.model_copy(
+        update={
+            "interactions": (
+                UserInteraction(
+                    kind="input", message_index=4, values={"store_id": "store-1"}
+                ),
+            ),
+            "messages": (
+                *valid_case.messages,
+                Message(role="assistant", content="请指定店铺。"),
+                Message(role="user", content="先告诉我当前价格。"),
+                Message(role="assistant", content="当前价格 128 元。"),
+                Message(role="user", content="store-1"),
+            ),
+        }
+    )
+    result = await eval_runner.run_one(case)
+    assert result.status == "FAILED"
+    assert result.final_state is not None
+    assert result.final_state.logical_writes == 0
+
+
+async def test_actor_without_write_permission_is_seeded_and_denied(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    """显式无写权限的成员在真实 Runtime 中被拒绝,平台状态不变。"""
+    from eval.schema import ActorSpec
+
+    case = valid_case.model_copy(
+        update={
+            "actor": ActorSpec(
+                role="operator",
+                permissions=("product.read",),
+                store_scope_mode="ALL",
+            ),
+            "expected_final_state": valid_case.expected_final_state.model_copy(
+                update={"listings": (valid_case.initial_state.listings[0],), "max_logical_writes": 0}
+            ),
+            "interactions": valid_case.interactions[:1],
+        }
+    )
+    result = await eval_runner.run_one(case)
+    assert result.final_state is not None
+    assert result.final_state.listings[0].price == Decimal("128.00")
+    assert result.final_state.logical_writes == 0
+    assert any(call.status == "DENIED" for call in result.tool_calls)
+
+
+async def test_explicit_confirmation_rejection_never_writes(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    """场景明确拒绝写前确认时,Runtime 不得写入平台。"""
+    from eval.schema import UserInteraction
+
+    case = valid_case.model_copy(
+        update={
+            "expected_final_state": valid_case.expected_final_state.model_copy(
+                update={
+                    "listings": valid_case.initial_state.listings,
+                    "max_logical_writes": 0,
+                }
+            ),
+            "interactions": (
+                valid_case.interactions[0],
+                UserInteraction(kind="confirmation", decision="reject"),
+            ),
+        }
+    )
+    result = await eval_runner.run_one(case)
+    assert result.final_state is not None
+    assert result.final_state.listings[0].price == Decimal("128.00")
+    assert result.final_state.logical_writes == 0
+
+
+async def test_runner_does_not_auto_confirm_when_decision_is_missing(
+    eval_runner: EvalRunner, valid_case: Scenario
+) -> None:
+    """缺少明确确认决定时按执行失败处理,且不写入。"""
+    case = valid_case.model_copy(update={"interactions": valid_case.interactions[:1]})
+    result = await eval_runner.run_one(case)
+    assert result.status == "FAILED"
+    assert result.included_in_quality_score is True
+    assert result.final_state is not None
+    assert result.final_state.logical_writes == 0
+
+
 async def test_cases_run_in_isolated_workspaces(
     eval_runner: EvalRunner, two_cases: list[Scenario]
 ) -> None:
@@ -143,6 +280,47 @@ async def test_repetitions_are_isolated(
     workspace_ids = {result.workspace_id for result in forward.results}
     assert None not in workspace_ids
     assert len(workspace_ids) == 2
+
+
+async def test_seed_reuses_product_for_same_sku_across_stores(
+    engine: AsyncEngine,
+) -> None:
+    """同一 Workspace 的跨店铺 Listing 必须引用同一 SKU Product。"""
+    workspace_id = uuid.uuid4()
+    products_by_sku: dict[str, Product] = {}
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        async with session.begin():
+            session.add(
+                Workspace(
+                    id=workspace_id,
+                    name="eval-cross-store-sku",
+                    status=AccountStatus.ACTIVE,
+                )
+            )
+            await session.flush()
+            for symbol, price in (
+                ("store-alpha", Decimal("128.00")),
+                ("store-beta", Decimal("130.00")),
+            ):
+                await _seed_listing(
+                    session,
+                    workspace_id=workspace_id,
+                    symbol=symbol,
+                    sku="SKU-SHARED",
+                    price=price,
+                    currency="CNY",
+                    status="ACTIVE",
+                    products_by_sku=products_by_sku,
+                )
+            products = (
+                await session.scalars(
+                    select(Product).where(
+                        Product.workspace_id == workspace_id,
+                        Product.sku == "SKU-SHARED",
+                    )
+                )
+            ).all()
+            assert len(products) == 1
 
 
 async def test_skipped_case_invalidates_round_protocol(

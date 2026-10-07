@@ -1,6 +1,6 @@
 """阶段 3 Gate:商品改价安全矩阵(计划 03 Task 7;架构文档 §5、§6、§7、§9)。
 
-``safety_case_runner`` 夹具封装 ``product_runtime`` 组装(真库 + 确定性脚本
+``safety_case_runner`` 夹具封装 ``product_application`` 组装(真库 + 确定性脚本
 模型),按 case_id 布置场景环境(店铺范围、成员权限、活动锁价、Listing
 版本、平台故障),驱动 start/confirm/recover/重复提交到终态,并统计:
 
@@ -60,7 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, PriceLock, Store
-from apps.worker.assembly import ProductRuntime, RunView
+from apps.worker.assembly import ProductApplication, RunView
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import ResourceScopeMode, ToolCallStatus
@@ -118,25 +118,27 @@ _CASES: Mapping[str, _CaseSpec] = {
 class SafetyCaseRunner:
     """安全矩阵驱动器:布置场景 → 执行闭环 → 统计权威结果。"""
 
-    def __init__(self, *, runtime: ProductRuntime, engine: AsyncEngine) -> None:
-        self._runtime = runtime
+    def __init__(
+        self, *, application: ProductApplication, engine: AsyncEngine
+    ) -> None:
+        self._application = application
         self._engine = engine
 
     @property
-    def runtime(self) -> ProductRuntime:
-        return self._runtime
+    def application(self) -> ProductApplication:
+        return self._application
 
     async def run(self, case_id: str) -> SafetyCaseResult:
         driver = _CASE_DRIVERS.get(case_id)
         if driver is None:
             raise KeyError(f"unknown safety case: {case_id}")
         run = await driver(self)
-        runtime = self._runtime
-        snapshot = await runtime.tool_call_snapshot(run.run_id)
+        application = self._application
+        snapshot = await application.tool_call_snapshot(run.run_id)
         assert snapshot is not None, f"case {case_id} produced no tool call"
         writes = 0
         if snapshot.operation_id is not None:
-            writes = await runtime.adapter.count_logical_writes(
+            writes = await application.adapter.count_logical_writes(
                 str(snapshot.operation_id)
             )
         spec = _CASES[case_id]
@@ -146,8 +148,8 @@ class SafetyCaseRunner:
             tool_call_status=ToolCallStatus(snapshot.status),
             failure_code=snapshot.failure_code,
             authoritative_write_count=writes,
-            authoritative_price=await runtime.authoritative_price(
-                str(runtime.seed_ids.store_id), "SKU-001"
+            authoritative_price=await application.authoritative_price(
+                str(application.seed_ids.store_id), "SKU-001"
             ),
             expected_price=spec.authoritative_price,
         )
@@ -164,7 +166,7 @@ class SafetyCaseRunner:
 
     async def seed_out_of_scope_store(self) -> str:
         """在工作区补一家抖音旗舰店(不在成员资源范围内,可被证据匹配)。"""
-        ids = self._runtime.seed_ids
+        ids = self._application.seed_ids
         store = Store(
             id=uuid.uuid4(),
             workspace_id=ids.workspace_id,
@@ -182,7 +184,7 @@ class SafetyCaseRunner:
 
     async def restrict_store_scope_to_default(self) -> None:
         """把成员的 store 范围从 ALL 收窄为 SELECTED(仅默认淘宝店)。"""
-        ids = self._runtime.seed_ids
+        ids = self._application.seed_ids
 
         async def action(session: AsyncSession) -> None:
             await session.execute(
@@ -207,7 +209,7 @@ class SafetyCaseRunner:
 
     async def revoke_write_permission(self) -> None:
         """撤销成员的 product.price.write 权限。"""
-        ids = self._runtime.seed_ids
+        ids = self._application.seed_ids
 
         async def action(session: AsyncSession) -> None:
             await session.execute(
@@ -222,7 +224,7 @@ class SafetyCaseRunner:
 
     async def add_active_price_lock(self) -> None:
         """给默认 Listing 加一个当前生效的活动锁价。"""
-        ids = self._runtime.seed_ids
+        ids = self._application.seed_ids
         now = datetime.now(tz=UTC)
         lock = PriceLock(
             id=uuid.uuid4(),
@@ -240,7 +242,7 @@ class SafetyCaseRunner:
 
     async def bump_listing_version(self) -> None:
         """并发修改默认 Listing(版本 +1),模拟确认后的平台侧变更。"""
-        ids = self._runtime.seed_ids
+        ids = self._application.seed_ids
 
         async def action(session: AsyncSession) -> None:
             await session.execute(
@@ -260,7 +262,7 @@ class SafetyCaseRunner:
         self, *, store_id: str | None, message: str, price: int
     ) -> RunView:
         """脚本化一轮 update_price ToolCall 并发起 Run。"""
-        self._runtime.scripted_backend.set_rounds(
+        self._application.scripted_backend.set_rounds(
             [
                 [
                     _update_price_call(store_id, "SKU-001", price),
@@ -268,11 +270,11 @@ class SafetyCaseRunner:
                 ]
             ]
         )
-        return await self._runtime.start(message)
+        return await self._application.start(message)
 
     async def start_read_snapshot(self, *, store_id: str, message: str) -> RunView:
         """脚本化一轮 get_product_snapshot ToolCall(READ Tool)并发起 Run。"""
-        self._runtime.scripted_backend.set_rounds(
+        self._application.scripted_backend.set_rounds(
             [
                 [
                     ToolCallCompleted(
@@ -284,7 +286,7 @@ class SafetyCaseRunner:
                 ]
             ]
         )
-        return await self._runtime.start(message)
+        return await self._application.start(message)
 
 
 @dataclass(frozen=True)
@@ -337,44 +339,44 @@ async def _drive_out_of_scope_store(runner: SafetyCaseRunner) -> RunView:
 
 async def _drive_below_floor_price(runner: SafetyCaseRunner) -> RunView:
     return await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 30 元",
         price=30,
     )
 
 
 async def _drive_response_lost(runner: SafetyCaseRunner) -> RunView:
-    runner.runtime.adapter.faults.inject("response_lost_after_commit")
+    runner.application.adapter.faults.inject("response_lost_after_commit")
     run = await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
     assert run.status is RunStatus.WAITING_CONFIRMATION
-    run = await runner.runtime.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
+    run = await runner.application.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
     assert run.status is RunStatus.WAITING_RECONCILIATION
-    return await runner.runtime.recover(run.run_id)
+    return await runner.application.recover(run.run_id)
 
 
 async def _drive_duplicate_submit(runner: SafetyCaseRunner) -> RunView:
     run = await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
     assert run.status is RunStatus.WAITING_CONFIRMATION
-    run = await runner.runtime.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
+    run = await runner.application.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
     assert run.status is RunStatus.COMPLETED
-    snapshot = await runner.runtime.tool_call_snapshot(run.run_id)
+    snapshot = await runner.application.tool_call_snapshot(run.run_id)
     assert snapshot is not None
     operation_id = snapshot.operation_id
     assert operation_id is not None
-    replay = await runner.runtime.write_handler.execute(
+    replay = await runner.application.write_handler.execute(
         tool_call_id=uuid.uuid4(),
         operation_id=operation_id,
         idempotency_key=f"op:{operation_id}",
         normalized_arguments={
-            "store_id": str(runner.runtime.seed_ids.store_id),
+            "store_id": str(runner.application.seed_ids.store_id),
             "sku": "SKU-001",
             "target_price": 99,
         },
@@ -386,7 +388,7 @@ async def _drive_duplicate_submit(runner: SafetyCaseRunner) -> RunView:
 async def _drive_missing_write_permission(runner: SafetyCaseRunner) -> RunView:
     await runner.revoke_write_permission()
     return await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
@@ -395,7 +397,7 @@ async def _drive_missing_write_permission(runner: SafetyCaseRunner) -> RunView:
 async def _drive_read_only_tool(runner: SafetyCaseRunner) -> RunView:
     """READ Tool 全链路执行:不需要确认,也不产生任何权威写。"""
     return await runner.start_read_snapshot(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="看一下淘宝旗舰店 SKU-001 现在的售价",
     )
 
@@ -403,7 +405,7 @@ async def _drive_read_only_tool(runner: SafetyCaseRunner) -> RunView:
 async def _drive_active_price_lock(runner: SafetyCaseRunner) -> RunView:
     await runner.add_active_price_lock()
     return await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
@@ -413,26 +415,26 @@ async def _drive_permission_revoked_after_confirmation(
     runner: SafetyCaseRunner,
 ) -> RunView:
     run = await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
     assert run.status is RunStatus.WAITING_CONFIRMATION
     await runner.revoke_write_permission()
-    return await runner.runtime.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
+    return await runner.application.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
 
 
 async def _drive_listing_version_changed_after_confirmation(
     runner: SafetyCaseRunner,
 ) -> RunView:
     run = await runner.start_update_price(
-        store_id=str(runner.runtime.seed_ids.store_id),
+        store_id=str(runner.application.seed_ids.store_id),
         message="把淘宝旗舰店 SKU-001 改成 99 元",
         price=99,
     )
     assert run.status is RunStatus.WAITING_CONFIRMATION
     await runner.bump_listing_version()
-    return await runner.runtime.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
+    return await runner.application.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
 
 
 _CASE_DRIVERS: Mapping[str, Callable[[SafetyCaseRunner], Awaitable[RunView]]] = {
@@ -455,9 +457,9 @@ _CASE_DRIVERS: Mapping[str, Callable[[SafetyCaseRunner], Awaitable[RunView]]] = 
 
 @pytest.fixture()
 async def safety_case_runner(
-    engine: AsyncEngine, product_runtime: ProductRuntime
+    engine: AsyncEngine, product_application: ProductApplication
 ) -> SafetyCaseRunner:
-    return SafetyCaseRunner(runtime=product_runtime, engine=engine)
+    return SafetyCaseRunner(application=product_application, engine=engine)
 
 
 # ---- 计划原文参数化(6 条) --------------------------------------------

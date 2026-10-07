@@ -421,10 +421,18 @@ async def test_pretool_adapters_conform_to_injection_protocol(
 ) -> None:
     actor = actor_with_taobao_only(input_catalog)
 
-    normalized = await ProductPreToolNormalizer().normalize(
-        arguments={"store_id": " s-1 ", "sku": " SKU-001 ", "target_price": "99"}
+    normalized = await ProductPreToolNormalizer(
+        input_resolver,
+        user_message="把淘宝旗舰店的 SKU-001 改成 99 元",
+        actor=actor,
+    ).normalize(
+        arguments={
+            "store_id": "淘宝旗舰店",
+            "sku": " SKU-001 ",
+            "target_price": "99",
+        }
     )
-    assert normalized["store_id"] == "s-1"
+    assert normalized["store_id"] == str(input_catalog.taobao.id)
     assert normalized["target_price"] == Decimal("99.00")
 
     provenance_resolver = ProductPreToolProvenanceResolver(

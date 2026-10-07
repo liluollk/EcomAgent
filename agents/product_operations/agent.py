@@ -21,13 +21,15 @@ from agents.product_operations.tools.definitions import (
 )
 from agents.product_operations.tools.update_price import STABLE_KEY_UPDATE_PRICE
 from runtime.capabilities.registry import AgentDefinition
+from runtime.capabilities.skill_activation import LOAD_SKILL_KEY
 
 
 AGENT_KEY: Final = "product-maintenance"
+AGENT_VERSION: Final = 2
 
 PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
     name="ProductMaintenanceAgent",
-    system_prompt_version="product-agent-prompt-v1",
+    system_prompt_version="product-agent-prompt-v2",
     required_backend_capabilities=frozenset({"streaming", "tool_calling"}),
     required_skill_keys=frozenset({SKILL_KEY}),
     required_tool_keys=frozenset(
@@ -36,10 +38,11 @@ PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
             GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
             COMPARE_LISTING_PRICES_DEFINITION.stable_key,
             STABLE_KEY_UPDATE_PRICE,
+            LOAD_SKILL_KEY,
         }
     ),
     required_source_keys=frozenset(),
 )
 
 
-__all__ = ["AGENT_KEY", "PRODUCT_AGENT_DEFINITION"]
+__all__ = ["AGENT_KEY", "AGENT_VERSION", "PRODUCT_AGENT_DEFINITION"]

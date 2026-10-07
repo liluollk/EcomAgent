@@ -38,6 +38,8 @@ from eval.results import (
 )
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.decision import DecisionScore
+from eval.scorers.grounding import GroundingScore
+from eval.scorers.process import ProcessScore
 from eval.scorers.recovery import RecoveryScore
 from eval.scorers.safety import SafetyScore
 from eval.scorers.task_completion import TaskCompletionScore
@@ -47,8 +49,11 @@ REQUIRED_METRIC_KEYS = {
     "task_completion_rate",
     "decision_accuracy",
     "dangerous_side_effect_rate",
+    "dangerous_attempt_rate",
     "false_rejection_rate",
     "recovery_success_rate",
+    "process_correctness_rate",
+    "answer_grounding_rate",
 }
 
 
@@ -91,6 +96,7 @@ def _scored(
     decision_total: int = 1,
     false_rejections: int = 0,
     actual_dangerous: int = 0,
+    safety_applicable: bool = False,
     recovery_success: bool = True,
     duplicate_writes: int = 0,
 ) -> ScoredCaseResult:
@@ -100,6 +106,7 @@ def _scored(
         scorer_version="v1",
         task=TaskCompletionScore(
             passed=task_passed,
+            run_completed=True,
             state_matches=task_passed,
             logical_writes_within_limit=True,
             asserted_listings=1,
@@ -110,16 +117,25 @@ def _scored(
             decision_accuracy=(decision_correct == decision_total),
             correct_decisions=decision_correct,
             total_decisions=decision_total,
+            legal_write_decisions=decision_total,
             false_rejections=false_rejections,
             false_allowances=0,
         ),
+        process=ProcessScore(
+            applicable=False, passed=None, checked_constraints=0
+        ),
+        grounding=GroundingScore(
+            applicable=False, passed=None, expected_facts=0, verified_facts=0
+        ),
         safety=SafetyScore(
+            applicable=safety_applicable,
             passed=(actual_dangerous == 0),
             dangerous_attempts=actual_dangerous,
             prevented_attempts=0,
             actual_dangerous_side_effects=actual_dangerous,
         ),
         recovery=RecoveryScore(
+            recovery_applicable=True,
             recovery_success=recovery_success,
             unknown_encounters=0,
             unknown_handled_correctly=0,
@@ -159,6 +175,7 @@ def sample_results(*, api_key: str | None = None) -> list[CaseResult | ScoredCas
             decision_correct=0,
             false_rejections=1,
             actual_dangerous=1,
+            safety_applicable=True,
             recovery_success=False,
             duplicate_writes=1,
         ),
@@ -215,8 +232,39 @@ def test_infrastructure_errors_stay_out_of_denominator(
         config=fixed_eval_config(),
     )
     assert report["totals"]["quality_denominator"] == 2
-    assert report["metrics"]["task_completion_rate"] == pytest.approx(0.5)
 
+
+def test_process_and_grounding_rates_use_only_declared_applicable_cases(
+    report_builder: ReportBuilder,
+) -> None:
+    scored = _scored("case-process")
+    scored = scored.model_copy(
+        update={
+            "process": ProcessScore(
+                applicable=True,
+                passed=False,
+                checked_constraints=1,
+                violations=("wrong_order:get_listing->update_price",),
+            ),
+            "grounding": GroundingScore(
+                applicable=True,
+                passed=True,
+                expected_facts=1,
+                verified_facts=1,
+            ),
+        }
+    )
+    report = report_builder.build([_case_result("case-process"), scored])
+    assert report["metrics"]["process_correctness_rate"] == 0.0
+    assert report["metrics"]["answer_grounding_rate"] == 1.0
+    assert report["metrics"]["denominators"]["process_applicable_cases"] == 1
+    assert report["metrics"]["denominators"]["grounding_applicable_cases"] == 1
+
+
+def test_infrastructure_errors_stay_out_of_quality_denominator(
+    report_builder: ReportBuilder,
+) -> None:
+    """基础设施错误不入质量分母,但在报告中可见。"""
     infra = _case_result(
         "case-infra",
         status="INFRASTRUCTURE_ERROR",
@@ -251,12 +299,14 @@ def test_metrics_reflect_dimension_failures(report_builder: ReportBuilder) -> No
     metrics = report["metrics"]
     assert metrics["task_completion_rate"] == pytest.approx(0.5)
     assert metrics["decision_accuracy"] == pytest.approx(0.5)
-    assert metrics["dangerous_side_effect_rate"] == pytest.approx(0.5)
+    assert metrics["dangerous_side_effect_rate"] == pytest.approx(1.0)
+    assert metrics["dangerous_attempt_rate"] == pytest.approx(1.0)
     assert metrics["false_rejection_rate"] == pytest.approx(0.5)
     assert metrics["recovery_success_rate"] == pytest.approx(0.5)
     assert metrics["duplicate_write_rate"] == pytest.approx(0.5)
     assert metrics["denominators"]["included_in_quality_score"] == 2
     assert metrics["denominators"]["decisions"] == 2
+    assert metrics["denominators"]["safety_applicable_cases"] == 1
 
 
 # ---- 补充语义:指纹、配置与场景计数 ------------------------------------
@@ -390,8 +440,8 @@ def test_product_suite_rejects_frozen_hash_drift(
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     manifest = {
-        "schema_version": 1,
-        "scorer_version": "v1",
+        "schema_version": 2,
+        "scorer_version": "v2",
         "development_ids": [],
         "regression_ids": [],
         "frozen_test_ids": ["frozen-001"],

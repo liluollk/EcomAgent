@@ -55,6 +55,8 @@ class UpdatePriceCommand:
     workspace_id: uuid.UUID
     store_id: uuid.UUID
     listing_id: uuid.UUID
+    external_store_ref: str
+    external_product_ref: str
     target_price: Decimal
     currency: str
     expected_version: int
@@ -83,6 +85,20 @@ class ExecutionReceipt:
     reason_code: str | None = None
 
 
+@dataclass(frozen=True)
+class ReconciliationCommand:
+    """单个 UNKNOWN 操作的不可变平台回查上下文。"""
+
+    operation_id: str
+    workspace_id: uuid.UUID
+    store_id: uuid.UUID
+    listing_id: uuid.UUID
+    external_store_ref: str
+    external_product_ref: str
+    expected_price: Decimal
+    currency: str
+
+
 class CommerceAdapter(Protocol):
     """平台 Adapter 协议(架构文档 §7:execute + reconcile)。"""
 
@@ -91,15 +107,10 @@ class CommerceAdapter(Protocol):
         ...
 
     async def reconcile(
-        self, operation_id: str, *, expected_price: Decimal
+        self, command: ReconciliationCommand
     ) -> ReconcileResult:
         """回查:只能返回 APPLIED/NOT_APPLIED/UNKNOWN,不以模型文本判定。"""
         ...
-
-    async def count_logical_writes(self, operation_id: str) -> int:
-        """该 operation_id 已发生的逻辑写次数(重复提交不得增加)。"""
-        ...
-
 
 __all__ = [
     "REASON_CURRENCY_MISMATCH",
@@ -112,5 +123,6 @@ __all__ = [
     "ExecutionReceipt",
     "ExecutionStatus",
     "ReconcileResult",
+    "ReconciliationCommand",
     "UpdatePriceCommand",
 ]

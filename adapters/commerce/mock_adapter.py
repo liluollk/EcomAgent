@@ -19,7 +19,8 @@
 7. ``response_lost_after_commit`` → UNKNOWN(写入已生效并已记录,回查
    可确认 APPLIED)。
 
-事务边界:经 Repository 只 flush 不 commit(归调用方/Runtime)。
+事务边界:若调用方已有事务,仅 flush 交给调用方;若无活动事务,Mock Adapter
+为模拟平台数据库操作开启并提交独立短事务。Adapter 不包含网络请求。
 """
 
 import uuid
@@ -39,6 +40,7 @@ from adapters.commerce.protocol import (
     REASON_VERSION_CONFLICT,
     ExecutionReceipt,
     ExecutionStatus,
+    ReconciliationCommand,
     UpdatePriceCommand,
 )
 from agents.product_operations.persistence.models import Listing
@@ -66,12 +68,20 @@ class MockCommerceAdapter:
     """
 
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._repository = ProductRepository(session)
         self.faults = FaultInjector()
         self._operations: dict[str, _OperationRecord] = {}
 
     async def execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
-        """按确定性顺序执行写命令(见模块 docstring 的 7 步)。"""
+        """按确定性顺序执行写命令;独立模拟平台事务只覆盖数据库操作。"""
+        if self._session.in_transaction():
+            return await self._execute(command)
+        async with self._session.begin():
+            return await self._execute(command)
+
+    async def _execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
+        """执行数据库 Mock 平台逻辑(不发起网络请求)。"""
         # 1. 写前超时:请求未达平台逻辑(含去重层),无任何状态变更。
         if self.faults.should_timeout_before_write():
             return self._receipt(
@@ -178,28 +188,34 @@ class MockCommerceAdapter:
         return receipt
 
     async def reconcile(
-        self, operation_id: str, *, expected_price: Decimal
+        self, command: ReconciliationCommand
     ) -> ReconcileResult:
         """以权威状态回答;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
 
         幂等记录不存在或未提交 → 确定未应用;已提交则重读 Listing,权威
         价格与期望价格及本操作应用价一致才返回 APPLIED。
         """
+        if self._session.in_transaction():
+            return await self._reconcile(command)
+        async with self._session.begin():
+            return await self._reconcile(command)
+
+    async def _reconcile(self, command: ReconciliationCommand) -> ReconcileResult:
         if self.faults.consume_reconcile_unknown():
             return ReconcileResult.UNKNOWN
 
-        record = self._operations.get(operation_id)
+        record = self._operations.get(command.operation_id)
         if record is None or not record.committed:
             return ReconcileResult.NOT_APPLIED
 
         listing = await self._repository.get_listing(
-            record.workspace_id, record.listing_id
+            command.workspace_id, command.listing_id
         )
         if (
             listing is not None
             and record.applied_price is not None
-            and listing.current_price == expected_price
-            and expected_price == record.applied_price
+            and listing.current_price == command.expected_price
+            and command.expected_price == record.applied_price
         ):
             return ReconcileResult.APPLIED
         return ReconcileResult.NOT_APPLIED

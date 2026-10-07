@@ -18,6 +18,7 @@ COPY runtime ./runtime
 COPY agents ./agents
 COPY adapters ./adapters
 COPY apps ./apps
+COPY composition ./composition
 COPY eval ./eval
 RUN uv sync --frozen --no-dev
 

@@ -19,7 +19,7 @@
 4. **运行**:按 :class:`eval.config.EvalConfig` 固定 repetition(3)用
    :class:`eval.runner.EvalRunner` + 真实
    :class:`adapters.model_backends.openai_backend.OpenAIBackend` 跑完整集合
-   (每 case/repetition 经 :func:`adapters.commerce.product_runtime.build_product_runtime`
+   (每 case/repetition 经 :func:`composition.product_operations.build_product_application`
    的生产装配路径);运行中不修改用例与 Scorer;
 5. **报告**:COMPLETED 且计入质量分的结果经 ``score_case`` 判分,
    :class:`eval.reporting.json_report.ReportBuilder` 组装 JSON 报告(协议
@@ -233,7 +233,11 @@ async def _execute(
         runner = EvalRunner(
             engine,
             config=config,
-            backend_factory=lambda scenario: OpenAIBackend(client, config.model),
+            backend_factory=lambda scenario: OpenAIBackend(
+                client,
+                config.model,
+                extra_body={"thinking": {"type": config.thinking_mode}},
+            ),
             repetitions=config.repetitions,
         )
         round_result = await runner.run(scenarios)
@@ -246,7 +250,7 @@ async def _execute(
                 scorer_version=config.scorer_version,
             )
             for result in round_result.results
-            if result.status == "COMPLETED" and result.included_in_quality_score
+            if result.included_in_quality_score
         ]
         report = ReportBuilder().build(
             [*round_result.results, *scored],

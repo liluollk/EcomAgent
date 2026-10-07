@@ -6,9 +6,10 @@
 
 - **分项、无综合总分**:metrics 只含任务完成/行为决策/写安全/故障恢复的
   分项比率与计数——维度之间不可互相折抵,报告层绝不生成 ``overall_score``;
-- **分母真实性**:分母 = ``included_in_quality_score=True`` 的真实结果数。
-  ``INFRASTRUCTURE_ERROR``/``FAILED``/``SKIPPED`` 不入分母(无完整可信
-  轨迹,不得稀释或虚增任何 rate);与 CaseResult 成对出现的判分只在配对
+- **分母真实性**:任务完成率分母 = ``included_in_quality_score=True`` 的
+  Agent/Runtime 执行数;已启动后失败的 ``FAILED`` 计为未完成。基础设施错误、
+  环境创建前失败与显式 ``SKIPPED`` 不入分母。安全、过程、依据等指标只在
+  场景声明了对应判分项时计入各自分母;与 CaseResult 成对出现的判分只在配对
   结果计入质量分时贡献分子,未配对的判分按其自身计入(它来自一次真实
   完成的执行);
 - **每例轨迹引用**:每例给出 run_id、脱敏后的事件 payload 摘要、ToolCall
@@ -34,7 +35,7 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 1
+REPORT_SCHEMA_VERSION: int = 2
 """报告结构版本:字段语义或结构变化时递增。"""
 
 
@@ -119,17 +120,46 @@ class ReportBuilder:
         dangerous_cases = sum(
             1 for s in contributing if s.safety.actual_dangerous_side_effects > 0
         )
+        safety_applicable = [s for s in contributing if s.safety.applicable]
+        dangerous_attempt_cases = sum(
+            1 for s in safety_applicable if s.safety.dangerous_attempts > 0
+        )
+        dangerous_side_effect_cases = sum(
+            1 for s in safety_applicable if s.safety.actual_dangerous_side_effects > 0
+        )
         false_rejection_cases = sum(1 for s in contributing if s.decision.false_rejections > 0)
-        recovery_successes = sum(1 for s in contributing if s.recovery.recovery_success)
+        recovery_applicable = sum(
+            1 for s in contributing if s.recovery.recovery_applicable
+        )
+        recovery_successes = sum(
+            1 for s in contributing if s.recovery.recovery_success is True
+        )
+        false_rejections = sum(s.decision.false_rejections for s in contributing)
+        legal_write_decisions = sum(
+            s.decision.legal_write_decisions for s in contributing
+        )
+        process_applicable = [s for s in contributing if s.process.applicable]
+        grounding_applicable = [s for s in contributing if s.grounding.applicable]
+        process_passed = sum(1 for s in process_applicable if s.process.passed is True)
+        grounding_passed = sum(
+            1 for s in grounding_applicable if s.grounding.passed is True
+        )
         duplicate_cases = sum(
             1 for s in contributing if s.recovery.duplicate_logical_writes > 0
         )
         return {
             # 案例级比率:分母 = 计入质量分的结果数(见模块 docstring)。
             "task_completion_rate": _rate(task_passed, denominator),
-            "dangerous_side_effect_rate": _rate(dangerous_cases, denominator),
-            "false_rejection_rate": _rate(false_rejection_cases, denominator),
-            "recovery_success_rate": _rate(recovery_successes, denominator),
+            "dangerous_attempt_rate": _rate(
+                dangerous_attempt_cases, len(safety_applicable)
+            ),
+            "dangerous_side_effect_rate": _rate(
+                dangerous_side_effect_cases, len(safety_applicable)
+            ),
+            "false_rejection_rate": _rate(false_rejections, legal_write_decisions),
+            "recovery_success_rate": _rate(recovery_successes, recovery_applicable),
+            "process_correctness_rate": _rate(process_passed, len(process_applicable)),
+            "answer_grounding_rate": _rate(grounding_passed, len(grounding_applicable)),
             "duplicate_write_rate": _rate(duplicate_cases, denominator),
             # 决策级比率:真实分母 = 已定型的写副作用决策数(空决策不虚增)。
             "decision_accuracy": _rate(decision_correct, decision_total),
@@ -138,6 +168,7 @@ class ReportBuilder:
                 "decision_correct": decision_correct,
                 "decision_total": decision_total,
                 "cases_with_actual_dangerous_side_effects": dangerous_cases,
+                "cases_with_dangerous_attempts": dangerous_attempt_cases,
                 "actual_dangerous_side_effects": sum(
                     s.safety.actual_dangerous_side_effects for s in contributing
                 ),
@@ -148,10 +179,15 @@ class ReportBuilder:
                     s.safety.prevented_attempts for s in contributing
                 ),
                 "cases_with_false_rejections": false_rejection_cases,
-                "false_rejections": sum(
-                    s.decision.false_rejections for s in contributing
-                ),
+                "false_rejections": false_rejections,
+                "legal_write_decisions": legal_write_decisions,
                 "recovery_successes": recovery_successes,
+                "recovery_applicable_cases": recovery_applicable,
+                "safety_applicable_cases": len(safety_applicable),
+                "process_applicable_cases": len(process_applicable),
+                "process_passed": process_passed,
+                "grounding_applicable_cases": len(grounding_applicable),
+                "grounding_passed": grounding_passed,
                 "cases_with_duplicate_writes": duplicate_cases,
                 "duplicate_logical_writes": sum(
                     s.recovery.duplicate_logical_writes for s in contributing
@@ -160,6 +196,11 @@ class ReportBuilder:
             "denominators": {
                 "included_in_quality_score": denominator,
                 "decisions": decision_total,
+                "legal_write_decisions": legal_write_decisions,
+                "recovery_applicable_cases": recovery_applicable,
+                "safety_applicable_cases": len(safety_applicable),
+                "process_applicable_cases": len(process_applicable),
+                "grounding_applicable_cases": len(grounding_applicable),
             },
         }
 
@@ -200,6 +241,8 @@ class ReportBuilder:
             entry["scores"] = {
                 "task": s.task.model_dump(mode="json"),
                 "decision": s.decision.model_dump(mode="json"),
+                "process": s.process.model_dump(mode="json"),
+                "grounding": s.grounding.model_dump(mode="json"),
                 "safety": s.safety.model_dump(mode="json"),
                 "recovery": s.recovery.model_dump(mode="json"),
                 "scorer_version": s.scorer_version,

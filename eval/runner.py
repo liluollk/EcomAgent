@@ -2,7 +2,7 @@
 
 :class:`EvalRunner` 按 case/repetition 逐个执行 Scenario:每例经
 :class:`eval.fixtures.IsolatedEnvironment` 组装独立权威环境,以注入的
-Backend 驱动真实 RuntimeHost 推进(start → 缺店铺 Input → 确认 → 终态),
+Backend 驱动真实 Runtime 推进(start → 缺店铺 Input → 确认 → 终态),
 捕获完整 AgentEvent/ToolCall/Operation 与权威最终状态到
 :class:`eval.results.CaseResult`。判分(任务成败)不属 Runner,由 Scorer
 (Task 3)消费捕获结果。
@@ -16,7 +16,8 @@ Backend 驱动真实 RuntimeHost 推进(start → 缺店铺 Input → 确认 →
   RunJobWorker 会吞掉推进异常并把 Job 释放回 PENDING(Run 回 QUEUED),
   因此 Backend 异常经观察代理(``_ObservingBackend``)在流边界记录、于
   Run 停滞时原样重抛,按真实异常类型分类;
-- ``FAILED``:推进中的其他意外异常(同样不计入质量分母——无完整可信轨迹);
+- ``FAILED``:Agent/Runtime 执行失败(若 Workspace/Run 已建立则计入任务完成率,
+  作为失败计数;环境创建前失败因无可靠场景轨迹而排除);
 - ``SKIPPED``:``run`` 的 ``skip_ids`` 显式注入;任一 SKIPPED 使整轮
   ``protocol_valid=False``;
 - ``COMPLETED``:用例端到端执行完成(不代表任务成功),计入质量分母。
@@ -46,7 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from adapters.commerce.product_runtime import ProductRuntime
+from composition.product_operations import ProductApplication
 from eval.config import EvalConfig
 from eval.fixtures import IsolatedEnvironment
 from eval.results import (
@@ -55,10 +56,11 @@ from eval.results import (
     EvalRoundResult,
     EventCapture,
     FinalState,
+    MessageCapture,
     OperationCapture,
     ToolCallCapture,
 )
-from eval.schema import Scenario, protocol_fingerprint
+from eval.schema import Scenario, UserInteraction, protocol_fingerprint
 from runtime.backend.protocol import (
     AgentBackend,
     BackendEvent,
@@ -68,8 +70,8 @@ from runtime.backend.protocol import (
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.models.configuration import ToolDefinition, ToolVersion
 from runtime.persistence.models.events import AgentEvent
-from runtime.persistence.models.execution import Operation, ToolCall
-from runtime.persistence.models.interaction import InputRequest
+from runtime.persistence.models.execution import Operation, Run, ToolCall
+from runtime.persistence.models.interaction import InputRequest, Message
 
 
 class EvalProviderError(Exception):
@@ -92,6 +94,17 @@ _INFRASTRUCTURE_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
 _TERMINAL_RUN_STATUSES: Final[frozenset[RunStatus]] = frozenset(
     {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
 )
+_PROVIDER_FAILURE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "AUTH_FAILED",
+        "INVALID_REQUEST",
+        "PROVIDER_CONNECTION_ERROR",
+        "PROVIDER_ERROR",
+        "PROVIDER_UNAVAILABLE",
+        "RATE_LIMITED",
+        "TIMEOUT",
+    }
+)
 
 _MAX_DRIVE_STEPS: Final = 12
 """单 case 驱动步数上限(input/confirm 恢复推进次数的确定性上界)。"""
@@ -102,6 +115,9 @@ class _DriveState:
     """一次驱动的可观测状态(异常路径下仍可 best-effort 捕获)。"""
 
     run_id: uuid.UUID | None = None
+    run_ids: list[uuid.UUID] | None = None
+    session_id: uuid.UUID | None = None
+    current_message_index: int | None = None
     observed: _ObservingBackend | None = None
 
 
@@ -137,6 +153,7 @@ class _Capture:
     """一次 Run 的捕获结果(CaseResult 字段载荷)。"""
 
     events: tuple[EventCapture, ...] = ()
+    conversation_messages: tuple[MessageCapture, ...] = ()
     tool_calls: tuple[ToolCallCapture, ...] = ()
     operations: tuple[OperationCapture, ...] = ()
     final_state: FinalState | None = None
@@ -203,7 +220,7 @@ class EvalRunner:
         fingerprint = protocol_fingerprint(case, self.config)
         resolved_backend = backend if backend is not None else self._backend_factory(case)
         observing = _ObservingBackend(resolved_backend)
-        state = _DriveState(observed=observing)
+        state = _DriveState(observed=observing, run_ids=[])
         try:
             environment = await IsolatedEnvironment.create(
                 self._engine, case, backend=observing
@@ -227,7 +244,7 @@ class EvalRunner:
 
         try:
             await self._drive(environment, case, state)
-            capture = await self._capture(environment, state.run_id)
+            capture = await self._capture(environment, state.run_ids or ())
         except _INFRASTRUCTURE_EXCEPTIONS as error:
             return await self._failure_result(
                 environment,
@@ -265,6 +282,7 @@ class EvalRunner:
             run_id=state.run_id,
             workspace_id=environment.workspace_id,
             events=capture.events,
+            conversation_messages=capture.conversation_messages,
             tool_calls=capture.tool_calls,
             operations=capture.operations,
             final_state=capture.final_state,
@@ -276,25 +294,106 @@ class EvalRunner:
         self, environment: IsolatedEnvironment, case: Scenario, state: _DriveState
     ) -> None:
         """驱动一次完整确认链路;异常向上冒泡由 run_one 分类。"""
-        runtime: ProductRuntime = environment.runtime
-        first_user = next(
-            (message.content for message in case.messages if message.role == "user"),
-            None,
-        )
-        if first_user is None:
+        application: ProductApplication = environment.application
+        consumed_message_indexes = {
+            interaction.message_index
+            for interaction in case.interactions
+            if interaction.message_index is not None
+        }
+        user_turns = [
+            (index, message.content)
+            for index, message in enumerate(case.messages)
+            if message.role == "user" and index not in consumed_message_indexes
+        ]
+        if not user_turns:
             raise RuntimeError(f"scenario {case.id} has no user message to start a run")
-        view = await runtime.start(first_user)
+        state.current_message_index = user_turns[0][0]
+        view = await application.start(user_turns[0][1])
         state.run_id = view.run_id
+        state.run_ids = [view.run_id]
+        state.session_id = await self._session_id(view.run_id)
+        interaction_index = 0
+        view, interaction_index = await self._drive_current_run(
+            application, environment, case, state, view, interaction_index
+        )
+        for message_index, user_message in user_turns[1:]:
+            assert state.session_id is not None
+            state.current_message_index = message_index
+            view = await application.append_message(state.session_id, user_message)
+            state.run_id = view.run_id
+            assert state.run_ids is not None
+            state.run_ids.append(view.run_id)
+            view, interaction_index = await self._drive_current_run(
+                application, environment, case, state, view, interaction_index
+            )
+        if interaction_index != len(case.interactions):
+            raise RuntimeError(
+                f"scenario {case.id} has {len(case.interactions) - interaction_index} "
+                "unconsumed user interaction(s)"
+            )
+
+    async def _drive_current_run(
+        self,
+        application: ProductApplication,
+        environment: IsolatedEnvironment,
+        case: Scenario,
+        state: _DriveState,
+        view: Any,
+        interaction_index: int,
+    ) -> tuple[Any, int]:
+        """仅恢复当前 Run 的显式补充信息/确认决定,直到真实终态。"""
         for _ in range(_MAX_DRIVE_STEPS):
             if view.status is RunStatus.WAITING_INPUT:
                 assert view.pending_input_id is not None
-                values = await self._input_values(environment, view.pending_input_id)
-                view = await runtime.answer(view.pending_input_id, values)
+                interaction = self._next_interaction(
+                    case, interaction_index, "input", state.current_message_index
+                )
+                interaction_index += 1
+                if interaction.message_index is not None:
+                    state.current_message_index = interaction.message_index
+                values = await self._input_values(
+                    environment, view.pending_input_id, interaction.values
+                )
+                view = await application.answer(view.pending_input_id, values)
             elif view.status is RunStatus.WAITING_CONFIRMATION:
                 assert view.pending_confirmation_id is not None
-                view = await runtime.confirm(view.pending_confirmation_id)
+                interaction = self._next_interaction(
+                    case,
+                    interaction_index,
+                    "confirmation",
+                    state.current_message_index,
+                )
+                interaction_index += 1
+                if interaction.message_index is not None:
+                    state.current_message_index = interaction.message_index
+                if interaction.decision == "accept":
+                    view = await application.confirm(view.pending_confirmation_id)
+                else:
+                    view = await application.reject_confirmation(
+                        view.pending_confirmation_id
+                    )
+            elif view.status is RunStatus.COMPLETED:
+                return view, interaction_index
             elif view.status in _TERMINAL_RUN_STATUSES:
-                return
+                if view.status is RunStatus.FAILED:
+                    failure_code = await self._run_failure_code(
+                        environment.workspace_id, view.run_id
+                    )
+                    if failure_code in _PROVIDER_FAILURE_CODES:
+                        raise EvalProviderError(
+                            "provider request failed with normalized code "
+                            f"{failure_code}"
+                        )
+                if (
+                    view.status is RunStatus.FAILED
+                    and state.observed is not None
+                    and state.observed.recorded
+                ):
+                    raise state.observed.recorded[0]
+                raise RuntimeError(
+                    f"scenario {case.id} ended in unsuccessful Run status "
+                    f"{view.status.value}"
+                )
             else:
                 # 推进回调异常被 RunJobWorker 吞掉并释放 Job(Run 回 QUEUED):
                 # Backend 在流边界记录的真实异常在此重新抛出,按类型分类。
@@ -308,10 +407,75 @@ class EvalRunner:
             f"case {case.id} exceeded the drive step budget of {_MAX_DRIVE_STEPS}"
         )
 
+    async def _run_failure_code(
+        self, workspace_id: uuid.UUID, run_id: uuid.UUID
+    ) -> str | None:
+        """从权威 Run 行读取失败码,区分 Provider 拒绝与 Agent 失败。"""
+        session = AsyncSession(self._engine, expire_on_commit=False)
+        try:
+            return await session.scalar(
+                select(Run.failure_code).where(
+                    Run.workspace_id == workspace_id, Run.id == run_id
+                )
+            )
+        finally:
+            await session.close()
+
+    async def _session_id(self, run_id: uuid.UUID) -> uuid.UUID:
+        session = AsyncSession(self._engine, expire_on_commit=False)
+        try:
+            value = await session.scalar(select(Run.session_id).where(Run.id == run_id))
+            if value is None:
+                raise RuntimeError(f"run {run_id} has no Session")
+            return value
+        finally:
+            await session.close()
+
+    @staticmethod
+    def _next_interaction(
+        case: Scenario,
+        index: int,
+        expected_kind: str,
+        current_message_index: int | None,
+    ) -> UserInteraction:
+        if index >= len(case.interactions):
+            raise RuntimeError(
+                f"scenario {case.id} requires a {expected_kind} interaction but none was declared"
+            )
+        interaction = case.interactions[index]
+        if interaction.kind != expected_kind:
+            raise RuntimeError(
+                f"scenario {case.id} expected interaction {interaction.kind!r}, "
+                f"but Runtime requested {expected_kind!r}"
+            )
+        next_user_index = next(
+            (
+                message_index
+                for message_index, message in enumerate(case.messages)
+                if message.role == "user"
+                and current_message_index is not None
+                and message_index > current_message_index
+            ),
+            None,
+        )
+        if (
+            interaction.message_index is not None
+            and interaction.message_index != next_user_index
+        ):
+            raise RuntimeError(
+                f"scenario {case.id} interaction at message_index="
+                f"{interaction.message_index} is not the next user turn "
+                f"({next_user_index!r})"
+            )
+        return interaction
+
     async def _input_values(
-        self, environment: IsolatedEnvironment, input_request_id: uuid.UUID
+        self,
+        environment: IsolatedEnvironment,
+        input_request_id: uuid.UUID,
+        declared_values: Mapping[str, str],
     ) -> dict[str, str]:
-        """为挂起 Input Request 构造确定性回答(店铺经种子符号映射)。"""
+        """仅把场景显式声明的回答映射为 Fixture ID;从不猜测候选店铺。"""
         session = AsyncSession(self._engine, expire_on_commit=False)
         try:
             request = (
@@ -344,53 +508,81 @@ class EvalRunner:
                     sku = str(raw_sku) if raw_sku is not None else None
             values: dict[str, str] = {}
             for field_path in request.field_paths:
-                if field_path != "store_id":
+                if field_path not in declared_values:
                     raise RuntimeError(
-                        f"unsupported input field {field_path!r} for scripted eval drive"
+                        f"scenario has no explicit value for input field {field_path!r}"
                     )
-                store_id = (
-                    environment.store_id_for_sku(sku)
-                    if sku is not None
-                    else environment.single_store_id
+                raw_value = declared_values[field_path]
+                if field_path == "store_id":
+                    store_id = environment.store_id_for_symbol(
+                        raw_value, sku=sku
+                    )
+                    if store_id is None:
+                        raise RuntimeError(
+                            f"scenario references unseeded store {raw_value!r}"
+                        )
+                    values[field_path] = str(store_id)
+                else:
+                    values[field_path] = raw_value
+            extra_values = set(declared_values) - set(request.field_paths)
+            if extra_values:
+                raise RuntimeError(
+                    "scenario supplied undeclared input fields: "
+                    + ", ".join(sorted(extra_values))
                 )
-                if store_id is None:
-                    raise RuntimeError(
-                        f"no seeded store to answer field {field_path!r}"
-                        + (f" for sku {sku!r}" if sku is not None else "")
-                    )
-                values[field_path] = str(store_id)
             return values
         finally:
             await session.close()
 
     async def _capture(
-        self, environment: IsolatedEnvironment, run_id: uuid.UUID | None
+        self, environment: IsolatedEnvironment, run_ids: Sequence[uuid.UUID]
     ) -> _Capture:
         """捕获 Run 的完整持久痕迹与权威最终状态。"""
-        if run_id is None:
+        if not run_ids:
             return _Capture()
+        run_ids_set = set(run_ids)
         session = AsyncSession(self._engine, expire_on_commit=False)
         try:
+            run_rows = (
+                await session.scalars(
+                    select(Run).where(
+                        Run.workspace_id == environment.workspace_id,
+                        Run.id.in_(run_ids_set),
+                    )
+                )
+            ).all()
+            session_ids = {run.session_id for run in run_rows}
+            messages = (
+                await session.scalars(
+                    select(Message)
+                    .where(
+                        Message.workspace_id == environment.workspace_id,
+                        Message.session_id.in_(session_ids),
+                    )
+                    .order_by(Message.sequence_no)
+                )
+            ).all()
             events = (
                 await session.scalars(
                     select(AgentEvent)
                     .where(
                         AgentEvent.workspace_id == environment.workspace_id,
-                        AgentEvent.run_id == run_id,
+                        AgentEvent.run_id.in_(run_ids_set),
                     )
                     .order_by(AgentEvent.sequence_no)
                 )
             ).all()
             tool_rows = (
                 await session.execute(
-                    select(ToolCall, ToolDefinition.stable_key)
-                    .join(ToolVersion, ToolCall.tool_version_id == ToolVersion.id)
-                    .join(ToolDefinition, ToolVersion.tool_id == ToolDefinition.id)
+                    select(ToolCall, ToolDefinition.stable_key, Message.sequence_no)
+                .join(ToolVersion, ToolCall.tool_version_id == ToolVersion.id)
+                .join(ToolDefinition, ToolVersion.tool_id == ToolDefinition.id)
+                .join(Message, Message.id == ToolCall.message_id)
                     .where(
                         ToolCall.workspace_id == environment.workspace_id,
-                        ToolCall.run_id == run_id,
+                        ToolCall.run_id.in_(run_ids_set),
                     )
-                    .order_by(ToolCall.ordinal)
+                    .order_by(Message.sequence_no)
                 )
             ).all()
             operations = (
@@ -399,7 +591,7 @@ class EvalRunner:
                     .join(ToolCall, Operation.tool_call_id == ToolCall.id)
                     .where(
                         Operation.workspace_id == environment.workspace_id,
-                        ToolCall.run_id == run_id,
+                        ToolCall.run_id.in_(run_ids_set),
                     )
                 )
             ).all()
@@ -409,7 +601,7 @@ class EvalRunner:
         operation_captures: list[OperationCapture] = []
         logical_writes = 0
         for operation in operations:
-            writes = await environment.runtime.adapter.count_logical_writes(
+            writes = await environment.commerce_write_observer.count_logical_writes(
                 str(operation.operation_id)
             )
             logical_writes += writes
@@ -429,10 +621,21 @@ class EvalRunner:
                 )
                 for event in events
             ),
+            conversation_messages=tuple(
+                MessageCapture(
+                    run_id=message.run_id,
+                    sequence_no=message.sequence_no,
+                    role=message.role.value,
+                    content=message.content,
+                )
+                for message in messages
+                if message.role.value in {"USER", "ASSISTANT", "TOOL"}
+            ),
             tool_calls=tuple(
                 ToolCallCapture(
                     stable_key=stable_key,
                     ordinal=tool_call.ordinal,
+                    sequence_no=message_sequence,
                     status=tool_call.status.value,
                     failure_code=tool_call.failure_code,
                     normalized_arguments=(
@@ -441,7 +644,7 @@ class EvalRunner:
                         else None
                     ),
                 )
-                for tool_call, stable_key in tool_rows
+                for tool_call, stable_key, message_sequence in tool_rows
             ),
             operations=tuple(operation_captures),
             final_state=await environment.capture_final_state(
@@ -492,19 +695,20 @@ class EvalRunner:
     ) -> CaseResult:
         """推进失败的结果:best-effort 捕获已产生的持久痕迹。"""
         try:
-            capture = await self._capture(environment, state.run_id)
+            capture = await self._capture(environment, state.run_ids or ())
         except Exception:  # noqa: BLE001 - 失败路径的捕获本身不得掩盖原错误
             capture = _Capture()
         return CaseResult(
             case_id=case.id,
             repetition=repetition,
             status=status,
-            included_in_quality_score=False,
+            included_in_quality_score=(status == "FAILED"),
             fingerprint=fingerprint,
             run_id=state.run_id,
             workspace_id=environment.workspace_id,
             error=_describe(error),
             events=capture.events,
+            conversation_messages=capture.conversation_messages,
             tool_calls=capture.tool_calls,
             operations=capture.operations,
             final_state=capture.final_state,

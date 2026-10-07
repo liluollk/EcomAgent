@@ -45,9 +45,17 @@ def _price_scenario_dict(scenario_id: str, *, target_price: str) -> dict[str, An
             ]
         },
         "workspace": {"name": "eval-workspace"},
-        "actor": {"role": "owner"},
+        "actor": {
+            "role": "owner",
+            "permissions": ["product.read", "product.price.write"],
+            "store_scope_mode": "ALL",
+        },
         "messages": [
             {"role": "user", "content": f"把 SKU-001 改成 {target_price} 元"},
+        ],
+        "interactions": [
+            {"kind": "input", "values": {"store_id": "store-1"}},
+            {"kind": "confirmation", "decision": "accept"},
         ],
         "expected_final_state": {
             "listings": [{"store_id": "store-1", "sku": "SKU-001", "price": target_price}],

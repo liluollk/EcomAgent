@@ -7,24 +7,23 @@ Runner。Scenario 必须显式声明权威期望(``expected_final_state``)与初
 权威状态判分。
 
 协议指纹 ``protocol_fingerprint``:canonical JSON(排序键、紧凑分隔符)
-+ SHA-256。纳入 schema 版本、场景结构字段(含 id/category/risk_level/
-initial_state/workspace/actor/角色结构/faults/expected_final_state/副作用
-断言/允许路径)与全部 ``EvalConfig`` 固定字段;消息自由文本(措辞)不
-纳入——措辞属于表达层润色,不影响协议可比性,角色结构与其他场景字段
-变化仍会改变指纹。
++ SHA-256。纳入 schema 版本、场景全部字段(包括完整消息文本)和全部
+``EvalConfig`` 固定字段。任何可能影响模型决策或判分的数据改变都会改变指纹。
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 from decimal import Decimal
-from typing import Any, Final, Literal
+from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eval.config import EvalConfig
 
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 
 class Message(BaseModel):
@@ -101,11 +100,60 @@ class WorkspaceSpec(BaseModel):
 
 
 class ActorSpec(BaseModel):
-    """场景执行者模板(角色由服务端授权,非前端输入)。"""
+    """场景执行者授权模板;缺省无权限,评测夹具按此真实建成员授权。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     role: str = Field(min_length=1)
+    permissions: tuple[str, ...] = ()
+    store_scope_mode: Literal["ALL", "SELECTED", "NONE"] = "NONE"
+    store_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_store_scope(self) -> ActorSpec:
+        if self.store_scope_mode == "SELECTED" and not self.store_ids:
+            raise ValueError("SELECTED store scope requires at least one store_id")
+        if self.store_scope_mode != "SELECTED" and self.store_ids:
+            raise ValueError("store_ids are only valid with SELECTED store scope")
+        return self
+
+
+class UserInteraction(BaseModel):
+    """Runner 执行的显式用户交互;值使用店铺等场景符号键。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["input", "confirmation"]
+    message_index: int | None = Field(default=None, ge=0)
+    values: dict[str, str] = Field(default_factory=dict)
+    decision: Literal["accept", "reject"] | None = None
+
+    @model_validator(mode="after")
+    def validate_interaction(self) -> UserInteraction:
+        if self.kind == "input":
+            if not self.values or self.decision is not None:
+                raise ValueError("input interaction requires values and no decision")
+        elif self.values or self.decision is None:
+            raise ValueError("confirmation interaction requires a decision and no values")
+        return self
+
+
+class ToolOrderConstraint(BaseModel):
+    """声明必须满足的工具先后关系,不约束其他合法工具调用。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    before: str = Field(min_length=1)
+    after: str = Field(min_length=1)
+
+
+class ResponseFact(BaseModel):
+    """需要核验的关键答复事实及其证据来源。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: str = Field(min_length=1)
+    source: Literal["tool_result", "final_state"]
 
 
 class Scenario(BaseModel):
@@ -124,18 +172,34 @@ class Scenario(BaseModel):
     workspace: WorkspaceSpec
     actor: ActorSpec
     messages: tuple[Message, ...] = Field(min_length=1)
+    interactions: tuple[UserInteraction, ...] = ()
     faults: tuple[str, ...] = ()
     expected_final_state: ExpectedFinalState
     allowed_side_effects: tuple[SideEffect, ...] = ()
     forbidden_side_effects: tuple[SideEffect, ...] = ()
     allowed_paths: tuple[AllowedPath, ...] = ()
+    tool_order_constraints: tuple[ToolOrderConstraint, ...] = ()
+    expected_response_facts: tuple[ResponseFact, ...] = ()
+    forbidden_response_facts: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_interaction_message_indexes(self) -> Scenario:
+        indexes = [
+            interaction.message_index
+            for interaction in self.interactions
+            if interaction.message_index is not None
+        ]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("each user message can satisfy at most one interaction")
+        for index in indexes:
+            if index >= len(self.messages) or self.messages[index].role != "user":
+                raise ValueError("interaction message_index must reference a user message")
+        return self
 
 
 def _scenario_projection(scenario: Scenario) -> dict[str, object]:
-    """指纹用的场景投影:全部结构字段,剔除消息自由文本(仅保留角色)。"""
-    data: dict[str, Any] = scenario.model_dump(mode="json")
-    data["messages"] = [{"role": message["role"]} for message in data["messages"]]
-    return data
+    """指纹用的场景投影:完整场景数据,包含用户措辞与期望断言。"""
+    return scenario.model_dump(mode="json")
 
 
 def protocol_fingerprint(scenario: Scenario, config: EvalConfig) -> str:

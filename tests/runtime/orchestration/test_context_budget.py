@@ -12,12 +12,15 @@ from runtime.backend.protocol import (
     BackendRequest,
     CancellationToken,
 )
+from runtime.capabilities.skill_activation import LOAD_SKILL_DEFINITION
 from runtime.interfaces.state import AssistantMessageStatus, MessageType
 from runtime.orchestration.context import (
+    ActiveSkillInstruction,
     ContextAssembler,
     ConversationMessage,
     ConversationView,
     MemoryItem,
+    SkillCatalogEntry,
     ToolResultProjection,
 )
 from runtime.orchestration.context_budget import (
@@ -42,6 +45,79 @@ PREV_SUMMARY_PAYLOAD_JSON = json.dumps(
         "key_facts": ["fact-one"],
     }
 )
+
+
+def _skill_aware_assembler(
+    summarizer, token_estimator, safety_rules, agent_instructions, workspace_summary
+) -> ContextAssembler:
+    return ContextAssembler(
+        safety_rules=safety_rules,
+        agent_instructions=agent_instructions,
+        workspace_summary=workspace_summary,
+        summarizer=summarizer,
+        estimator=token_estimator,
+        skill_catalog=(
+            SkillCatalogEntry(
+                stable_key="price_update",
+                name="商品改价",
+                description="查询商品现状并按规则修改价格",
+                version=1,
+            ),
+        ),
+        tool_definitions=(LOAD_SKILL_DEFINITION,),
+    )
+
+
+def test_context_exposes_skill_catalog_without_full_instructions(
+    summarizer,
+    token_estimator,
+    safety_rules,
+    agent_instructions,
+    workspace_summary,
+) -> None:
+    assembler = _skill_aware_assembler(
+        summarizer,
+        token_estimator,
+        safety_rules,
+        agent_instructions,
+        workspace_summary,
+    )
+
+    request = assembler.build(ConversationView())
+
+    assert request.contains("price_update")
+    assert request.contains("查询商品现状并按规则修改价格")
+    assert not request.contains("完整改价 SOP 正文")
+    assert request.tool_definitions == (LOAD_SKILL_DEFINITION,)
+
+
+def test_context_injects_only_activated_skill_instructions(
+    summarizer,
+    token_estimator,
+    safety_rules,
+    agent_instructions,
+    workspace_summary,
+) -> None:
+    assembler = _skill_aware_assembler(
+        summarizer,
+        token_estimator,
+        safety_rules,
+        agent_instructions,
+        workspace_summary,
+    )
+    view = ConversationView(
+        active_skill_instructions=(
+            ActiveSkillInstruction(
+                stable_key="price_update",
+                version=1,
+                content="完整改价 SOP 正文",
+            ),
+        )
+    )
+
+    request = assembler.build(view)
+
+    assert request.contains("完整改价 SOP 正文")
 
 
 async def test_protected_context_over_budget_fails_closed(context_assembler, session) -> None:

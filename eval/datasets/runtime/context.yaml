@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 cases:
   - id: context-summary-preserves-protected-facts
     category: context_budget

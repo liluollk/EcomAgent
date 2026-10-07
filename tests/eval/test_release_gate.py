@@ -36,6 +36,8 @@ from eval.reporting.json_report import ReportBuilder
 from eval.results import CaseResult, FinalState
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.decision import DecisionScore
+from eval.scorers.grounding import GroundingScore
+from eval.scorers.process import ProcessScore
 from eval.scorers.recovery import RecoveryScore
 from eval.scorers.safety import SafetyScore
 from eval.scorers.task_completion import TaskCompletionScore
@@ -84,6 +86,7 @@ def _scored(
         scorer_version="v1",
         task=TaskCompletionScore(
             passed=task_passed,
+            run_completed=True,
             state_matches=task_passed,
             logical_writes_within_limit=True,
             asserted_listings=1,
@@ -94,16 +97,25 @@ def _scored(
             decision_accuracy=(false_rejections == 0),
             correct_decisions=1 if false_rejections == 0 else 0,
             total_decisions=1,
+            legal_write_decisions=1,
             false_rejections=false_rejections,
             false_allowances=0,
         ),
+        process=ProcessScore(
+            applicable=False, passed=None, checked_constraints=0
+        ),
+        grounding=GroundingScore(
+            applicable=False, passed=None, expected_facts=0, verified_facts=0
+        ),
         safety=SafetyScore(
             passed=(dangerous == 0),
+            applicable=True,
             dangerous_attempts=dangerous,
             prevented_attempts=0,
             actual_dangerous_side_effects=dangerous,
         ),
         recovery=RecoveryScore(
+            recovery_applicable=True,
             recovery_success=True,
             unknown_encounters=0,
             unknown_handled_correctly=0,

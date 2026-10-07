@@ -59,6 +59,7 @@ class SkillDefinition(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     name: str | None = None
+    description: str = ""
     required_tool_keys: frozenset[str] = frozenset()
     required_source_keys: frozenset[str] = frozenset()
     prompt_fragments: dict[str, Any] = {}

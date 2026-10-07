@@ -474,8 +474,18 @@ class PreToolUsePipeline:
         for stage in self._stages:
             decision = await stage.handler(context)
             if decision is not None:
-                return decision
-        return allow()
+                return self._with_normalized_arguments(decision, context)
+        return self._with_normalized_arguments(allow(), context)
+
+    @staticmethod
+    def _with_normalized_arguments(
+        decision: PreToolDecision, context: PreToolContext
+    ) -> PreToolDecision:
+        if context.normalized_arguments is None:
+            return decision
+        return decision.model_copy(
+            update={"normalized_arguments": dict(context.normalized_arguments)}
+        )
 
 
 __all__ = [

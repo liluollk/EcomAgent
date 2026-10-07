@@ -116,7 +116,6 @@ export class RuntimeFixture {
     await page.routeWebSocket(new RegExp(`/api/runs/${this.runId}/events.*`), (ws: WebSocketRoute) => {
       this.sockets.push(ws);
     });
-    await page.route("**/api/agents", (route: Route) => route.fulfill({ json: { agents: [] } }));
   }
 
   seedSnapshot(options: SeedSnapshotOptions): void {

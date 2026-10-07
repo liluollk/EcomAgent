@@ -90,7 +90,7 @@ def test_suite_case_ids_come_from_dataset(runtime_suite: RuntimeSuite) -> None:
 def test_load_rejects_unknown_case_id(tmp_path: Path) -> None:
     """数据集声明了没有执行函数的用例 id 时拒绝加载(数据与代码漂移)。"""
     (tmp_path / "core.yaml").write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "cases:\n"
         "  - id: not-implemented-anywhere\n"
         "    category: backend_streaming\n"

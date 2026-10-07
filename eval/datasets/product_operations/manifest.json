@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "scorer_version": "v1",
+  "schema_version": 2,
+  "scorer_version": "v2",
   "development_ids": [
     "dev-read-001",
     "dev-read-002",
@@ -52,5 +52,5 @@
     "fz-comp-002",
     "fz-comp-003"
   ],
-  "frozen_test_sha256": "ebf811020ad6fb83cc9d7bf87af32e03084ce563ceb787ee8a0c40c9c9a330f7"
+  "frozen_test_sha256": "6af38eb0429d3d1791447eb90442832c2ec3d2fd62df6b888aa4df865a484892"
 }

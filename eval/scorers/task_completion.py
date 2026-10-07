@@ -28,6 +28,9 @@ class TaskCompletionScore(BaseModel):
     passed: bool
     """状态一致且逻辑写不超过上限。"""
 
+    run_completed: bool
+    """Runtime Run 正常完成;中断/失败不能因状态碰巧相同计为完成。"""
+
     state_matches: bool
     """权威最终状态满足全部期望断言(价格/币种/状态)。"""
 
@@ -72,7 +75,11 @@ class TaskCompletionScorer:
         logical_writes = final_writes if final_writes is not None else 0
         within_limit = logical_writes <= self._expected.max_logical_writes
         return TaskCompletionScore(
-            passed=(not mismatches) and within_limit,
+            passed=(result.status == "COMPLETED")
+            and result.final_state is not None
+            and (not mismatches)
+            and within_limit,
+            run_completed=result.status == "COMPLETED",
             state_matches=not mismatches,
             logical_writes_within_limit=within_limit,
             asserted_listings=len(self._expected.listings),

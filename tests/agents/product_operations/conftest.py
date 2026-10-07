@@ -49,7 +49,10 @@ from fixtures.product_operations import (
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
 from agents.product_operations.policy.models import PricePolicyConfig
-from apps.worker.assembly import ProductRuntime, build_product_runtime
+from apps.worker.assembly import (
+    ProductApplication,
+    build_product_application,
+)
 
 
 @pytest.fixture()
@@ -96,6 +99,7 @@ class ScriptedAgentBackend:
 
     def __init__(self, rounds: Sequence[Sequence[BackendEvent]] = ()) -> None:
         self.rounds: list[list[BackendEvent]] = [list(round) for round in rounds]
+        self.requests: list[BackendRequest] = []
 
     def set_rounds(self, rounds: Sequence[Sequence[BackendEvent]]) -> None:
         self.rounds = [list(round) for round in rounds]
@@ -108,6 +112,7 @@ class ScriptedAgentBackend:
     async def stream(
         self, request: BackendRequest, cancellation: CancellationToken
     ) -> AsyncIterator[BackendEvent]:
+        self.requests.append(request)
         events = (
             self.rounds.pop(0) if self.rounds else [BackendCompleted(finish_reason="stop")]
         )
@@ -118,10 +123,10 @@ class ScriptedAgentBackend:
 
 
 @dataclass(frozen=True)
-class ProductRuntimeIds:
-    """product_runtime 夹具的已提交种子标识(身份 + 商品域 + 组装能力)。
+class ProductApplicationIds:
+    """product_application 夹具的已提交种子标识(身份 + 商品域 + 组装能力)。
 
-    组装能力标识由 ``build_product_runtime`` 落库后经 ``replace`` 补全;
+    组装能力标识由 ``build_product_application`` 落库后经 ``replace`` 补全;
     清理时跳过仍为 ``None`` 的项。
     """
 
@@ -139,7 +144,9 @@ class ProductRuntimeIds:
     model_config_version_id: uuid.UUID | None = None
 
 
-async def _seed_committed_environment(engine: AsyncEngine) -> ProductRuntimeIds:
+async def _seed_committed_environment(
+    engine: AsyncEngine,
+) -> ProductApplicationIds:
     """提交身份(含 product.price.write 权限与 store ALL 范围)、淘宝旗舰店
     SKU-001(现价 128.00,无活动锁价)种子行,并返回全部标识。"""
     session = AsyncSession(engine, expire_on_commit=False)
@@ -191,7 +198,7 @@ async def _seed_committed_environment(engine: AsyncEngine) -> ProductRuntimeIds:
                 )
             )
             await session.flush()
-            return ProductRuntimeIds(
+            return ProductApplicationIds(
                 workspace_id=workspace_id,
                 user_id=user_id,
                 membership_id=membership_id,
@@ -237,7 +244,7 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
 
 
 async def _cleanup_committed_environment(
-    engine: AsyncEngine, ids: ProductRuntimeIds
+    engine: AsyncEngine, ids: ProductApplicationIds
 ) -> None:
     """按外键依赖倒序删除已提交种子行,并移除组装写入的全局能力行。"""
     session = AsyncSession(engine, expire_on_commit=False)
@@ -280,11 +287,19 @@ async def _cleanup_committed_environment(
 
 
 @pytest.fixture()
-async def product_runtime(engine: AsyncEngine) -> AsyncIterator[ProductRuntime]:
-    """组装完整 RuntimeHost 的商品改价闭环夹具(真库 + 确定性脚本模型)。"""
+def commerce_adapter_for_application():
+    """可由单个测试模块覆盖的商品平台 Adapter 注入点。"""
+    return
+
+
+@pytest.fixture()
+async def product_application(
+    engine: AsyncEngine, commerce_adapter_for_application
+) -> AsyncIterator[ProductApplication]:
+    """组装完整 Runtime 的商品改价闭环夹具(真库 + 确定性脚本模型)。"""
     ids = await _seed_committed_environment(engine)
     backend = ScriptedAgentBackend()
-    runtime = await build_product_runtime(
+    application = await build_product_application(
         engine,
         backend=backend,
         workspace_id=ids.workspace_id,
@@ -297,8 +312,14 @@ async def product_runtime(engine: AsyncEngine) -> AsyncIterator[ProductRuntime]:
             max_price_change=Decimal("100.00"),
         ),
         worker_id=f"product-worker-{uuid.uuid4()}",
+        commerce_adapter=commerce_adapter_for_application,
+        adapter_key=(
+            "rest-commerce"
+            if commerce_adapter_for_application is not None
+            else "mock-commerce"
+        ),
     )
-    capability = runtime.capability_ids
+    capability = application.capability_ids
     ids = replace(
         ids,
         agent_id=capability["agent_id"],
@@ -308,10 +329,10 @@ async def product_runtime(engine: AsyncEngine) -> AsyncIterator[ProductRuntime]:
         tool_definition_ids=dict(capability["tool_definition_ids"]),
         model_config_version_id=capability["model_config_version_id"],
     )
-    runtime.scripted_backend = backend
-    runtime.seed_ids = ids
+    application.scripted_backend = backend
+    application.seed_ids = ids
     try:
-        yield runtime
+        yield application
     finally:
-        await runtime.aclose()
+        await application.aclose()
         await _cleanup_committed_environment(engine, ids)
