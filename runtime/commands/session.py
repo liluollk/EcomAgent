@@ -1,4 +1,7 @@
-"""Session/Run/Request 命令应用服务(计划 04 Task 3;架构文档《Runtime执行状态与恢复设计》§4、§5、§6、§9)。
+"""Runtime 的 Session/Run/Request 通用命令服务。
+
+本模块位于 ``runtime.commands``，因为它同时编排 Session、Run、Job、
+Input Request 与 Confirmation Request，不属于 Workspace 配置子域。
 
 命令语义(架构文档):
 - 活动 Run 唯一:同一 Session 同一时刻最多一个非终态 Run(等待输入/确认/回查
@@ -11,7 +14,7 @@
   未声明字段以 ``UNDECLARED_FIELD``(422)拒绝;
 - 恢复推进的最小事务:回答/裁决成功后把 Run 从 WAITING_* 经 transitions 合法
   路径迁回 QUEUED 并创建 ADVANCE_RUN Job,由 Worker 领取推进——本服务不调用
-  Backend/ToolHandler/RuntimeHost 推进循环;
+  Backend/ToolHandler/Runtime 推进循环;
 - 取消 Run 经 ``RunService.transition_run`` 的 CAS + 合法迁移表进入 CANCELLED,
   并尽力取消仍在等待的 Input/Confirmation Request。
 
@@ -51,19 +54,13 @@ from runtime.persistence.base import (
     ACTIVE_JOB_STATUS_VALUES,
     ACTIVE_RUN_STATUS_VALUES,
     AccountStatus,
-    ConfigVersionStatus,
     ConfirmationRequestStatus,
     InputRequestStatus,
     MessageRole,
     MessageStatus,
     RunJobKind,
 )
-from runtime.persistence.models.configuration import (
-    Agent,
-    AgentVersion,
-    ModelConfigVersion,
-    WorkspaceAgentBinding,
-)
+from runtime.persistence.models.configuration import ModelConfigVersion
 from runtime.persistence.models.execution import Run, RunJob, ToolCall
 from runtime.persistence.models.identity import WorkspaceMembership
 from runtime.persistence.models.interaction import (
@@ -76,6 +73,11 @@ from runtime.persistence.repositories.events import EventRepository
 from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
+from runtime.workspace.agent_binding import (
+    WorkspaceAgentConfigurationInvalid,
+    WorkspaceAgentNotConfigured,
+    WorkspaceAgentResolver,
+)
 
 
 # ---- 错误码(与 apps.api.errors 的稳定错误码约定一致) ----
@@ -83,8 +85,6 @@ from runtime.persistence.repositories.sessions import SessionRepository
 SESSION_NOT_FOUND: Final = "SESSION_NOT_FOUND"
 RUN_NOT_FOUND: Final = "RUN_NOT_FOUND"
 REQUEST_NOT_FOUND: Final = "REQUEST_NOT_FOUND"
-AGENT_NOT_FOUND: Final = "AGENT_NOT_FOUND"
-AGENT_VERSION_NOT_FOUND: Final = "AGENT_VERSION_NOT_FOUND"
 MODEL_CONFIG_VERSION_NOT_FOUND: Final = "MODEL_CONFIG_VERSION_NOT_FOUND"
 AGENT_NOT_ENABLED_FOR_WORKSPACE: Final = "AGENT_NOT_ENABLED_FOR_WORKSPACE"
 WORKSPACE_AGENT_CONFIGURATION_INVALID: Final = "WORKSPACE_AGENT_CONFIGURATION_INVALID"
@@ -156,20 +156,26 @@ class SessionCommandService:
 
     # ---- Session 命令 ----
 
-    async def create_session(self, ctx: ActorContext, *, agent_id: uuid.UUID, title: str | None) -> Session:
+    async def create_session(self, ctx: ActorContext, *, title: str | None) -> Session:
         """在 ``ctx.workspace_id`` 创建私有 Session,绑定当前 actor 与成员身份。"""
-        agent = await self._session.get(Agent, agent_id)
-        if agent is None:
+        try:
+            selected = await WorkspaceAgentResolver(self._session).resolve(ctx.workspace_id)
+        except WorkspaceAgentNotConfigured as error:
             raise SessionCommandError(
-                status_code=404, code=AGENT_NOT_FOUND, message="agent 不存在"
-            )
-        agent_version_id = await self._enabled_agent_version_id(
-            workspace_id=ctx.workspace_id, agent_id=agent_id
-        )
+                status_code=409,
+                code=AGENT_NOT_ENABLED_FOR_WORKSPACE,
+                message="该 Workspace 未配置有效 Agent",
+            ) from error
+        except WorkspaceAgentConfigurationInvalid as error:
+            raise SessionCommandError(
+                status_code=409,
+                code=WORKSPACE_AGENT_CONFIGURATION_INVALID,
+                message="该 Workspace 存在多个生效的 Agent 版本",
+            ) from error
         return await self._sessions.create(
             workspace_id=ctx.workspace_id,
-            agent_id=agent_id,
-            agent_version_id=agent_version_id,
+            agent_id=selected.agent_id,
+            agent_version_id=selected.agent_version_id,
             created_by_actor_id=self._actor_id,
             created_by_membership_id=ctx.membership_id,
             title=title,
@@ -505,40 +511,6 @@ class SessionCommandService:
 
     # ---- 内部:版本解析与推进 ----
 
-    async def _enabled_agent_version_id(
-        self, *, workspace_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> uuid.UUID:
-        """解析 Workspace 当前唯一启用且已发布的 Agent 版本。"""
-        rows = await self._session.scalars(
-            select(AgentVersion.id)
-            .join(
-                WorkspaceAgentBinding,
-                WorkspaceAgentBinding.agent_version_id == AgentVersion.id,
-            )
-            .where(
-                WorkspaceAgentBinding.workspace_id == workspace_id,
-                WorkspaceAgentBinding.enabled.is_(True),
-                WorkspaceAgentBinding.effective_at <= func.now(),
-                AgentVersion.agent_id == agent_id,
-                AgentVersion.status == ConfigVersionStatus.PUBLISHED,
-            )
-            .order_by(AgentVersion.version.desc(), AgentVersion.id.desc())
-        )
-        version_ids = list(rows)
-        if not version_ids:
-            raise SessionCommandError(
-                status_code=409,
-                code=AGENT_NOT_ENABLED_FOR_WORKSPACE,
-                message="该 Workspace 未启用此 Agent",
-            )
-        if len(version_ids) != 1:
-            raise SessionCommandError(
-                status_code=409,
-                code=WORKSPACE_AGENT_CONFIGURATION_INVALID,
-                message="该 Workspace 存在多个生效的 Agent 版本",
-            )
-        return version_ids[0]
-
     async def _latest_model_config_version_id(
         self, workspace_id: uuid.UUID
     ) -> uuid.UUID | None:
@@ -580,7 +552,7 @@ class SessionCommandService:
     ) -> None:
         """恢复推进的最小事务:WAITING_* → QUEUED + ADVANCE_RUN Job。
 
-        不调用 Backend/ToolHandler/RuntimeHost 推进循环;Worker 领取 Job 后
+        不调用 Backend/ToolHandler/Runtime 推进循环;Worker 领取 Job 后
         从 Tool Resolution 重走完整 PreToolUse(架构文档 §5、§6)。
         """
         try:

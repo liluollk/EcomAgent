@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from apps.api.errors import ApiError
-from runtime.workspace.session_commands import SessionCommandError
+from runtime.commands.session import SessionCommandError
 
 
 @contextmanager

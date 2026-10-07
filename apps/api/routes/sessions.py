@@ -8,7 +8,7 @@
   ADVANCE_RUN Job;活动 Run 已存在时 409 ACTIVE_RUN_EXISTS。
 
 命令为短事务:服务只 flush,路由返回前统一 commit;本模块不调用
-Backend/ToolHandler/RuntimeHost 推进循环。
+Backend/ToolHandler/Runtime 推进循环。
 """
 
 from typing import Any
@@ -41,6 +41,7 @@ from apps.api.schemas.sessions import (
     SessionView,
 )
 from runtime.access.actor import ActorContextBuilder, ActorContextError
+from runtime.commands.session import SessionCommandService
 from runtime.persistence.base import (
     ConfirmationRequestStatus,
     InputRequestStatus,
@@ -50,7 +51,6 @@ from runtime.persistence.models.interaction import (
     ConfirmationRequest,
     InputRequest,
 )
-from runtime.workspace.session_commands import SessionCommandService
 
 
 router = APIRouter()
@@ -62,12 +62,12 @@ async def create_session(
     actor: ActorDep,
     session: SessionDep,
 ) -> SessionView:
-    """创建私有 Session;非工作区成员 403,agent 不存在 404。"""
+    """创建私有 Session;Agent 版本由服务端按 Workspace 当前绑定解析。"""
     ctx = await get_workspace_actor_context(payload.workspace_id, actor, session)
     with translated_commands():
         created = await SessionCommandService(
             session, actor_id=actor.actor_id
-        ).create_session(ctx, agent_id=payload.agent_id, title=payload.title)
+        ).create_session(ctx, title=payload.title)
     await session.commit()
     return SessionView(
         id=created.id,

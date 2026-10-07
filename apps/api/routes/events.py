@@ -23,7 +23,7 @@ from starlette.websockets import WebSocketDisconnect
 from apps.api.command_errors import translated_commands
 from apps.api.dependencies import WsActorDep, WsSessionDep
 from apps.api.event_stream import EventStreamService
-from runtime.workspace.session_commands import SessionCommandService
+from runtime.commands.session import SessionCommandService
 
 
 router = APIRouter()
