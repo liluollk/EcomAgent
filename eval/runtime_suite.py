@@ -3,7 +3,7 @@
 数据声明期望,代码执行验证:``eval/datasets/runtime/*.yaml`` 只声明用例的
 ``id/category/risk_level`` 与期望摘要;执行逻辑在 :class:`RuntimeSuite` 内
 按 id 分派到确定性的执行函数——每个用例直接驱动真实 Runtime 服务与真库
-(复用 :class:`eval.fixtures.IsolatedEnvironment` 的完整商品运行面,或
+(复用 :class:`eval.fixtures.IsolatedEnvironment` 的完整商品应用环境,或
 tests/runtime 的"提交式种子 + 独立短事务"最小种子模式),断言不变式后
 报告该例通过与否。全部用例确定性:无网络、无真实模型、无随机(仅行标识
 用 uuid,不参与断言),重复运行产生相同结论。
@@ -94,7 +94,7 @@ from runtime.orchestration.context import (
     ToolResultProjection,
 )
 from runtime.orchestration.limits import RunLimits
-from runtime.orchestration.runtime_host import RuntimeHost
+from runtime.orchestration.runtime import Runtime
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.orchestration.token_estimator import HeuristicTokenEstimator
 from runtime.persistence.base import (
@@ -443,7 +443,7 @@ async def _seed_advance_job(engine: AsyncEngine, ids: _SeedIds) -> RunJob:
 
 
 async def _seed_write_tool(engine: AsyncEngine, ids: _SeedIds) -> _WriteToolRows:
-    """提交 GLOBAL 写 Tool 版本行(RuntimeHost 的 ToolPin 解析依赖)。"""
+    """提交 GLOBAL 写 Tool 版本行(Runtime 的 ToolPin 解析依赖)。"""
     tool_definition_id = uuid.uuid4()
     tool_version_id = uuid.uuid4()
     stable_key = f"eval-write-tool-{uuid.uuid4()}"
@@ -585,7 +585,7 @@ async def _cleanup_seed(
 
 
 # ---------------------------------------------------------------------------
-# 共享:RuntimeHost 崩溃/故障注入 harness(真实服务 + 受控外部世界)
+# 共享:Runtime 崩溃/故障注入 harness(真实服务 + 受控外部世界)
 # ---------------------------------------------------------------------------
 
 
@@ -659,12 +659,19 @@ class _AlwaysAllowPipeline:
 class _PinnedToolResolver:
     """只解析 harness 种子写 Tool 的 ToolPin 解析器。"""
 
-    def __init__(self, stable_key: str, tool_version_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        stable_key: str,
+        tool_version_id: uuid.UUID,
+        handler: Any,
+    ) -> None:
         self._pin = ToolPin(
             stable_key=stable_key,
             version=1,
             version_id=tool_version_id,
             effect=ToolEffect.WRITE,
+            handler=handler,
+            output_schema=_TEST_OUTPUT_SCHEMA,
         )
 
     def by_stable_key(self, stable_key: str) -> ToolPin | None:
@@ -685,7 +692,7 @@ class _HarnessSnapshot:
 
 
 class _RuntimeHarness:
-    """RuntimeHost 故障注入封装:seed → 受控推进 → 恢复 → 断言。"""
+    """Runtime 故障注入封装:seed → 受控推进 → 恢复 → 断言。"""
 
     def __init__(self, engine: AsyncEngine, ids: _SeedIds, tool: _WriteToolRows) -> None:
         self._engine = engine
@@ -715,9 +722,9 @@ class _RuntimeHarness:
             BackendCompleted(finish_reason="tool_calls"),
         ]
 
-    def _host(self) -> RuntimeHost:
+    def _runtime(self) -> Runtime:
         estimator = HeuristicTokenEstimator()
-        return RuntimeHost(
+        return Runtime(
             session_factory=lambda: AsyncSession(self._engine, expire_on_commit=False),
             backend=self.backend,
             assembler=ContextAssembler(
@@ -738,11 +745,9 @@ class _RuntimeHarness:
             ),
             limits=_TEST_LIMITS,
             tool_pins=_PinnedToolResolver(
-                self._tool.stable_key, self._tool.tool_version_id
+                self._tool.stable_key, self._tool.tool_version_id, self.write_handler
             ),
             pipeline_factory=lambda: _AlwaysAllowPipeline(),
-            write_handler=self.write_handler,
-            output_schema=_TEST_OUTPUT_SCHEMA,
             adapter_key="eval-adapter",
             supports_reconciliation=True,
             worker_id="eval-runtime-worker",
@@ -751,7 +756,7 @@ class _RuntimeHarness:
     # -- 推进与恢复 ------------------------------------------------------
 
     async def run_worker_once(self) -> bool:
-        return await self._host().run_worker_once()
+        return await self._runtime().run_worker_once()
 
     async def reconcile(self, verdict: ReconcileResult) -> ReconcileOutcome:
         """创建并领取 RECONCILE_OPERATION Job,以真实 ReconciliationService 回查。"""
@@ -994,7 +999,11 @@ def _price_scenario(case_id: str) -> Scenario:
                 ]
             },
             "workspace": {"name": "runtime-suite"},
-            "actor": {"role": "owner"},
+            "actor": {
+                "role": "owner",
+                "permissions": ["product.read", "product.price.write"],
+                "store_scope_mode": "ALL",
+            },
             "messages": [{"role": "user", "content": "把 SKU-001 改成 2.00 元"}],
             "expected_final_state": {
                 "listings": [
@@ -1017,7 +1026,7 @@ async def _case_input_resume_revalidates(engine: AsyncEngine) -> None:
         backend=_PriceScriptBackend(sku="SKU-001", target_price="2.00"),
     )
     try:
-        view = await environment.runtime.start("把 SKU-001 改成 2.00 元")
+        view = await environment.application.start("把 SKU-001 改成 2.00 元")
         if view.status is not RunStatus.WAITING_INPUT or view.pending_input_id is None:
             raise CaseFailure(
                 f"missing store must produce WAITING_INPUT, got {view.status.value}"
@@ -1025,7 +1034,7 @@ async def _case_input_resume_revalidates(engine: AsyncEngine) -> None:
         store_id = environment.single_store_id
         if store_id is None:
             raise CaseFailure("seeded store vanished before answering the input request")
-        resumed = await environment.runtime.answer(
+        resumed = await environment.application.answer(
             view.pending_input_id, {"store_id": str(store_id)}
         )
         tool_call = await _single_tool_call(engine, environment.workspace_id, view.run_id)

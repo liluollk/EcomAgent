@@ -12,7 +12,7 @@
 
 - 可持久化定义只保存数据和版本，不保存 Python 函数；
 - 业务代码在进程启动时注册 Handler、输入要求解析器和 Policy；
-- Runtime Host 校验数据库配置与代码注册是否匹配，缺失时 fail-fast；
+- Runtime 校验数据库配置与代码注册是否匹配，缺失时 fail-fast；
 - Runtime 核心不反向导入 `agents/`、`adapters/` 或 `apps/`。
 
 不采用装饰器自动扫描全仓库、动态执行数据库脚本、前端编排任意节点和运行时下载插件。
@@ -34,12 +34,17 @@ runtime internal services / repositories / harness
 2. `runtime/` 不导入 `agents/`、`adapters/`、`apps/` 和 `eval/`；
 3. `agents/` 依赖 Runtime 公共接口，定义 Agent、Skill、Tool 元数据和业务扩展；
 4. `adapters/` 实现 Runtime Protocol 或业务 Agent 定义的领域端口；
-5. `apps/worker/` 是组合根，负责把定义、Handler、Repository、Backend 和外部集成组装成 Runtime；
+5. `composition/` 是商品运营产品组合根，负责把 Agent 定义、Handler、Repository、Backend 和外部集成组装成 Runtime；`apps/worker/` 负责 Worker 生命周期与任务调度；
 6. `apps/api/` 只通过应用服务提交命令和读取状态，不直接调用 AgentBackend 或 ToolHandler。
 
 架构测试必须扫描 import，阻止 Runtime 对上层模块形成反向依赖。
 
-从职责上可将同一 Runtime 解释为 Control Plane 与 Execution Plane：前者管理 Workspace、成员、权限、版本、Secret 和配置，后者管理 Session、Run、Job、状态、恢复和事件；Agent Harness 属于 Execution Plane 内面向模型的编排部分。这是逻辑视图，不新增顶层包、独立服务或网络调用。
+Agent Runtime 包含两组职责：
+
+- 运行配置与治理：Workspace、Actor、权限、版本、Secret 和运行配置；
+- 执行内核：Session、Run、Job、工具调用、交互、恢复和事件。
+
+这只是同一模块化单体中的逻辑职责划分，不对应独立进程、微服务或代码目录。Agent Harness 属于执行内核中面向模型的编排部分。
 
 ## 3. 公共定义与运行时实现分离
 
@@ -105,6 +110,8 @@ write_adapter_capabilities
 
 SkillVersion 保存完成一类任务的方法和约束，包括说明、适用条件、Prompt 片段以及所需 Tool/Source 的稳定 Key。Skill 不存放商品事实或文档正文；这些内容属于知识库。
 
+Context 常驻提供当前 Agent 的 Skill 名称、描述与版本；模型判断任务相关后调用 Runtime 内置只读 `load_skill`，Runtime 仅从当前 Run 固定的 Skill 版本中加载完整指令，并以事件记录激活事实。Skill 指令影响任务方法，不授予工具权限。
+
 Skill 可以是代码随附的全局内置定义，也可以是 Workspace 编辑的数据化定义；后者不能携带或执行 Python 代码。SkillVersion 发布后不可修改。Run 记录实际使用的 SkillVersion 集合，不通过“当前最新版本”恢复。
 
 ### 3.5 SourceDefinition
@@ -141,6 +148,8 @@ RuntimeAssembly
 
 Registry 只完成按稳定标识查找，不承担业务决策。
 
+当前产品只发布商品运营 Agent；Workspace 绑定一个已发布版本，用户不在任务入口选择 Agent。Runtime 保留通用 Agent/AgentVersion 数据模型，但不意味着产品支持用户创建或切换多个业务 Agent。
+
 启动校验包括：
 
 - 每个启用的 AgentVersion 都能找到所需 Skill、Tool 和 Source 版本；
@@ -153,6 +162,8 @@ Registry 只完成按稳定标识查找，不承担业务决策。
 MCP Tool 在 Source 同步时生成不可变 ToolVersion；MCP Server 返回的 Schema 发生变化时创建新版本，不能覆盖正在运行的版本。
 
 MCP Server 只提供远端工具名称、描述和 Schema，不能自行决定本地 `effect`、动作权限或是否需要确认。每个 MCP Tool 必须经过本地受信任配置绑定副作用分类与权限；未分类工具默认禁用。Schema 或描述变化后，新 ToolVersion 必须重新完成本地分类才能启用。
+
+商品平台 REST API 不作为动态 `Source`：商品 `Local Tool` 通过 `CommerceAdapter` 调用固定业务端点。REST Adapter 只接受组合根配置的 HTTPS Base URL 与主机 allowlist，不接受模型提供 URL/方法；MCP Tool 仍由 Source 装载。
 
 ## 5. AgentBackend 接口
 
@@ -212,6 +223,8 @@ Assistant Message 状态：
 流式文本写入 Message 累积内容，并以合并后的 AgentEvent 推送；不要求每个 token 单独落库。WebSocket 断线后，客户端先读取当前 Message 快照，再按 Event cursor 重放后续事件。
 
 Provider 在完成前失败时，当前 Assistant Message 标记为 `ABORTED`。只有错误被分类为可重试、尚未产生完整 ToolCall、未超过模型调用预算时，才创建新 RunAttempt 继续同一 Run。
+
+事务边界：`Runtime` 不用单事务包住整个 `AgentLoop.advance`。状态迁移与对应 AgentEvent 在短事务内一同提交；请求模型前先提交准备状态，流式消息按合并块写入并提交后才等待下一段 Provider 输出。进程在流中途退出时，恢复推进会先将遗留 `STREAMING` Message 标为 `ABORTED`，部分输出不进入 Context。
 
 ## 7. ContextAssembler
 
@@ -337,6 +350,8 @@ normalized_arguments
 deadline
 trace_context
 ```
+
+Runtime 写操作按两阶段事务执行：先提交 `Operation(EXECUTING)`、Attempt 与授权审计，再在无 Runtime 数据库事务期间调用平台 Adapter；回执经过 PostToolUse 后，在新的短事务中提交 Operation/ToolCall/Run 状态与事件。读 Tool 请求和平台回查同样在 Runtime 事务外等待网络。长调用由 `WorkerHost` 心跳续租；每个 Runtime 提交检查点仍校验 lease token，失租执行不得继续持久化。
 
 ToolHandler 返回标准化 ToolResult：
 

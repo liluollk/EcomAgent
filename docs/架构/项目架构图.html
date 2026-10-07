@@ -705,10 +705,10 @@
           <div class="flow-arrow" aria-hidden="true"></div>
 
           <section class="runtime-shell" aria-label="Agent Runtime 模块化单体">
-            <div class="runtime-label"><strong>Agent Runtime</strong><span>ONE DEPLOYABLE · TWO LOGICAL PLANES</span></div>
+            <div class="runtime-label"><strong>Agent Runtime</strong><span>ONE DEPLOYABLE · TWO LOGICAL GROUPS</span></div>
 
             <section class="plane control-plane" data-node="control" data-connects="api workspace identity versions secrets session harness">
-              <div class="plane-title"><strong>Runtime Control Plane</strong><span>逻辑边界 · 非独立服务</span></div>
+              <div class="plane-title"><strong>运行配置与治理</strong><span>逻辑边界 · 非独立服务</span></div>
               <div class="node-grid">
                 <button class="node" type="button" data-node="workspace" data-connects="control identity versions session"><span class="node-kicker">Scope</span><strong>Workspace</strong><small>品牌 / 业务单元、店铺和 Agent 配置</small></button>
                 <button class="node safety-node" type="button" data-node="identity" data-connects="control workspace pretool requests"><span class="node-kicker">RBAC</span><strong>成员与权限</strong><small>角色、动作权限与店铺资源范围</small></button>
@@ -718,7 +718,7 @@
             </section>
 
             <section class="plane execution-plane">
-              <div class="plane-title"><strong>Runtime Execution Plane</strong><span>持久执行 · 状态恢复 · 安全收敛</span></div>
+              <div class="plane-title"><strong>Runtime 执行内核</strong><span>持久执行 · 状态恢复 · 安全收敛</span></div>
               <div class="execution-layout">
                 <div class="execution-column">
                   <button class="node" type="button" data-node="session" data-run-step="03" data-connects="api jobs context requests postgres"><span class="step-badge">03</span><span class="node-kicker">Conversation</span><strong>Session / Run</strong><small>一次逻辑任务、消息与活动状态</small></button>
@@ -811,7 +811,7 @@
     const details = {
       workbench: { label: 'PRODUCT SURFACE', title: 'Agent 工作台', summary: '运营人员使用业务 Agent 的唯一产品入口。', input: '用户任务、Input Request 回答、写前确认', output: '命令与查询请求；由 EventReducer 生成的 UI 投影', boundary: '不直接调用模型、MCP 或业务平台 API' },
       api: { label: 'APPLICATION BOUNDARY', title: 'FastAPI API', summary: '接收命令、验证身份并返回快照或事件，不运行长时 Agent Loop。', input: 'JWT、Workspace 命令、Session 命令', output: '短事务状态变更、RunJob、查询快照', boundary: '不在请求进程内执行模型或 Tool' },
-      control: { label: 'LOGICAL PLANE', title: 'Runtime Control Plane', summary: '管理谁能使用什么能力，以及运行时固定哪些配置版本。', input: 'Workspace 配置、成员权限、版本和 Secret', output: 'ActorContext、RuntimeAssembly 与版本快照', boundary: '是模块化单体中的职责，不是独立微服务' },
+      control: { label: 'LOGICAL GROUP', title: '运行配置与治理', summary: '管理谁能使用什么能力，以及运行时固定哪些配置版本。', input: 'Workspace 配置、成员权限、版本和 Secret', output: 'ActorContext、RuntimeAssembly 与版本快照', boundary: '是模块化单体中的职责，不是独立微服务' },
       workspace: { label: 'CONTROL PLANE', title: 'Workspace', summary: '一个品牌或业务单元的长期配置边界，可连接多个淘宝和抖音店铺。', input: '成员、店铺、Agent、模型、Skill 与 Source 配置', output: '当前可用能力及非敏感配置摘要', boundary: '不是固定单店上下文，也不包含 Session 私有消息' },
       identity: { label: 'SECURITY CONTRACT', title: '成员与权限', summary: '将成员身份、动作权限和通用资源范围组合成当前 ActorContext。', input: '当前 Membership、Permission、ResourceScope', output: 'ALLOW 或稳定拒绝原因', boundary: '写前实时读取；不长期相信 JWT 或 Run 快照' },
       versions: { label: 'REPRODUCIBILITY', title: '版本与配置', summary: 'Run 固定模型、Agent、Skill、Tool、Source 与 Prompt 的实际版本。', input: '已发布配置与代码注册', output: '不可变版本快照和 Hash', boundary: '安全权限与业务资源状态仍需写前读取当前值' },

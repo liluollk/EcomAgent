@@ -8,8 +8,8 @@
   不跨 case 共享;
 - 能力版本(Agent/Skill/Tool/Model)按 stable_key 幂等落库复用,不随
   case 重复创建;
-- 推进经与 apps/worker 同源的 :class:`ProductRuntime` 门面(组合核心
-  ``build_product_runtime`` 已下沉至 :mod:`adapters.commerce.product_runtime`,
+- 推进经与 apps/worker 同源的 :class:`ProductApplication` 门面(组合核心
+  ``build_product_application`` 位于 :mod:`composition.product_operations`,
   eval 不 import apps)。
 
 不做 UI:种子直接经 runtime 持久层与 agents.product_operations 模型写入
@@ -35,14 +35,15 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from adapters.commerce.product_runtime import (
-    ProductRuntime,
-    bootstrap_product_capabilities,
-    build_product_runtime,
-)
+from adapters.commerce.mock_adapter import MockCommerceAdapter
 from agents.product_operations.domain.models import ListingStatus, StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.policy.models import PricePolicyConfig
+from composition.product_operations import (
+    ProductApplication,
+    bootstrap_product_capabilities,
+    build_product_application,
+)
 from eval.results import FinalState
 from eval.schema import ListingState, Scenario
 from runtime.backend.protocol import AgentBackend
@@ -54,6 +55,7 @@ from runtime.persistence.base import (
 )
 from runtime.persistence.models.identity import (
     MembershipPermission,
+    MembershipResourceScope,
     MembershipResourceScopeMode,
     User,
     Workspace,
@@ -129,6 +131,7 @@ async def _seed_listing(
     price: Decimal,
     currency: str | None,
     status: str | None,
+    products_by_sku: dict[str, Product],
 ) -> SeededListing:
     """按 Scenario 符号种子 Store/Product/Listing 并返回符号映射。"""
     store = Store(
@@ -139,13 +142,17 @@ async def _seed_listing(
         name=symbol,
         aliases=[symbol],
     )
-    product = Product(
-        id=uuid.uuid4(),
-        workspace_id=workspace_id,
-        sku=sku,
-        title=f"eval-product-{sku}",
-    )
-    session.add_all([store, product])
+    product = products_by_sku.get(sku)
+    if product is None:
+        product = Product(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            sku=sku,
+            title=f"eval-product-{sku}",
+        )
+        products_by_sku[sku] = product
+        session.add(product)
+    session.add(store)
     await session.flush()
     listing = Listing(
         id=uuid.uuid4(),
@@ -177,7 +184,7 @@ class SeededListing:
 
 @dataclass(frozen=True)
 class IsolatedEnvironment:
-    """单个 case/repetition 的独立权威环境(身份 + 业务状态 + 运行面)。"""
+    """单个 case/repetition 的独立权威环境(身份 + 业务状态 + 执行环境)。"""
 
     engine: AsyncEngine
     scenario: Scenario
@@ -185,17 +192,19 @@ class IsolatedEnvironment:
     actor_id: uuid.UUID
     membership_id: uuid.UUID
     listings: tuple[SeededListing, ...]
-    runtime: ProductRuntime
+    application: ProductApplication
+    commerce_write_observer: MockCommerceAdapter
 
     @classmethod
     async def create(
         cls, engine: AsyncEngine, scenario: Scenario, *, backend: AgentBackend
     ) -> IsolatedEnvironment:
-        """种子身份与业务状态(独立短事务提交)并组装注入 Backend 的运行面。"""
+        """种子身份与业务状态(独立短事务提交)并组装注入 Backend 的商品应用。"""
         workspace_id = uuid.uuid4()
         actor_id = uuid.uuid4()
         membership_id = uuid.uuid4()
         seeded: list[SeededListing] = []
+        products_by_sku: dict[str, Product] = {}
 
         session = AsyncSession(engine, expire_on_commit=False)
         try:
@@ -223,27 +232,6 @@ class IsolatedEnvironment:
                 # 不保证跨表插入顺序;按依赖分批 flush,被引用行先落库。
                 session.add_all([workspace, user, membership])
                 await session.flush()
-                session.add_all(
-                    [
-                        MembershipPermission(
-                            workspace_id=workspace_id,
-                            membership_id=membership_id,
-                            permission="product.read",
-                        ),
-                        MembershipPermission(
-                            workspace_id=workspace_id,
-                            membership_id=membership_id,
-                            permission="product.price.write",
-                        ),
-                        MembershipResourceScopeMode(
-                            workspace_id=workspace_id,
-                            membership_id=membership_id,
-                            resource_type="store",
-                            mode=ResourceScopeMode.ALL,
-                        ),
-                    ]
-                )
-                await session.flush()
                 for spec in scenario.initial_state.listings:
                     if spec.price is None:
                         # initial_state 中 price 为 None 表示该字段"不提供":
@@ -258,14 +246,54 @@ class IsolatedEnvironment:
                             price=spec.price,
                             currency=spec.currency,
                             status=spec.status,
+                            products_by_sku=products_by_sku,
                         )
                     )
+                session.add_all(
+                    MembershipPermission(
+                        workspace_id=workspace_id,
+                        membership_id=membership_id,
+                        permission=permission,
+                    )
+                    for permission in scenario.actor.permissions
+                )
+                if scenario.actor.store_scope_mode != "NONE":
+                    persistence_mode = ResourceScopeMode(
+                        scenario.actor.store_scope_mode
+                    )
+                    session.add(
+                        MembershipResourceScopeMode(
+                            workspace_id=workspace_id,
+                            membership_id=membership_id,
+                            resource_type="store",
+                            mode=persistence_mode,
+                        )
+                    )
+                    if persistence_mode is ResourceScopeMode.SELECTED:
+                        requested_symbols = set(scenario.actor.store_ids)
+                        available_symbols = {listing.symbol for listing in seeded}
+                        missing_symbols = requested_symbols - available_symbols
+                        if missing_symbols:
+                            raise ValueError(
+                                "actor store scope references unseeded stores: "
+                                + ", ".join(sorted(missing_symbols))
+                            )
+                        session.add_all(
+                            MembershipResourceScope(
+                                workspace_id=workspace_id,
+                                membership_id=membership_id,
+                                resource_type="store",
+                                resource_id=str(listing.store_id),
+                            )
+                            for listing in seeded
+                            if listing.symbol in requested_symbols
+                        )
         finally:
             await session.close()
 
-        # 能力版本幂等落库(全局按 stable_key 复用),再组装注入 Backend 的运行面。
+        # 能力版本幂等落库(全局按 stable_key 复用),再组装注入 Backend 的商品应用。
         await bootstrap_product_capabilities(engine, workspace_id)
-        runtime = await build_product_runtime(
+        application = await build_product_application(
             engine,
             backend=backend,
             workspace_id=workspace_id,
@@ -274,6 +302,8 @@ class IsolatedEnvironment:
             price_config=EVAL_PRICE_CONFIG,
             worker_id=f"eval-worker-{uuid.uuid4().hex[:8]}",
         )
+        if not isinstance(application.adapter, MockCommerceAdapter):
+            raise TypeError("Eval fixtures require the deterministic MockCommerceAdapter")
         return cls(
             engine=engine,
             scenario=scenario,
@@ -281,7 +311,8 @@ class IsolatedEnvironment:
             actor_id=actor_id,
             membership_id=membership_id,
             listings=tuple(seeded),
-            runtime=runtime,
+            application=application,
+            commerce_write_observer=application.adapter,
         )
 
     def store_id_for_sku(self, sku: str) -> uuid.UUID | None:
@@ -290,6 +321,18 @@ class IsolatedEnvironment:
             if seeded.sku == sku:
                 return seeded.store_id
         return None
+
+    def store_id_for_symbol(self, symbol: str, *, sku: str | None = None) -> uuid.UUID | None:
+        """按场景符号键解析用户明确选择的店铺,可用 SKU 消除重复店铺歧义。"""
+        matches = [
+            listing
+            for listing in self.listings
+            if listing.symbol == symbol and (sku is None or listing.sku == sku)
+        ]
+        if not matches:
+            return None
+        distinct_ids = {listing.store_id for listing in matches}
+        return next(iter(distinct_ids)) if len(distinct_ids) == 1 else None
 
     @property
     def single_store_id(self) -> uuid.UUID | None:
@@ -326,8 +369,8 @@ class IsolatedEnvironment:
             await session.close()
 
     async def aclose(self) -> None:
-        """关闭运行面的 Adapter Session(环境生命周期终点)。"""
-        await self.runtime.aclose()
+        """关闭商品应用的 Adapter Session(环境生命周期终点)。"""
+        await self.application.aclose()
 
     async def cleanup(self) -> None:
         """Teardown:按外键逆序删除本工作区行,并删除本次引用的全局能力行。
@@ -345,7 +388,7 @@ class IsolatedEnvironment:
                         {"user": self.actor_id} if key == "user" else {"ws": self.workspace_id}
                     )
                     await session.execute(sa.text(text), params)
-                capability = dict(self.runtime.capability_ids)
+                capability = dict(self.application.capability_ids)
                 for definition_id in capability.get(
                     "tool_definition_ids", {}
                 ).values():

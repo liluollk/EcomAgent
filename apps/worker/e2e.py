@@ -13,12 +13,12 @@
 
   店铺不在用户消息里,由 PreToolUse 管线产生缺店铺 Input Request,
   经既有 API 端点回答;确认同样经既有端点接受。
-- :class:`MockCommerceAdapter`(经既有 ``build_product_runtime`` 组装)
+- :class:`MockCommerceAdapter`(经既有 ``build_product_application`` 组装)
   真实写 ``product_operations.listings`` 权威价。
 - :class:`E2EJobHandler`:Worker 进程的 Job 回调。按租约加载 Run 的
   workspace/actor,懒组装并缓存每 ``(workspace, actor)`` 的
-  :class:`ProductRuntime`,从持久化状态重建"已回答字段"视图后经
-  ``ProductRuntime.advance_leased`` 推进(不重复领取 Job)。
+  :class:`ProductApplication`,从持久化状态重建"已回答字段"视图后经
+  ``ProductApplication.advance_leased`` 推进(不重复领取 Job)。
 
 已回答字段的重建:InputService 回答时把值合并进 ToolCall 的
 ``normalized_arguments``,InputRequest 行本身不存值(审计也不落值)。
@@ -43,7 +43,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.policy.models import PricePolicyConfig
-from apps.worker.assembly import ProductRuntime, build_product_runtime
+from apps.worker.assembly import (
+    ProductApplication,
+    build_product_application,
+)
 from runtime.backend.protocol import (
     AgentBackendCapabilities,
     BackendCompleted,
@@ -149,21 +152,21 @@ class E2EScriptedBackend:
         return None
 
 
-async def build_e2e_runtime(
+async def build_e2e_application(
     engine: AsyncEngine,
     *,
     workspace_id: uuid.UUID,
     actor_id: uuid.UUID,
     membership_id: uuid.UUID,
     worker_id: str = "e2e-worker",
-) -> ProductRuntime:
-    """E2E 组合根:ScriptedBackend + Mock Commerce Adapter 的完整运行面。
+) -> ProductApplication:
+    """E2E 组合根:ScriptedBackend + Mock Commerce Adapter 的完整商品应用环境。
 
-    复用既有 :func:`build_product_runtime`(启动校验、能力落库、PreToolUse
+    复用既有 :func:`build_product_application`(启动校验、能力落库、PreToolUse
     管线、MockCommerceAdapter 桥接),只把 Backend 换成
     :class:`E2EScriptedBackend`;不改 runtime/ 语义。
     """
-    return await build_product_runtime(
+    return await build_product_application(
         engine,
         backend=E2EScriptedBackend(),
         workspace_id=workspace_id,
@@ -218,25 +221,29 @@ async def rebuild_answered_view(
 class E2EJobHandler:
     """``RUNTIME_E2E=1`` 的 Worker Job 回调:按租约推进已存在的 Run。
 
-    每个 ``(workspace, actor)`` 懒组装并缓存一个 ProductRuntime(能力版本
-    落库幂等);推进经 ``ProductRuntime.advance_leased`` 复用 RuntimeHost 的
+    每个 ``(workspace, actor)`` 懒组装并缓存一个 ProductApplication(能力版本
+    落库幂等);推进经 ``ProductApplication.advance_leased`` 复用 Runtime 的
     单事务 AgentLoop 语义,WorkerHost 负责外层 claim/heartbeat/complete。
     """
 
     def __init__(self, engine: AsyncEngine, *, worker_id: str = "e2e-worker") -> None:
         self._engine = engine
         self._worker_id = worker_id
-        self._runtimes: dict[tuple[uuid.UUID, uuid.UUID], ProductRuntime] = {}
+        self._applications: dict[
+            tuple[uuid.UUID, uuid.UUID], ProductApplication
+        ] = {}
 
     @property
-    def runtimes(self) -> Mapping[tuple[uuid.UUID, uuid.UUID], ProductRuntime]:
-        return self._runtimes
+    def applications(
+        self,
+    ) -> Mapping[tuple[uuid.UUID, uuid.UUID], ProductApplication]:
+        return self._applications
 
     async def aclose(self) -> None:
-        """关闭全部缓存运行面的 Adapter Session(进程退出路径)。"""
-        for runtime in self._runtimes.values():
-            await runtime.aclose()
-        self._runtimes.clear()
+        """关闭全部缓存商品应用的 Adapter Session(进程退出路径)。"""
+        for application in self._applications.values():
+            await application.aclose()
+        self._applications.clear()
 
     async def __call__(self, lease: Lease) -> LeaseOutcome:
         session = AsyncSession(self._engine, expire_on_commit=False)
@@ -246,22 +253,24 @@ class E2EJobHandler:
             await session.close()
         if isinstance(context, LeaseOutcome):
             return context
-        runtime = await self._runtime_for(context)
-        return await runtime.advance_leased(lease, answered=context.answered)
+        application = await self._application_for(context)
+        return await application.advance_leased(lease, answered=context.answered)
 
-    async def _runtime_for(self, context: _LeaseContext) -> ProductRuntime:
+    async def _application_for(
+        self, context: _LeaseContext
+    ) -> ProductApplication:
         key = (context.workspace_id, context.actor_id)
-        runtime = self._runtimes.get(key)
-        if runtime is None:
-            runtime = await build_e2e_runtime(
+        application = self._applications.get(key)
+        if application is None:
+            application = await build_e2e_application(
                 self._engine,
                 workspace_id=context.workspace_id,
                 actor_id=context.actor_id,
                 membership_id=context.membership_id,
                 worker_id=self._worker_id,
             )
-            self._runtimes[key] = runtime
-        return runtime
+            self._applications[key] = application
+        return application
 
     async def _load_context(
         self, session: AsyncSession, lease: Lease
@@ -321,7 +330,7 @@ __all__ = [
     "E2EJobHandler",
     "E2EScriptedBackend",
     "ParsedPriceTask",
-    "build_e2e_runtime",
+    "build_e2e_application",
     "parse_price_task",
     "rebuild_answered_view",
 ]

@@ -80,10 +80,10 @@ Eval 是 Runtime 外部的工程验证系统，通过固定场景、Runner 和 S
 ```text
 Agent 工作台 / FastAPI
     ↓
-Runtime Control Plane
+运行配置与治理
     Workspace、成员、权限、版本、Secret、配置
     ↓
-Runtime Execution Plane
+Runtime 执行内核
     Session、Run、RunJob、状态机、恢复、Request、AgentEvent
     └── Agent Harness
         Context、Prompt、AgentBackend、Agent Loop、Tool 暴露与结果回填
@@ -94,7 +94,12 @@ Capability Layer
 Eval ──通过公开 API / 协议验证 Runtime，不进入生产执行链
 ```
 
-Control Plane 与 Execution Plane 是同一模块化单体中的逻辑职责，不对应独立进程、微服务或顶层代码包。Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
+Agent Runtime 包含两组职责：
+
+- 运行配置与治理：Workspace、Actor、权限、版本、Secret 和运行配置；
+- 执行内核：Session、Run、Job、工具调用、交互、恢复和事件。
+
+这只是同一模块化单体中的逻辑职责划分，不对应独立进程、微服务或代码目录。Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
 
 ## 6. 依赖边界
 
@@ -122,7 +127,7 @@ Runtime 公共接口、Harness 和扩展协议以 `docs/架构/Runtime核心接�
 
 ### 7.1 Workspace / Session
 
-- Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、可用 Agent 与 Sources；
+- Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、当前绑定的商品运营 Agent 版本与 Sources；产品入口不提供业务 Agent 选择或自动路由；
 - Session 管理一次持续对话的消息与上下文，可以包含多个 Run；
 - 一条普通用户消息创建一个新的逻辑 Run；Input Request、Confirmation Request、Worker 重启、失败重试和租约接管只恢复原 Run，不创建新 Run；
 - 每次 Worker 实际调度原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；
@@ -418,7 +423,7 @@ adapters/
 
 apps/
     api/                # FastAPI 命令、查询与事件接口
-    worker/             # PostgreSQL Job Worker 与 Runtime Host
+    worker/             # PostgreSQL Job Worker 与 Runtime
     workbench/          # React + TypeScript Agent 工作台
 
 eval/
@@ -440,7 +445,7 @@ docs/
 ## 13. 技术选型
 
 - Runtime：Python 3.12、Pydantic v2、asyncio；
-- Runtime Host：FastAPI、WebSocket、独立 Runtime Worker；
+- Runtime：FastAPI、WebSocket、独立 Runtime Worker；
 - Agent 工作台：React、TypeScript；
 - 能力协议：MCP、本地 Python Tool；业务平台使用代码 Adapter；
 - 状态存储：PostgreSQL、SQLAlchemy 2、Alembic；
