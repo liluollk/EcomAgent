@@ -208,6 +208,15 @@ def test_infrastructure_error_fails_gate(gate: ReleaseGate) -> None:
     assert result.failures == ["INFRASTRUCTURE_ERROR"]
 
 
+def test_invalid_protocol_fails_gate(gate: ReleaseGate) -> None:
+    """有 SKIPPED 等情况导致协议无效时，不允许比较任务完成率。"""
+    report = build_report(clean_results())
+    report["totals"]["protocol_valid"] = False
+    result = gate.check(report)
+    assert result.passed is False
+    assert result.failures == ["INVALID_PROTOCOL"]
+
+
 def test_empty_denominator_fails_gate(gate: ReleaseGate) -> None:
     """真实分母为 0(无可信结果)即失败。"""
     report = build_report([])

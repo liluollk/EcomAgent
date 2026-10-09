@@ -9,6 +9,7 @@
 - ``PROTOCOL_MISMATCH``:报告协议指纹与 Gate 记录不一致(所有比较必须
   使用同一协议指纹);
 - ``DATASET_SPLIT_MISMATCH``:只有 ``held_out`` 报告可用于能力基线比较;
+- ``INVALID_PROTOCOL``:报告必须明确声明 ``totals.protocol_valid`` 为 True;
 - ``INFRASTRUCTURE_ERROR``:报告含基础设施错误(计数 > 0 或错误列表非空);
 - ``EMPTY_DENOMINATOR``:真实分母(``totals.quality_denominator``)缺失
   或为 0——没有可信结果就不存在"通过";
@@ -45,6 +46,7 @@ from eval.gates.schema import GateResult, ReleaseGate, is_metric_number
 
 FAIL_PROTOCOL_MISMATCH = "PROTOCOL_MISMATCH"
 FAIL_DATASET_SPLIT_MISMATCH = "DATASET_SPLIT_MISMATCH"
+FAIL_INVALID_PROTOCOL = "INVALID_PROTOCOL"
 FAIL_INFRASTRUCTURE_ERROR = "INFRASTRUCTURE_ERROR"
 FAIL_EMPTY_DENOMINATOR = "EMPTY_DENOMINATOR"
 FAIL_RUNTIME_SUITE = "RUNTIME_SUITE_NOT_PASSED"
@@ -77,6 +79,9 @@ def check_release(gate: ReleaseGate, report: Mapping[str, Any]) -> GateResult:
     details["dataset_split"] = split
     if split != "held_out":
         failures.append(FAIL_DATASET_SPLIT_MISMATCH)
+
+    if totals.get("protocol_valid") is not True:
+        failures.append(FAIL_INVALID_PROTOCOL)
 
     # -- 硬门槛:无基础设施错误 ------------------------------------------
     infra_count = totals.get("infrastructure_errors")
