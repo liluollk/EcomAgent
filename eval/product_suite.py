@@ -2,14 +2,14 @@
 
 把固定配置的商品 Agent 评测端到端跑起来::
 
-    python -m eval.product_suite --split development|regression|held_out|safety \
+    python -m eval.product_suite --split core|blind|clarification|regression|safety \
         --output reports/xxx.json
 
 流程(前置校验全部通过才发任何模型请求):
 
-1. **数据集完整性**:加载分区 manifest;``held_out`` 先比对
-   ``held_out.yaml`` 文件字节 SHA-256 与 ``manifest.held_out_sha256``
-   (保留集漂移即拒绝),再校验场景文件 ID 与 manifest 分区清单一致;
+1. **数据集完整性**:加载分区 manifest;``core``/``blind`` 先比对
+   YAML 文件字节 SHA-256 与 manifest 声明(固定集漂移即拒绝),再校验
+   场景文件 ID 与 manifest 分区清单一致;
 2. **环境变量预检**:`EVAL_BASE_URL`/`EVAL_MODEL`/`EVAL_API_KEY` 缺一即明确
    报错(逐个列出变量名)并以非零码退出;`EVAL_BASE_URL`/`EVAL_MODEL` 还须
    与随库固定 Provider 配置(``eval/providers/deepseek.json``)一致——偏离即
@@ -75,9 +75,10 @@ _MODEL_ENV: Final[str] = "EVAL_MODEL"
 _REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (_BASE_URL_ENV, _MODEL_ENV, API_KEY_ENV_VAR)
 
 _SPLIT_FILES: Final[dict[str, str]] = {
-    "development": "development.yaml",
+    "core": "core.yaml",
+    "blind": "blind.yaml",
+    "clarification": "clarification.yaml",
     "regression": "regression.yaml",
-    "held_out": "held_out.yaml",
     "safety": "safety.yaml",
 }
 
@@ -101,7 +102,7 @@ class ProductSuiteError(Exception):
 def _load_split(
     split: str, dataset_dir: Path
 ) -> tuple[list[Scenario], DatasetManifest]:
-    """加载分区场景并校验完整性;held_out 先比对哈希。"""
+    """加载分区场景并校验完整性;Core/Blind 先比对哈希。"""
     manifest = load_manifest(dataset_dir / "manifest.json")
     relative = _SPLIT_FILES.get(split)
     if relative is None:
@@ -109,22 +110,28 @@ def _load_split(
     path = dataset_dir / relative
     if not path.is_file():
         raise ProductSuiteError(f"dataset file is missing: {path}")
-    if split == "held_out":
+    frozen_hashes = {
+        "core": manifest.core_sha256,
+        "blind": manifest.blind_sha256,
+    }
+    if split in frozen_hashes:
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != manifest.held_out_sha256:
+        expected = frozen_hashes[split]
+        if actual != expected:
             raise ProductSuiteError(
-                f"held_out_sha256 mismatch for {path}: manifest declares "
-                f"{manifest.held_out_sha256}, file hashes to {actual}; "
-                "refusing to run against a drifted held-out set"
+                f"{split}_sha256 mismatch for {path}: manifest declares "
+                f"{expected}, file hashes to {actual}; "
+                f"refusing to run against a drifted {split} set"
             )
     scenarios = load_dataset(path)
     if not scenarios:
         raise ProductSuiteError(f"dataset {path} declares no scenarios")
     declared_ids = sorted(
         {
-            "development": manifest.development_ids,
+            "core": manifest.core_ids,
+            "blind": manifest.blind_ids,
+            "clarification": manifest.clarification_ids,
             "regression": manifest.regression_ids,
-            "held_out": manifest.held_out_ids,
             "safety": manifest.safety_ids,
         }[split]
     )
@@ -297,7 +304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # 1) 数据集完整性(held_out 哈希先行)。
+    # 1) 数据集完整性(Core/Blind 哈希先行)。
     try:
         scenarios, manifest = _load_split(args.split, Path(args.dataset_dir))
     except (ProductSuiteError, ValueError, TypeError, OSError) as error:
@@ -321,7 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "split": args.split,
         "dataset_dir": str(Path(args.dataset_dir)),
         "scenario_count": len(scenarios),
-        "held_out_sha256_verified": args.split == "held_out",
+        "frozen_sha256_verified": args.split in {"core", "blind"},
         "manifest_scorer_version": manifest.scorer_version,
     }
 

@@ -1,45 +1,29 @@
 {
   "schema_version": 2,
   "scorer_version": "v3",
-  "development_ids": [
-    "dev-read-001",
-    "dev-read-002",
-    "dev-read-003",
-    "dev-read-004",
-    "dev-write-002",
-    "dev-write-003",
-    "dev-write-004",
-    "dev-clarify-001",
-    "dev-clarify-002",
-    "dev-multiturn-001",
-    "dev-composite-001",
-    "dev-composite-002",
-    "dev-composite-003"
+  "core_ids": [
+    "core-read-001", "core-read-002", "core-read-003", "core-read-004",
+    "core-write-001", "core-write-002", "core-write-003", "core-write-004", "core-write-005", "core-write-006",
+    "core-relative-001", "core-relative-002", "core-relative-003", "core-relative-004", "core-relative-005", "core-relative-006",
+    "core-multistore-001", "core-multistore-002", "core-multistore-003", "core-multistore-004", "core-multistore-005", "core-multistore-006",
+    "core-composite-001", "core-composite-002", "core-composite-003", "core-composite-004",
+    "core-multiturn-001", "core-multiturn-002", "core-multiturn-003", "core-multiturn-004"
+  ],
+  "blind_ids": [
+    "blind-read-001", "blind-write-001", "blind-relative-001", "blind-relative-002",
+    "blind-multistore-001", "blind-multistore-002", "blind-composite-001", "blind-composite-002",
+    "blind-multiturn-001", "blind-multiturn-002"
+  ],
+  "clarification_ids": [
+    "clarify-store-001", "clarify-store-002", "clarify-sku-001",
+    "clarify-sku-002", "clarify-price-001", "clarify-price-002"
   ],
   "regression_ids": [],
-  "held_out_ids": [
-    "held-read-status-001",
-    "held-read-gap-001",
-    "held-write-explicit-001",
-    "held-write-constraint-001",
-    "held-clarify-store-001",
-    "held-clarify-store-002",
-    "held-select-higher-001",
-    "held-percent-change-001",
-    "held-search-then-write-001",
-    "held-multiturn-preserve-001",
-    "held-multiturn-revise-001",
-    "held-compare-fixed-target-001"
-  ],
   "safety_ids": [
-    "safe-no-write-permission-001",
-    "safe-store-out-of-scope-001",
-    "safe-price-floor-001",
-    "safe-price-delta-001",
-    "safe-prompt-injection-001",
-    "safe-cross-store-001",
-    "safe-sensitive-cost-001",
-    "safe-retry-denied-001"
+    "safe-no-write-permission-001", "safe-store-out-of-scope-001",
+    "safe-price-floor-001", "safe-price-delta-001", "safe-prompt-injection-001",
+    "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001"
   ],
-  "held_out_sha256": "65e99bff7aacadc0c150d3cbece0c4b7a476da3977380af4ec2b38bf85237197"
+  "core_sha256": "6158ed4041cc7c9a17984ab1b410a3f996183f1b53fe7cea667251391e52630d",
+  "blind_sha256": "846ade7b9736736ef1730b1357f86f32a6a2e38e6c91d9c5c270d08d52cb6927"
 }

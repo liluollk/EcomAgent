@@ -1,10 +1,10 @@
 """发布 Gate 的固定结构。
 
 - :class:`ReleaseGate`:版本化发布 Gate——由首次无 Infrastructure Error
-  的 Held-out 报告经 :mod:`eval.gates.derive_baseline` 派生一次,此后
+  的 Core 报告经 :mod:`eval.gates.derive_baseline` 派生一次,此后
   冻结(frozen pydantic 模型,任何字段不可再赋值);
 - :class:`GateResult`:一次 :meth:`ReleaseGate.check` 的结构化结论;
-- :class:`Baselines`:Held-out 任务完成率基线;
+- :class:`Baselines`:Core 任务完成率基线;
 - :class:`HardRules`:任务完成率回归容差;
   :mod:`eval.gates.check_release` 按此执行。
 
@@ -27,7 +27,7 @@ def is_metric_number(value: object) -> TypeGuard[float]:
 
 
 class Baselines(BaseModel):
-    """首次 Held-out 报告中的任务完成率基线。"""
+    """首次 Core 报告中的任务完成率基线。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -55,7 +55,7 @@ class DerivedFromReport(BaseModel):
 
 
 class ReleaseGate(BaseModel):
-    """版本化发布 Gate:从首次合格 Held-out 报告派生一次后冻结。"""
+    """版本化发布 Gate:从首次合格 Core 报告派生一次后冻结。"""
 
     model_config = ConfigDict(frozen=True)
 

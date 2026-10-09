@@ -8,7 +8,7 @@
 
 - ``PROTOCOL_MISMATCH``:报告协议指纹与 Gate 记录不一致(所有比较必须
   使用同一协议指纹);
-- ``DATASET_SPLIT_MISMATCH``:只有 ``held_out`` 报告可用于能力基线比较;
+- ``DATASET_SPLIT_MISMATCH``:只有 ``core`` 报告可用于能力基线比较;
 - ``INVALID_PROTOCOL``:报告必须明确声明 ``totals.protocol_valid`` 为 True;
 - ``INFRASTRUCTURE_ERROR``:报告含基础设施错误(计数 > 0 或错误列表非空);
 - ``EMPTY_DENOMINATOR``:真实分母(``totals.quality_denominator``)缺失
@@ -77,7 +77,7 @@ def check_release(gate: ReleaseGate, report: Mapping[str, Any]) -> GateResult:
     dataset = report.get("dataset")
     split = dataset.get("split") if isinstance(dataset, dict) else None
     details["dataset_split"] = split
-    if split != "held_out":
+    if split != "core":
         failures.append(FAIL_DATASET_SPLIT_MISMATCH)
 
     if totals.get("protocol_valid") is not True:

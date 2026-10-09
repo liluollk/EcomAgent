@@ -37,6 +37,17 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                     "prevented_attempts",
                 )
             )
+        stability = metrics.get("scenario_stability")
+        if isinstance(stability, Mapping):
+            lines.extend(
+                [
+                    "- stable_scenarios: {passed}/{total} ({rate})".format(
+                        passed=_cell(stability.get("stable_passed_scenarios")),
+                        total=_cell(stability.get("total_scenarios")),
+                        rate=_rate_text(stability.get("stable_pass_rate")),
+                    )
+                ]
+            )
         diagnostics = metrics.get("diagnostics")
         if isinstance(diagnostics, Mapping):
             lines.extend(_section("失败诊断"))
@@ -97,7 +108,7 @@ def _metric_lines(metrics: Mapping[str, Any]) -> list[str]:
     }
     lines: list[str] = []
     for key, value in metrics.items():
-        if key in ("counts", "denominators", "diagnostics"):
+        if key in ("counts", "denominators", "diagnostics", "scenario_stability"):
             continue
         detail = ""
         if key in detail_by_metric:

@@ -1,13 +1,13 @@
-"""从首次合格 Held-out 报告派生发布 Gate。
+"""从首次合格 Core 报告派生发布 Gate。
 
-``v1.json`` 只能从首次**无 Infrastructure Error** 的 Held-out 报告生成
+``v1.json`` 只能从首次**无 Infrastructure Error** 的 Core 报告生成
 一次。派生资格(全部满足,否则抛 :class:`BaselineDerivationError`):
 
 - 报告带非空 ``protocol_fingerprint``(所有比较必须使用同一协议指纹);
 - ``totals.protocol_valid`` 为 True(任一 skipped 使整轮协议失效);
 - 无基础设施错误(``totals.infrastructure_errors == 0`` 且报告的
   ``infrastructure_errors`` 列表为空);
-- ``dataset.split`` 为 ``held_out``;
+- ``dataset.split`` 为 ``core``;
 - 真实分母 > 0,且任务完成率基线可读。
 
 派生内容:基线取报告 ``metrics`` 分项比率原值;``hard_rules`` 固化规则
@@ -16,7 +16,7 @@
 
 CLI::
 
-    python -m eval.gates.derive_baseline --report reports/held-out-v1.json \
+    python -m eval.gates.derive_baseline --report reports/core-v1.json \
         --output eval/gates/v1.json
 
 输出文件已存在即拒绝(门只能派生一次);报告不可读、非 JSON 对象或不
@@ -62,8 +62,8 @@ def derive_baseline(
         problems.append("totals.protocol_valid is not True (protocol invalid)")
 
     dataset = report.get("dataset")
-    if not isinstance(dataset, dict) or dataset.get("split") != "held_out":
-        problems.append("baseline report must come from the held_out split")
+    if not isinstance(dataset, dict) or dataset.get("split") != "core":
+        problems.append("baseline report must come from the core split")
 
     infra_count = totals.get("infrastructure_errors")
     infra_entries = report.get("infrastructure_errors")

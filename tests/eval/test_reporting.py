@@ -56,6 +56,7 @@ REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
     "counts",
     "denominators",
     "diagnostics",
+    "scenario_stability",
 }
 
 
@@ -345,6 +346,33 @@ def test_task_completion_includes_required_process_and_grounding(
     assert report_builder.build([state_only_pass])["metrics"]["task_completion_rate"] == 1.0
 
 
+def test_report_counts_scenarios_that_pass_all_repetitions(
+    report_builder: ReportBuilder,
+) -> None:
+    results: list[CaseResult | ScoredCaseResult] = []
+    for repetition in range(3):
+        results.extend(
+            [
+                _case_result("stable", repetition=repetition),
+                _scored("stable", repetition=repetition),
+                _case_result("flaky", repetition=repetition),
+                _scored(
+                    "flaky",
+                    repetition=repetition,
+                    task_passed=repetition < 2,
+                ),
+            ]
+        )
+
+    stability = report_builder.build(results)["metrics"]["scenario_stability"]
+
+    assert stability == {
+        "total_scenarios": 2,
+        "stable_passed_scenarios": 1,
+        "stable_pass_rate": pytest.approx(0.5),
+    }
+
+
 # ---- 补充语义:指纹、配置与场景计数 ------------------------------------
 
 
@@ -462,12 +490,21 @@ def test_product_suite_missing_env_fails_fast(
     """缺任一必需环境变量 → 明确报错(提示变量名)、退出码非 0、不产报告。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    manifest = _purpose_manifest(held_out_ids=[], safety_ids=[])
-    manifest["development_ids"] = ["dev-001"]
-    _write_minimal_dataset(tmp_path, manifest, split="development", case_id="dev-001")
+    manifest = _purpose_manifest(core_ids=[], safety_ids=[])
+    manifest["clarification_ids"] = ["clarify-001"]
+    _write_minimal_dataset(
+        tmp_path, manifest, split="clarification", case_id="clarify-001"
+    )
     output = tmp_path / "report.json"
     code = product_suite_main(
-        ["--split", "development", "--dataset-dir", str(tmp_path), "--output", str(output)]
+        [
+            "--split",
+            "clarification",
+            "--dataset-dir",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ]
     )
     assert code != 0
     captured = capsys.readouterr()
@@ -504,22 +541,24 @@ def _write_minimal_dataset(
     )
 
 
-def _purpose_manifest(*, held_out_ids: list[str], safety_ids: list[str]) -> dict[str, object]:
+def _purpose_manifest(*, core_ids: list[str], safety_ids: list[str]) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "scorer_version": fixed_eval_config().scorer_version,
-        "development_ids": [],
+        "core_ids": core_ids,
+        "blind_ids": [],
+        "clarification_ids": [],
         "regression_ids": [],
-        "held_out_ids": held_out_ids,
         "safety_ids": safety_ids,
-        "held_out_sha256": "0" * 64,
+        "core_sha256": "0" * 64,
+        "blind_sha256": "0" * 64,
     }
 
 
 def test_product_suite_accepts_safety_split(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest = _purpose_manifest(held_out_ids=[], safety_ids=["safe-001"])
+    manifest = _purpose_manifest(core_ids=[], safety_ids=["safe-001"])
     _write_minimal_dataset(tmp_path, manifest, split="safety", case_id="safe-001")
     monkeypatch.delenv("EVAL_API_KEY", raising=False)
     code = product_suite_main(["--split", "safety", "--dataset-dir", str(tmp_path)])
@@ -530,7 +569,7 @@ def test_product_suite_accepts_safety_split(
 def test_product_suite_rejects_empty_regression_before_env_check(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest = _purpose_manifest(held_out_ids=[], safety_ids=[])
+    manifest = _purpose_manifest(core_ids=[], safety_ids=[])
     _write_minimal_dataset(tmp_path, manifest, split="regression", case_id="unused-001")
     (tmp_path / "regression.yaml").write_text(
         json.dumps({"schema_version": SCHEMA_VERSION, "scenarios": []}), encoding="utf-8"
@@ -543,24 +582,26 @@ def test_product_suite_rejects_empty_regression_before_env_check(
     assert "no scenarios" in capsys.readouterr().err
 
 
-def test_product_suite_rejects_held_out_hash_drift(
+def test_product_suite_rejects_core_hash_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Held-out 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
+    """Core 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     manifest = {
         "schema_version": 2,
         "scorer_version": "v2",
-        "development_ids": [],
+        "core_ids": ["core-001"],
+        "blind_ids": [],
+        "clarification_ids": [],
         "regression_ids": [],
-        "held_out_ids": ["held-001"],
         "safety_ids": [],
-        "held_out_sha256": "0" * 64,
+        "core_sha256": "0" * 64,
+        "blind_sha256": "0" * 64,
     }
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (tmp_path / "held_out.yaml").write_text("[]", encoding="utf-8")
-    code = product_suite_main(["--split", "held_out", "--dataset-dir", str(tmp_path)])
+    (tmp_path / "core.yaml").write_text("[]", encoding="utf-8")
+    code = product_suite_main(["--split", "core", "--dataset-dir", str(tmp_path)])
     assert code != 0
     captured = capsys.readouterr()
-    assert "held_out_sha256" in captured.err
+    assert "core_sha256" in captured.err

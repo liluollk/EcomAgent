@@ -1,4 +1,4 @@
-"""Held-out 任务完成率发布门禁测试。
+"""Core 任务完成率发布门禁测试。
 
 夹具使用合成 CaseResult/ScoredCaseResult，经真实 ReportBuilder 组装报告；
 不发网络请求、不碰数据库。"""
@@ -123,7 +123,7 @@ def build_report(
     results: list[CaseResult | ScoredCaseResult],
     *,
     fingerprint: str = FINGERPRINT,
-    split: str = "held_out",
+    split: str = "core",
 ) -> dict[str, Any]:
     """经真实 ReportBuilder 组装报告(真实分母、协议指纹、脱敏结构)。"""
     report = ReportBuilder().build(results, protocol_fingerprint=fingerprint)
@@ -179,13 +179,13 @@ def test_clean_report_passes_all_hard_rules(gate: ReleaseGate) -> None:
     assert result.failures == []
 
 
-def test_release_gate_only_compares_held_out_task_completion(
+def test_release_gate_only_compares_core_task_completion(
     gate: ReleaseGate,
 ) -> None:
-    """Gate 的质量回归维度只有 held-out 任务完成率。"""
+    """Gate 的质量回归维度只有 Core 任务完成率。"""
     assert set(Baselines.model_fields) == {"task_completion_rate"}
     assert set(HardRules.model_fields) == {"task_completion_tolerance"}
-    result = gate.check(build_report(clean_results(), split="development"))
+    result = gate.check(build_report(clean_results(), split="blind"))
     assert result.passed is False
     assert result.failures == ["DATASET_SPLIT_MISMATCH"]
 
@@ -336,10 +336,10 @@ def test_derive_baseline_rejects_infrastructure_errors() -> None:
         derive_baseline(report)
 
 
-def test_baseline_requires_held_out_report() -> None:
-    """Development 报告不能派生能力基线。"""
-    with pytest.raises(BaselineDerivationError, match="held_out"):
-        derive_baseline(build_report(clean_results(), split="development"))
+def test_baseline_requires_core_report() -> None:
+    """Blind 报告不能派生核心能力基线。"""
+    with pytest.raises(BaselineDerivationError, match="core"):
+        derive_baseline(build_report(clean_results(), split="blind"))
 
 
 def test_derive_baseline_rejects_empty_denominator() -> None:
@@ -393,7 +393,7 @@ def test_derive_cli_refuses_ineligible_report(
 ) -> None:
     """不合格报告 → 退出码 2、不产出 Gate 文件、错误说明原因。"""
     report_path = _write_report(
-        tmp_path, build_report(clean_results(), split="development")
+        tmp_path, build_report(clean_results(), split="blind")
     )
     gate_path = tmp_path / "v1.json"
 
@@ -403,7 +403,7 @@ def test_derive_cli_refuses_ineligible_report(
 
     assert code == 2
     assert not gate_path.exists()
-    assert "held_out" in capsys.readouterr().err
+    assert "core" in capsys.readouterr().err
 
 
 def test_derive_cli_refuses_overwrite(tmp_path: Path) -> None:
@@ -430,13 +430,13 @@ def test_check_cli_passes_clean_report(tmp_path: Path) -> None:
     assert code == 0
 
 
-def test_check_cli_rejects_non_held_out_report(
+def test_check_cli_rejects_non_core_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """审查失败 → 退出码 1,失败码出现在输出中。"""
     gate_path = _write_gate(tmp_path)
     report_path = _write_report(
-        tmp_path, build_report(clean_results(), split="development")
+        tmp_path, build_report(clean_results(), split="blind")
     )
     code = check_release_main(["--gate", str(gate_path), "--report", str(report_path)])
     assert code == 1

@@ -115,6 +115,14 @@ class ReportBuilder:
         contributing: list[ScoredCaseResult], denominator: int
     ) -> dict[str, Any]:
         task_passed = sum(1 for score in contributing if _product_task_passed(score))
+        task_results_by_case: dict[str, list[bool]] = {}
+        for score in contributing:
+            task_results_by_case.setdefault(score.case_id, []).append(
+                _product_task_passed(score)
+            )
+        stable_passed = sum(
+            1 for results in task_results_by_case.values() if results and all(results)
+        )
         safety_applicable = [s for s in contributing if s.safety.applicable]
         dangerous_attempt_cases = sum(
             1 for s in safety_applicable if s.safety.dangerous_attempts > 0
@@ -130,6 +138,11 @@ class ReportBuilder:
         )
         return {
             "task_completion_rate": _rate(task_passed, denominator),
+            "scenario_stability": {
+                "total_scenarios": len(task_results_by_case),
+                "stable_passed_scenarios": stable_passed,
+                "stable_pass_rate": _rate(stable_passed, len(task_results_by_case)),
+            },
             "dangerous_attempt_rate": _rate(
                 dangerous_attempt_cases, len(safety_applicable)
             ),

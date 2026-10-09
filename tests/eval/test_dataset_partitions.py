@@ -19,12 +19,21 @@ DATASET_DIR: Final[Path] = (
     Path(__file__).resolve().parents[2] / "eval" / "datasets" / "product_operations"
 )
 _PARTITION_FILES: Final[dict[str, str]] = {
-    "development": "development.yaml",
+    "core": "core.yaml",
+    "blind": "blind.yaml",
+    "clarification": "clarification.yaml",
     "regression": "regression.yaml",
-    "held_out": "held_out.yaml",
     "safety": "safety.yaml",
 }
-CAPABILITY_SPLITS: Final = ("development", "held_out")
+CAPABILITY_SPLITS: Final = ("core", "blind")
+CORE_CATEGORY_COUNTS: Final = {
+    "read_only_query": 4,
+    "direct_write": 6,
+    "relative_change": 6,
+    "multi_store_decision": 6,
+    "composite_task": 4,
+    "multi_turn": 4,
+}
 
 
 @pytest.fixture(scope="module")
@@ -60,9 +69,10 @@ def test_manifest_partitions_are_disjoint_and_match_files(
     partitions: Mapping[str, tuple[Scenario, ...]],
 ) -> None:
     declared = {
-        "development": set(dataset_manifest.development_ids),
+        "core": set(dataset_manifest.core_ids),
+        "blind": set(dataset_manifest.blind_ids),
+        "clarification": set(dataset_manifest.clarification_ids),
         "regression": set(dataset_manifest.regression_ids),
-        "held_out": set(dataset_manifest.held_out_ids),
         "safety": set(dataset_manifest.safety_ids),
     }
     for name, ids in declared.items():
@@ -86,9 +96,24 @@ def test_every_scenario_validates_and_ids_are_unique(
         seen.update(_ids(partitions[name]))
 
 
-def test_held_out_hash_matches_file_bytes(dataset_manifest: DatasetManifest) -> None:
-    digest = hashlib.sha256((DATASET_DIR / "held_out.yaml").read_bytes()).hexdigest()
-    assert dataset_manifest.held_out_sha256 == digest
+def test_frozen_hashes_match_file_bytes(dataset_manifest: DatasetManifest) -> None:
+    core_digest = hashlib.sha256((DATASET_DIR / "core.yaml").read_bytes()).hexdigest()
+    blind_digest = hashlib.sha256((DATASET_DIR / "blind.yaml").read_bytes()).hexdigest()
+    assert dataset_manifest.core_sha256 == core_digest
+    assert dataset_manifest.blind_sha256 == blind_digest
+
+
+def test_core_and_blind_have_fixed_sizes_and_task_distribution(
+    partitions: Mapping[str, tuple[Scenario, ...]],
+) -> None:
+    assert len(partitions["core"]) == 30
+    assert len(partitions["blind"]) == 10
+    assert len(partitions["clarification"]) == 6
+    actual_counts = {
+        category: sum(item.category == category for item in partitions["core"])
+        for category in CORE_CATEGORY_COUNTS
+    }
+    assert actual_counts == CORE_CATEGORY_COUNTS
 
 
 def test_capability_splits_only_contain_legal_fault_free_tasks(
@@ -99,6 +124,16 @@ def test_capability_splits_only_contain_legal_fault_free_tasks(
             assert scenario.category != "unauthorized_or_violation"
             assert scenario.faults == ()
             assert all(item.kind != "confirmation" for item in scenario.interactions)
+
+
+def test_core_has_no_interactions_and_clarification_uses_input_requests(
+    partitions: Mapping[str, tuple[Scenario, ...]],
+) -> None:
+    assert all(not scenario.interactions for scenario in partitions["core"])
+    for scenario in partitions["clarification"]:
+        assert scenario.category == "incomplete_info"
+        assert scenario.faults == ()
+        assert any(item.kind == "input" for item in scenario.interactions)
 
 
 def test_safety_split_is_isolated(
@@ -174,7 +209,7 @@ def test_capability_tasks_have_authoritative_gold_assertions(
                 assert scenario.expected_final_state.listings
 
 
-def test_held_out_entities_are_isolated_from_development(
+def test_blind_entities_are_isolated_from_core(
     partitions: Mapping[str, tuple[Scenario, ...]],
 ) -> None:
     def entities(name: str) -> set[tuple[str, str]]:
@@ -184,26 +219,29 @@ def test_held_out_entities_are_isolated_from_development(
             for listing in scenario.initial_state.listings
         }
 
-    assert entities("development").isdisjoint(entities("held_out"))
+    assert entities("core").isdisjoint(entities("blind"))
 
 
 def test_incomplete_info_is_a_real_store_ambiguity(
     partitions: Mapping[str, tuple[Scenario, ...]],
 ) -> None:
-    for name in CAPABILITY_SPLITS:
-        ambiguous = [s for s in partitions[name] if s.category == "incomplete_info"]
-        for scenario in ambiguous:
-            first_user = next(m for m in scenario.messages if m.role == "user")
-            assert "SKU-" in first_user.content
-            assert "store-" not in first_user.content
-            sku = next(word for word in first_user.content.split() if word.startswith("SKU-"))
-            stores = {
-                listing.store_id
-                for listing in scenario.initial_state.listings
-                if listing.sku == sku and listing.price is not None
-            }
-            assert len(stores) >= 2, f"{scenario.id} 不是跨店真歧义"
-            assert any(interaction.kind == "input" for interaction in scenario.interactions)
+    store_ambiguity = [
+        scenario
+        for scenario in partitions["clarification"]
+        if scenario.id.startswith("clarify-store-")
+    ]
+    assert store_ambiguity
+    for scenario in store_ambiguity:
+        first_user = next(m for m in scenario.messages if m.role == "user")
+        assert "SKU-" in first_user.content
+        assert "store-" not in first_user.content
+        sku = next(word for word in first_user.content.split() if word.startswith("SKU-"))
+        stores = {
+            listing.store_id
+            for listing in scenario.initial_state.listings
+            if listing.sku == sku and listing.price is not None
+        }
+        assert len(stores) >= 2, f"{scenario.id} 不是跨店真歧义"
 
 
 def test_valid_writes_allow_at_most_one_logical_write(
@@ -211,5 +249,5 @@ def test_valid_writes_allow_at_most_one_logical_write(
 ) -> None:
     for name in CAPABILITY_SPLITS:
         for scenario in partitions[name]:
-            if scenario.category in ("valid_write", "composite_task", "multi_turn"):
+            if scenario.category != "read_only_query":
                 assert scenario.expected_final_state.max_logical_writes == 1
