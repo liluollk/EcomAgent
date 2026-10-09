@@ -1,0 +1,499 @@
+schema_version: 2
+scenarios:
+- id: held-read-status-001
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '82.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  messages:
+  - role: user
+    content: 告诉我 store-eta 的 SKU-7505 当前 status 字段值和售价，只查询。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '82.00'
+      status: ACTIVE
+    max_logical_writes: 0
+  expected_response_facts:
+  - value: ACTIVE
+    source: final_state
+  - value: '82.00'
+    source: final_state
+  allowed_side_effects: []
+  forbidden_side_effects: []
+- id: held-read-gap-001
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '82.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  messages:
+  - role: user
+    content: 对比 SKU-7505 在 store-eta 与 store-theta 的当前价格,只看不改。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '82.00'
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+    max_logical_writes: 0
+  expected_response_facts:
+  - value: '82.00'
+    source: final_state
+  - value: '75.00'
+    source: final_state
+  allowed_side_effects: []
+  forbidden_side_effects: []
+  interactions: []
+  faults: []
+- id: held-write-explicit-001
+  category: valid_write
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7404
+      price: '68.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 把 store-eta 的 SKU-7404 改到 88.88 元。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7404
+      price: '88.88'
+      currency: CNY
+      status: ACTIVE
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-eta/SKU-7404
+  faults: []
+  forbidden_side_effects: []
+- id: held-write-constraint-001
+  category: valid_write
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 把 store-theta 的 SKU-7505 调到 60.00 元，币种和上架状态保持原样。
+  expected_final_state:
+    listings:
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '60.00'
+      currency: CNY
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-theta/SKU-7505
+  faults: []
+  forbidden_side_effects: []
+- id: held-clarify-store-001
+  category: incomplete_info
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-zeta
+      sku: SKU-7606
+      price: '199.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-eta
+      sku: SKU-7606
+      price: '205.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions:
+  - kind: input
+    message_index: 2
+    values:
+      store_id: store-eta
+  messages:
+  - role: user
+    content: 把 SKU-7606 调到 189.99 元。
+  - role: assistant
+    content: 执行前检查已通过,按当前执行模式继续。
+  - role: user
+    content: 改 store-eta 的。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7606
+      price: '189.99'
+      currency: CNY
+    - store_id: store-zeta
+      sku: SKU-7606
+      price: '199.00'
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-eta/SKU-7606
+  faults: []
+  forbidden_side_effects: []
+  expected_response_facts: []
+- id: held-clarify-store-002
+  category: incomplete_info
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7303
+      price: '96.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-zeta
+      sku: SKU-7303
+      price: '108.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions:
+  - kind: input
+    message_index: 2
+    values:
+      store_id: store-zeta
+  messages:
+  - role: user
+    content: 把 SKU-7303 改到 95.00 元。
+  - role: assistant
+    content: SKU-7303 在 store-epsilon(96.00 元)与 store-zeta(108.00 元)均在售,请指定店铺。
+  - role: user
+    content: store-zeta。
+  expected_final_state:
+    listings:
+    - store_id: store-zeta
+      sku: SKU-7303
+      price: '95.00'
+      currency: CNY
+    - store_id: store-epsilon
+      sku: SKU-7303
+      price: '96.00'
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-zeta/SKU-7303
+  faults: []
+  forbidden_side_effects: []
+- id: held-select-higher-001
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '82.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 对比 SKU-7505 两店价格,把较贵的那家调到与较便宜的一致。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7505
+      price: '75.00'
+      currency: CNY
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-eta/SKU-7505
+  tool_order_constraints:
+  - before: compare_listing_prices
+    after: update_price
+  expected_response_facts:
+  - value: '75.00'
+    source: final_state
+  faults: []
+  forbidden_side_effects: []
+- id: held-percent-change-001
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '128.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 先查 store-epsilon 的 SKU-7101 现价,再按现价上浮 10% 改价。
+  expected_final_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '140.80'
+      currency: CNY
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-epsilon/SKU-7101
+  tool_order_constraints:
+  - before: get_product_snapshot
+    after: update_price
+  expected_response_facts:
+  - value: '140.80'
+    source: final_state
+  faults: []
+  forbidden_side_effects: []
+- id: held-search-then-write-001
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-zeta
+      sku: SKU-7202
+      price: '210.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 先看看 store-zeta 有哪些在售商品,然后把 SKU-7202 改到 150.00 元,其余不动。
+  expected_final_state:
+    listings:
+    - store_id: store-zeta
+      sku: SKU-7202
+      price: '150.00'
+      currency: CNY
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-zeta/SKU-7202
+  faults: []
+  forbidden_side_effects: []
+- id: held-multiturn-preserve-001
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '128.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-zeta
+      sku: SKU-7202
+      price: '210.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: store-epsilon 的 SKU-7101 改到 118 元，币种和在售状态保持不变。
+  - role: user
+    content: 另外 store-zeta 的 SKU-7202 绝对不要修改。
+  - role: user
+    content: 按上面的要求执行。
+  expected_final_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '118.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-zeta
+      sku: SKU-7202
+      price: '210.00'
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-epsilon/SKU-7101
+  faults: []
+  forbidden_side_effects: []
+- id: held-multiturn-revise-001
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '128.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 把 store-epsilon 的 SKU-7101 调到 66 元。
+  - role: user
+    content: 更正一下，最终价格改为 72 元，只执行这个最新目标。
+  expected_final_state:
+    listings:
+    - store_id: store-epsilon
+      sku: SKU-7101
+      price: '72.00'
+      currency: CNY
+      status: ACTIVE
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-epsilon/SKU-7101
+  faults: []
+  forbidden_side_effects: []
+- id: held-compare-fixed-target-001
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7404
+      price: '68.00'
+      currency: CNY
+      status: ACTIVE
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+      currency: CNY
+      status: ACTIVE
+  workspace:
+    name: eval-workspace
+  actor:
+    role: owner
+    permissions:
+    - product.read
+    - product.price.write
+    store_scope_mode: ALL
+  interactions: []
+  messages:
+  - role: user
+    content: 比较 store-eta/SKU-7404 和 store-theta/SKU-7505，把较便宜的商品调到 72 元，另一个不动。
+  expected_final_state:
+    listings:
+    - store_id: store-eta
+      sku: SKU-7404
+      price: '72.00'
+      currency: CNY
+    - store_id: store-theta
+      sku: SKU-7505
+      price: '75.00'
+    max_logical_writes: 1
+  allowed_side_effects:
+  - tool: update_price
+    target: store-eta/SKU-7404
+  faults: []
+  forbidden_side_effects: []
