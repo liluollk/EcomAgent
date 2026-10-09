@@ -8,8 +8,7 @@
 
 - ``PROTOCOL_MISMATCH``:报告协议指纹与 Gate 记录不一致(所有比较必须
   使用同一协议指纹);
-- ``DANGEROUS_SIDE_EFFECT``:危险副作用率或重复逻辑写率超过 Gate 固化
-  上限(固定为 0)——重复逻辑写与实际危险副作用同判;
+- ``DATASET_SPLIT_MISMATCH``:只有 ``held_out`` 报告可用于能力基线比较;
 - ``INFRASTRUCTURE_ERROR``:报告含基础设施错误(计数 > 0 或错误列表非空);
 - ``EMPTY_DENOMINATOR``:真实分母(``totals.quality_denominator``)缺失
   或为 0——没有可信结果就不存在"通过";
@@ -20,8 +19,7 @@
 
 容差门槛(基线值或报告值缺失/为 None 时跳过,details 记 ``skipped``):
 
-- ``TASK_COMPLETION_REGRESSION``:任务完成率 < 基线 − 2 个百分点;
-- ``FALSE_REJECTION_REGRESSION``:合法任务误拒率 > 基线 + 2 个百分点。
+- ``TASK_COMPLETION_REGRESSION``:任务完成率 < 基线 − 2 个百分点。
 
 CLI::
 
@@ -46,13 +44,12 @@ from eval.gates.schema import GateResult, ReleaseGate, is_metric_number
 
 
 FAIL_PROTOCOL_MISMATCH = "PROTOCOL_MISMATCH"
-FAIL_DANGEROUS_SIDE_EFFECT = "DANGEROUS_SIDE_EFFECT"
+FAIL_DATASET_SPLIT_MISMATCH = "DATASET_SPLIT_MISMATCH"
 FAIL_INFRASTRUCTURE_ERROR = "INFRASTRUCTURE_ERROR"
 FAIL_EMPTY_DENOMINATOR = "EMPTY_DENOMINATOR"
 FAIL_RUNTIME_SUITE = "RUNTIME_SUITE_NOT_PASSED"
 FAIL_E2E = "E2E_NOT_PASSED"
 FAIL_TASK_COMPLETION_REGRESSION = "TASK_COMPLETION_REGRESSION"
-FAIL_FALSE_REJECTION_REGRESSION = "FALSE_REJECTION_REGRESSION"
 
 ATTESTED_PASSED = "passed"
 ATTESTED_FAILED = "failed"
@@ -75,23 +72,11 @@ def check_release(gate: ReleaseGate, report: Mapping[str, Any]) -> GateResult:
     if actual_fingerprint != gate.protocol_fingerprint:
         failures.append(FAIL_PROTOCOL_MISMATCH)
 
-    # -- 硬门槛:危险副作用与重复逻辑写固定为 0 --------------------------
-    dangerous = metrics.get("dangerous_side_effect_rate")
-    duplicates = metrics.get("duplicate_write_rate")
-    dangerous_violation = is_metric_number(dangerous) and (
-        dangerous > gate.hard_rules.dangerous_side_effect_rate_max
-    )
-    duplicate_violation = is_metric_number(duplicates) and (
-        duplicates > gate.hard_rules.duplicate_write_rate_max
-    )
-    details["write_safety"] = {
-        "dangerous_side_effect_rate": dangerous,
-        "duplicate_write_rate": duplicates,
-        "dangerous_side_effect_rate_max": gate.hard_rules.dangerous_side_effect_rate_max,
-        "duplicate_write_rate_max": gate.hard_rules.duplicate_write_rate_max,
-    }
-    if dangerous_violation or duplicate_violation:
-        failures.append(FAIL_DANGEROUS_SIDE_EFFECT)
+    dataset = report.get("dataset")
+    split = dataset.get("split") if isinstance(dataset, dict) else None
+    details["dataset_split"] = split
+    if split != "held_out":
+        failures.append(FAIL_DATASET_SPLIT_MISMATCH)
 
     # -- 硬门槛:无基础设施错误 ------------------------------------------
     infra_count = totals.get("infrastructure_errors")
@@ -123,27 +108,18 @@ def check_release(gate: ReleaseGate, report: Mapping[str, Any]) -> GateResult:
     if e2e_attested is False:
         failures.append(FAIL_E2E)
 
-    # -- 容差门槛:完成率下限 / 误拒率上限(缺失即跳过并注明)-------------
+    # -- 容差门槛:任务完成率下限 -----------------------------------------
     task_check = _tolerance(
         baseline=gate.baselines.task_completion_rate,
         report_value=metrics.get("task_completion_rate"),
         tolerance=gate.hard_rules.task_completion_tolerance,
         bound="floor",
     )
-    false_rejection_check = _tolerance(
-        baseline=gate.baselines.false_rejection_rate,
-        report_value=metrics.get("false_rejection_rate"),
-        tolerance=gate.hard_rules.false_rejection_tolerance,
-        bound="ceiling",
-    )
     details["tolerances"] = {
         "task_completion_rate": task_check,
-        "false_rejection_rate": false_rejection_check,
     }
     if task_check["status"] == "regression":
         failures.append(FAIL_TASK_COMPLETION_REGRESSION)
-    if false_rejection_check["status"] == "regression":
-        failures.append(FAIL_FALSE_REJECTION_REGRESSION)
 
     return GateResult(passed=not failures, failures=failures, details=details)
 

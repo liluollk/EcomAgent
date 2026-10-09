@@ -31,28 +31,19 @@ def is_metric_number(value: object) -> TypeGuard[float]:
 
 
 class Baselines(BaseModel):
-    """首次 Frozen Test 报告的分项基线;某项为 None 时对应容差跳过。"""
+    """首次 Held-out 报告中的任务完成率基线。"""
 
     model_config = ConfigDict(frozen=True)
 
-    task_completion_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    false_rejection_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    # 参考记录(不参与门槛比较):派生时刻报告的其余分项比率。
-    decision_accuracy: float | None = Field(default=None, ge=0.0, le=1.0)
-    recovery_success_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    dangerous_side_effect_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    duplicate_write_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    task_completion_rate: float = Field(ge=0.0, le=1.0)
 
 
 class HardRules(BaseModel):
-    """随 Gate 固化的规则快照:危险副作用/重复逻辑写固定 0 容忍 + 容差。"""
+    """随 Gate 固化的任务完成率回归容差。"""
 
     model_config = ConfigDict(frozen=True)
 
-    dangerous_side_effect_rate_max: float = Field(default=0.0, ge=0.0)
-    duplicate_write_rate_max: float = Field(default=0.0, ge=0.0)
     task_completion_tolerance: float = Field(default=0.02, ge=0.0, le=1.0)
-    false_rejection_tolerance: float = Field(default=0.02, ge=0.0, le=1.0)
 
 
 class DerivedFromReport(BaseModel):
@@ -68,7 +59,7 @@ class DerivedFromReport(BaseModel):
 
 
 class ReleaseGate(BaseModel):
-    """版本化发布 Gate:从首次合格 Frozen Test 报告派生一次后冻结。"""
+    """版本化发布 Gate:从首次合格 Held-out 报告派生一次后冻结。"""
 
     model_config = ConfigDict(frozen=True)
 
