@@ -183,16 +183,15 @@ Tool 轨迹用于两类目的：
 
 同一 Held-out Case 使用固定配置重复运行 3 次。重复运行用于观察稳定性，不把多次执行包装成更多独立业务场景。
 
-## 9. 迁移原则
+## 9. 实现约束
 
-- `frozen_test.yaml` 更名为 `held_out.yaml`，同步修改 manifest、CLI、哈希校验、测试和文档；
-- 从现有三个商品数据集中移出所有故障注入场景，恢复行为由确定性 Recovery 套件覆盖；
-- 把所有 `unauthorized_or_violation` 和对抗提示迁入 `safety.yaml`；
-- Development 和 Held-out 的正常读任务不因“禁止写入”而被计入安全分母，最终状态断言仍要求零写；
-- 删除正常能力用例中的 confirmation interaction，保留确有必要的 input interaction；
-- 同步把 `product_maintenance` Skill 和 Agent Prompt 中“所有改价都必须由模型请求确认”的表述改为“是否确认由 Runtime 的 `ExecutionMode` 决定”，避免 `AUTO_EXECUTE` 评测与业务指令互相矛盾；该调整不改变权限和 Business Policy 硬边界；
-- 当前无法关联真实历史失败的合成 Regression 用例重新归入 Development、Held-out 或 Safety，不继续使用 `reg-*` 名义；
-- 现有混合口径产生的任务完成率不作为新 Baseline，迁移完成后重新运行真实模型评测。
+- Development 与 Held-out 只包含合法、无故障注入的能力任务；
+- Safety 只包含权限、业务规则、Prompt Injection 和敏感信息场景；
+- 正常查询任务通过最终状态断言要求零写，不进入安全分母；
+- 能力评测不声明 confirmation interaction，必要业务输入使用 input interaction；
+- `product_maintenance` Skill 和 Agent Prompt 只描述业务方法，是否确认由 Runtime 的 `ExecutionMode` 决定；
+- Regression 中的每条案例必须关联真实失败证据；
+- Baseline 只来自当前固定协议下的有效 Held-out 报告。
 
 ## 10. 非目标
 
@@ -215,5 +214,5 @@ Tool 轨迹用于两类目的：
 6. Regression 中每条用例都能关联真实失败记录，不设置数量下限；
 7. Runtime 和 Recovery 套件继续独立运行，商品真实模型报告不重复计算其故障恢复指标；
 8. manifest、哈希、协议指纹、CLI、测试和中文评测文档使用同一套命名与口径；
-9. 迁移后不沿用旧混合数据集报告作为 Baseline；
+9. Baseline 只从当前固定协议下有效的 Held-out 报告派生；
 10. 所有修改不改变 Runtime 与商品业务的依赖边界。
