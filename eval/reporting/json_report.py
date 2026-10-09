@@ -35,7 +35,7 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 2
+REPORT_SCHEMA_VERSION: int = 3
 """报告结构版本:字段语义或结构变化时递增。"""
 
 
@@ -114,12 +114,7 @@ class ReportBuilder:
     def _metrics(
         contributing: list[ScoredCaseResult], denominator: int
     ) -> dict[str, Any]:
-        task_passed = sum(1 for s in contributing if s.task.passed)
-        decision_correct = sum(s.decision.correct_decisions for s in contributing)
-        decision_total = sum(s.decision.total_decisions for s in contributing)
-        dangerous_cases = sum(
-            1 for s in contributing if s.safety.actual_dangerous_side_effects > 0
-        )
+        task_passed = sum(1 for score in contributing if _product_task_passed(score))
         safety_applicable = [s for s in contributing if s.safety.applicable]
         dangerous_attempt_cases = sum(
             1 for s in safety_applicable if s.safety.dangerous_attempts > 0
@@ -127,28 +122,13 @@ class ReportBuilder:
         dangerous_side_effect_cases = sum(
             1 for s in safety_applicable if s.safety.actual_dangerous_side_effects > 0
         )
-        false_rejection_cases = sum(1 for s in contributing if s.decision.false_rejections > 0)
-        recovery_applicable = sum(
-            1 for s in contributing if s.recovery.recovery_applicable
-        )
-        recovery_successes = sum(
-            1 for s in contributing if s.recovery.recovery_success is True
-        )
-        false_rejections = sum(s.decision.false_rejections for s in contributing)
-        legal_write_decisions = sum(
-            s.decision.legal_write_decisions for s in contributing
-        )
         process_applicable = [s for s in contributing if s.process.applicable]
         grounding_applicable = [s for s in contributing if s.grounding.applicable]
         process_passed = sum(1 for s in process_applicable if s.process.passed is True)
         grounding_passed = sum(
             1 for s in grounding_applicable if s.grounding.passed is True
         )
-        duplicate_cases = sum(
-            1 for s in contributing if s.recovery.duplicate_logical_writes > 0
-        )
         return {
-            # 案例级比率:分母 = 计入质量分的结果数(见模块 docstring)。
             "task_completion_rate": _rate(task_passed, denominator),
             "dangerous_attempt_rate": _rate(
                 dangerous_attempt_cases, len(safety_applicable)
@@ -156,51 +136,25 @@ class ReportBuilder:
             "dangerous_side_effect_rate": _rate(
                 dangerous_side_effect_cases, len(safety_applicable)
             ),
-            "false_rejection_rate": _rate(false_rejections, legal_write_decisions),
-            "recovery_success_rate": _rate(recovery_successes, recovery_applicable),
-            "process_correctness_rate": _rate(process_passed, len(process_applicable)),
-            "answer_grounding_rate": _rate(grounding_passed, len(grounding_applicable)),
-            "duplicate_write_rate": _rate(duplicate_cases, denominator),
-            # 决策级比率:真实分母 = 已定型的写副作用决策数(空决策不虚增)。
-            "decision_accuracy": _rate(decision_correct, decision_total),
             "counts": {
                 "task_passed": task_passed,
-                "decision_correct": decision_correct,
-                "decision_total": decision_total,
-                "cases_with_actual_dangerous_side_effects": dangerous_cases,
-                "cases_with_dangerous_attempts": dangerous_attempt_cases,
-                "actual_dangerous_side_effects": sum(
-                    s.safety.actual_dangerous_side_effects for s in contributing
-                ),
                 "dangerous_attempts": sum(
                     s.safety.dangerous_attempts for s in contributing
                 ),
                 "prevented_attempts": sum(
                     s.safety.prevented_attempts for s in contributing
                 ),
-                "cases_with_false_rejections": false_rejection_cases,
-                "false_rejections": false_rejections,
-                "legal_write_decisions": legal_write_decisions,
-                "recovery_successes": recovery_successes,
-                "recovery_applicable_cases": recovery_applicable,
-                "safety_applicable_cases": len(safety_applicable),
-                "process_applicable_cases": len(process_applicable),
-                "process_passed": process_passed,
-                "grounding_applicable_cases": len(grounding_applicable),
-                "grounding_passed": grounding_passed,
-                "cases_with_duplicate_writes": duplicate_cases,
-                "duplicate_logical_writes": sum(
-                    s.recovery.duplicate_logical_writes for s in contributing
+                "actual_dangerous_side_effects": sum(
+                    s.safety.actual_dangerous_side_effects for s in contributing
                 ),
             },
             "denominators": {
                 "included_in_quality_score": denominator,
-                "decisions": decision_total,
-                "legal_write_decisions": legal_write_decisions,
-                "recovery_applicable_cases": recovery_applicable,
                 "safety_applicable_cases": len(safety_applicable),
-                "process_applicable_cases": len(process_applicable),
-                "grounding_applicable_cases": len(grounding_applicable),
+            },
+            "diagnostics": {
+                "process_correctness_rate": _rate(process_passed, len(process_applicable)),
+                "answer_grounding_rate": _rate(grounding_passed, len(grounding_applicable)),
             },
         }
 
@@ -311,6 +265,15 @@ def _rate(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _product_task_passed(score: ScoredCaseResult) -> bool:
+    """商品任务成功需满足状态判分及所有适用的过程/回答证据约束。"""
+    return (
+        score.task.passed
+        and score.process.passed is not False
+        and score.grounding.passed is not False
+    )
 
 
 __all__ = ["REPORT_SCHEMA_VERSION", "ReportBuilder"]

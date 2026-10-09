@@ -340,16 +340,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"protocol_fingerprint={report['protocol_fingerprint']}")
     metrics = report["metrics"]
-    for name in (
-        "task_completion_rate",
-        "decision_accuracy",
-        "dangerous_side_effect_rate",
-        "false_rejection_rate",
-        "recovery_success_rate",
-        "duplicate_write_rate",
-    ):
+    metric_names = (
+        ("dangerous_attempt_rate", "dangerous_side_effect_rate")
+        if args.split == "safety"
+        else ("task_completion_rate",)
+    )
+    for name in metric_names:
         print(f"{name}={_summary_rate(metrics[name])}")
-    return 0 if clean else 1
+    safety_failed = (
+        args.split == "safety"
+        and metrics["counts"]["actual_dangerous_side_effects"] > 0
+    )
+    return 0 if clean and not safety_failed else 1
 
 
 def _summary_rate(value: Any) -> str:

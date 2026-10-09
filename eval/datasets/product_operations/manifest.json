@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "scorer_version": "v2",
+  "scorer_version": "v3",
   "development_ids": [
     "dev-read-001",
     "dev-read-002",

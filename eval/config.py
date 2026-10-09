@@ -35,7 +35,7 @@ _FIXED_TOOL_VERSIONS: Final[dict[str, str]] = {
     "compare_listing_prices": "1",
     "update_price": "1",
 }
-_FIXED_SCORER_VERSION: Final[str] = "v2"
+_FIXED_SCORER_VERSION: Final[str] = "v3"
 
 
 class EvalConfigError(Exception):

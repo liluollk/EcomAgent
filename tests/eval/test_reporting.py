@@ -49,13 +49,13 @@ from eval.scorers.task_completion import TaskCompletionScore
 
 REQUIRED_METRIC_KEYS = {
     "task_completion_rate",
-    "decision_accuracy",
     "dangerous_side_effect_rate",
     "dangerous_attempt_rate",
-    "false_rejection_rate",
-    "recovery_success_rate",
-    "process_correctness_rate",
-    "answer_grounding_rate",
+}
+REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
+    "counts",
+    "denominators",
+    "diagnostics",
 }
 
 
@@ -208,11 +208,21 @@ def eval_config() -> EvalConfig:
 
 
 def test_report_keeps_dimensions_separate(report_builder: ReportBuilder) -> None:
-    """计划原文用例:分项 metrics 齐全,且绝无综合总分。"""
+    """商品报告只暴露核心结果与安全指标,且绝无综合总分。"""
     report = report_builder.build(sample_results())
     assert "overall_score" not in report
     assert "overall_score" not in json.dumps(report)
-    assert set(report["metrics"]) >= REQUIRED_METRIC_KEYS
+    assert set(report["metrics"]) == REQUIRED_REPORT_METRIC_FIELDS
+    assert set(report["metrics"]["diagnostics"]) == {
+        "process_correctness_rate",
+        "answer_grounding_rate",
+    }
+    assert not {
+        "decision_accuracy",
+        "false_rejection_rate",
+        "recovery_success_rate",
+        "duplicate_write_rate",
+    } & set(report["metrics"])
 
 
 def test_report_redacts_provider_credentials(report_builder: ReportBuilder) -> None:
@@ -257,10 +267,8 @@ def test_process_and_grounding_rates_use_only_declared_applicable_cases(
         }
     )
     report = report_builder.build([_case_result("case-process"), scored])
-    assert report["metrics"]["process_correctness_rate"] == 0.0
-    assert report["metrics"]["answer_grounding_rate"] == 1.0
-    assert report["metrics"]["denominators"]["process_applicable_cases"] == 1
-    assert report["metrics"]["denominators"]["grounding_applicable_cases"] == 1
+    assert report["metrics"]["diagnostics"]["process_correctness_rate"] == 0.0
+    assert report["metrics"]["diagnostics"]["answer_grounding_rate"] == 1.0
 
 
 def test_infrastructure_errors_stay_out_of_quality_denominator(
@@ -294,21 +302,47 @@ def test_infrastructure_errors_stay_out_of_quality_denominator(
 
 
 def test_metrics_reflect_dimension_failures(report_builder: ReportBuilder) -> None:
-    """各分项 rate 用真实计数:全过/各失败一次的两个 case → 全部 0.5。"""
+    """主指标保留真实分母;过程与依据分项归入失败诊断。"""
     report = report_builder.build(
         sample_results(), protocol_fingerprint="fp-run", config=fixed_eval_config()
     )
     metrics = report["metrics"]
     assert metrics["task_completion_rate"] == pytest.approx(0.5)
-    assert metrics["decision_accuracy"] == pytest.approx(0.5)
     assert metrics["dangerous_side_effect_rate"] == pytest.approx(1.0)
     assert metrics["dangerous_attempt_rate"] == pytest.approx(1.0)
-    assert metrics["false_rejection_rate"] == pytest.approx(0.5)
-    assert metrics["recovery_success_rate"] == pytest.approx(0.5)
-    assert metrics["duplicate_write_rate"] == pytest.approx(0.5)
     assert metrics["denominators"]["included_in_quality_score"] == 2
-    assert metrics["denominators"]["decisions"] == 2
     assert metrics["denominators"]["safety_applicable_cases"] == 1
+
+
+def test_task_completion_includes_required_process_and_grounding(
+    report_builder: ReportBuilder,
+) -> None:
+    state_only_pass = _scored("state-only", task_passed=True)
+    bad_grounding = state_only_pass.model_copy(
+        update={
+            "grounding": GroundingScore(
+                applicable=True,
+                passed=False,
+                expected_facts=1,
+                verified_facts=0,
+                omitted_facts=("128.00",),
+            )
+        }
+    )
+    bad_process = state_only_pass.model_copy(
+        update={
+            "process": ProcessScore(
+                applicable=True,
+                passed=False,
+                checked_constraints=1,
+                violations=("compare_listing_prices before update_price",),
+            )
+        }
+    )
+
+    assert report_builder.build([bad_grounding])["metrics"]["task_completion_rate"] == 0.0
+    assert report_builder.build([bad_process])["metrics"]["task_completion_rate"] == 0.0
+    assert report_builder.build([state_only_pass])["metrics"]["task_completion_rate"] == 1.0
 
 
 # ---- 补充语义:指纹、配置与场景计数 ------------------------------------
@@ -376,6 +410,8 @@ def test_markdown_is_readable_view_of_same_report(
     assert "fp-run-xyz" in markdown
     for key in REQUIRED_METRIC_KEYS:
         assert key in markdown
+    assert "process_correctness_rate" in markdown
+    assert "answer_grounding_rate" in markdown
     assert "0.5000" in markdown
     assert "case-good" in markdown
     assert "case-bad" in markdown
