@@ -1,15 +1,11 @@
-"""发布 Gate 的固定结构(计划 05 Task 8)。
+"""发布 Gate 的固定结构。
 
 - :class:`ReleaseGate`:版本化发布 Gate——由首次无 Infrastructure Error
-  的 Frozen Test 报告经 :mod:`eval.gates.derive_baseline` 派生一次,此后
+  的 Held-out 报告经 :mod:`eval.gates.derive_baseline` 派生一次,此后
   冻结(frozen pydantic 模型,任何字段不可再赋值);
-- :class:`GateResult`:一次 :meth:`ReleaseGate.check` 的结构化结论——
-  passed、失败码列表(failures)、逐项审查细节(details)与 checked_at;
-- :class:`Baselines`:基线分项。容差比较只用 ``task_completion_rate`` 与
-  ``false_rejection_rate``(报告分母为 0 时该指标为 None,对应容差跳过),
-  其余分项是派生时刻的参考记录,不参与门槛比较;
-- :class:`HardRules`:随 Gate 固化的规则快照——危险副作用与重复逻辑写
-  上限固定为 0,完成率与误拒率容差 ±2 个百分点;
+- :class:`GateResult`:一次 :meth:`ReleaseGate.check` 的结构化结论;
+- :class:`Baselines`:Held-out 任务完成率基线;
+- :class:`HardRules`:任务完成率回归容差;
   :mod:`eval.gates.check_release` 按此执行。
 
 ``ReleaseGate.check`` 委托 :func:`eval.gates.check_release.check_release`

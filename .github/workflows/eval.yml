@@ -3,6 +3,16 @@ name: eval
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      split:
+        description: 选择商品 Agent 评测数据分区
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - safety
+          - held_out
 
 jobs:
   deterministic:
@@ -13,7 +23,7 @@ jobs:
       - run: uv sync --frozen
       - run: uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
       - run: uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
-      # 数据集分层互斥与冻结哈希校验(失败即漂移)。
+      # 数据集分区互斥与 Held-out 哈希校验。
       - run: uv run pytest tests/eval/test_dataset_partitions.py -q
 
   # 真实模型 Eval(DeepSeek):仅手动触发,不在 Pull Request 中自动消耗额度。
@@ -38,10 +48,9 @@ jobs:
               exit 1
             fi
           done
-      # 先 Development 集,人工确认结果后再跑 Frozen Test 并派生基线
-      # (见 docs/评测/评测方法.md)。产物按运行编号归档。
-      - run: uv run python -m eval.product_suite --split development --output reports/development.json
+      # Regression 目前为空，待确认 Bad Case 后再加入手动选项。
+      - run: uv run python -m eval.product_suite --split "${{ inputs.split }}" --output "reports/${{ inputs.split }}.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: development-report-${{ github.run_id }}
-          path: reports/development.json
+          name: product-eval-${{ inputs.split }}-${{ github.run_id }}
+          path: reports/${{ inputs.split }}.json

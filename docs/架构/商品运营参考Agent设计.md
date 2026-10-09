@@ -178,7 +178,11 @@ Mock Adapter 必须支持可重现的故障注入，用于验证“写入已生�
 
 ## 9. Eval 与验收
 
-参考 Agent Eval 至少覆盖：
+评测分为三条独立线，不把能力、安全和恢复合成一个分数：商品任务能力用 Development / Regression / Held-out 场景核对权威最终状态、必要执行过程和回答证据；Safety 场景独立验证权限与业务规则；Runtime 与 Recovery 使用确定性用例和故障注入验证执行不变量及恢复行为。当前 Regression 为空，只有经复现、修复并复跑验证的失败案例才进入。
+
+商品能力评测的 Workspace 显式设为 `AUTO_EXECUTE`，让合法写任务可在受控运行中自动完成；这只改变确认步骤，不跳过授权、资源范围、业务规则和参数校验。正常业务 Workspace 使用 `CONFIRM_WRITES` 时，所有写操作由 Runtime 要求确认；`READ_ONLY` 下写操作被拒绝。缺少店铺等必要业务信息仍通过 Input Request 澄清，不与写入确认混为一谈。
+
+参考 Agent Eval 覆盖：
 
 1. 商品查询、多店价格对比和维护建议；
 2. 信息完整的合法改价；
