@@ -211,6 +211,28 @@ async def test_store_alias_argument_is_canonicalized_via_alias_table(
     assert result.requirement is None
 
 
+@pytest.mark.parametrize("target_store", ["taobao", "douyin"])
+async def test_each_explicit_store_in_multi_store_message_is_trusted(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    target_store: str,
+) -> None:
+    """多店比较中，每个被用户独立点名的店铺都可作为当前 ToolCall 证据。"""
+    selected = getattr(input_catalog, target_store)
+    result = await input_resolver.resolve(
+        user_message="对比淘宝旗舰店和豆音小店的 SKU-001 价格",
+        arguments={
+            "store_id": str(selected.id),
+            "sku": "SKU-001",
+            "target_price": "99.00",
+        },
+        actor=actor_with_all_stores(input_catalog),
+    )
+    assert result.provenance["store_id"] == ArgumentProvenance.USER_EXPLICIT
+    assert result.normalized_arguments["store_id"] == str(selected.id)
+    assert result.requirement is None
+
+
 async def test_ambiguous_alias_evidence_is_not_trusted(
     input_resolver: ProductInputRequirementResolver,
     input_catalog: InputCatalog,
