@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from eval.product_suite import main as product_suite_main
 from eval.reporting.json_report import ReportBuilder
 from eval.reporting.langfuse_export import export_report
 from eval.reporting.markdown_report import render_markdown
+from eval.schema import SCHEMA_VERSION
 from eval.results import (
     CaseResult,
     EventCapture,
@@ -424,8 +426,13 @@ def test_product_suite_missing_env_fails_fast(
     """缺任一必需环境变量 → 明确报错(提示变量名)、退出码非 0、不产报告。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
+    manifest = _purpose_manifest(held_out_ids=[], safety_ids=[])
+    manifest["development_ids"] = ["dev-001"]
+    _write_minimal_dataset(tmp_path, manifest, split="development", case_id="dev-001")
     output = tmp_path / "report.json"
-    code = product_suite_main(["--split", "development", "--output", str(output)])
+    code = product_suite_main(
+        ["--split", "development", "--dataset-dir", str(tmp_path), "--output", str(output)]
+    )
     assert code != 0
     captured = capsys.readouterr()
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
@@ -433,10 +440,77 @@ def test_product_suite_missing_env_fails_fast(
     assert not output.exists()
 
 
-def test_product_suite_rejects_frozen_hash_drift(
+def _scenario_document(case_id: str) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "category": "read_only_query",
+        "risk_level": "low",
+        "initial_state": {"listings": []},
+        "workspace": {"name": "eval-test"},
+        "actor": {"role": "owner", "permissions": [], "store_scope_mode": "NONE"},
+        "messages": [{"role": "user", "content": "只查询商品信息"}],
+        "expected_final_state": {"listings": [], "max_logical_writes": 0},
+    }
+
+
+def _write_minimal_dataset(
+    tmp_path: Path,
+    manifest: dict[str, object],
+    *,
+    split: str,
+    case_id: str,
+) -> None:
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    scenario = _scenario_document(case_id)
+    (tmp_path / f"{split}.yaml").write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "scenarios": [scenario]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _purpose_manifest(*, held_out_ids: list[str], safety_ids: list[str]) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "scorer_version": fixed_eval_config().scorer_version,
+        "development_ids": [],
+        "regression_ids": [],
+        "held_out_ids": held_out_ids,
+        "safety_ids": safety_ids,
+        "held_out_sha256": "0" * 64,
+    }
+
+
+def test_product_suite_accepts_safety_split(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = _purpose_manifest(held_out_ids=[], safety_ids=["safe-001"])
+    _write_minimal_dataset(tmp_path, manifest, split="safety", case_id="safe-001")
+    monkeypatch.delenv("EVAL_API_KEY", raising=False)
+    code = product_suite_main(["--split", "safety", "--dataset-dir", str(tmp_path)])
+    assert code == 2
+    assert "EVAL_API_KEY" in capsys.readouterr().err
+
+
+def test_product_suite_rejects_empty_regression_before_env_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = _purpose_manifest(held_out_ids=[], safety_ids=[])
+    _write_minimal_dataset(tmp_path, manifest, split="regression", case_id="unused-001")
+    (tmp_path / "regression.yaml").write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "scenarios": []}), encoding="utf-8"
+    )
+    manifest["regression_ids"] = []
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.delenv("EVAL_API_KEY", raising=False)
+    code = product_suite_main(["--split", "regression", "--dataset-dir", str(tmp_path)])
+    assert code == 2
+    assert "no scenarios" in capsys.readouterr().err
+
+
+def test_product_suite_rejects_held_out_hash_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """frozen_test 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
+    """Held-out 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     manifest = {
@@ -444,12 +518,13 @@ def test_product_suite_rejects_frozen_hash_drift(
         "scorer_version": "v2",
         "development_ids": [],
         "regression_ids": [],
-        "frozen_test_ids": ["frozen-001"],
-        "frozen_test_sha256": "0" * 64,
+        "held_out_ids": ["held-001"],
+        "safety_ids": [],
+        "held_out_sha256": "0" * 64,
     }
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (tmp_path / "frozen_test.yaml").write_text("[]", encoding="utf-8")
-    code = product_suite_main(["--split", "frozen_test", "--dataset-dir", str(tmp_path)])
+    (tmp_path / "held_out.yaml").write_text("[]", encoding="utf-8")
+    code = product_suite_main(["--split", "held_out", "--dataset-dir", str(tmp_path)])
     assert code != 0
     captured = capsys.readouterr()
-    assert "frozen_test_sha256" in captured.err
+    assert "held_out_sha256" in captured.err

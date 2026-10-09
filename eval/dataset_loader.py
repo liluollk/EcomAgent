@@ -8,7 +8,7 @@
 - ``load_dataset`` 按后缀分派单文件,目录则按文件名排序加载全部受支持文件
   (``.yaml``/``.yml``/``.jsonl``),其余后缀报错;
 - ``load_manifest`` 加载分区 manifest(:class:`DatasetManifest`,计划 05
-  Task 5:三分区 ID 清单 + frozen_test 文件字节 SHA-256),schema_version
+  Task 5:四分区 ID 清单 + held_out 文件字节 SHA-256),schema_version
   漂移即拒绝。
 
 错误约定:结构类型错误(顶层/scenarios 不是列表)抛 ``TypeError``;取值
@@ -29,10 +29,10 @@ _SUPPORTED_SUFFIXES: Final[frozenset[str]] = frozenset({".yaml", ".yml", ".jsonl
 
 
 class DatasetManifest(BaseModel):
-    """数据集分区 manifest(计划 05 Task 5):分区 ID 清单与冻结集哈希。
+    """数据集分区 manifest:四类 ID 清单与 Held-out 文件哈希。
 
-    ``frozen_test_sha256`` 是对 ``frozen_test.yaml`` 文件字节计算的 SHA-256
-    十六进制摘要,正式评测前重算比对以检测冻结集漂移。
+    ``held_out_sha256`` 是对 ``held_out.yaml`` 文件字节计算的 SHA-256
+    十六进制摘要,正式评测前重算比对以检测保留集漂移。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -41,8 +41,9 @@ class DatasetManifest(BaseModel):
     scorer_version: str
     development_ids: tuple[str, ...]
     regression_ids: tuple[str, ...]
-    frozen_test_ids: tuple[str, ...]
-    frozen_test_sha256: str = Field(min_length=64, max_length=64)
+    held_out_ids: tuple[str, ...]
+    safety_ids: tuple[str, ...]
+    held_out_sha256: str = Field(min_length=64, max_length=64)
 
 
 def load_yaml(path: Path | str) -> list[Scenario]:
