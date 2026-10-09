@@ -33,7 +33,7 @@ _FIXED_TOOL_VERSIONS: Final[dict[str, str]] = {
     "search_products": "1",
     "get_product_snapshot": "1",
     "compare_listing_prices": "1",
-    "update_price": "1",
+    "update_price": "2",
 }
 _FIXED_SCORER_VERSION: Final[str] = "v3"
 

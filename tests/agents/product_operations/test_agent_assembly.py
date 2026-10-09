@@ -62,7 +62,8 @@ async def test_product_and_runtime_tools_are_registered(
     assert set(registered) == set(PRODUCT_TOOL_KEYS)
     for key in PRODUCT_TOOL_KEYS:
         record = registered[key]
-        assert record.version == 1
+        expected_version = 2 if key == STABLE_KEY_UPDATE_PRICE else 1
+        assert record.version == expected_version
         assert assembly.tools.bindings_for(key), f"tool {key} 缺少 ToolBinding"
 
     update_price = registered[STABLE_KEY_UPDATE_PRICE]
@@ -125,6 +126,12 @@ def test_confirmation_is_owned_by_runtime_execution_mode() -> None:
         assert "AUTO_EXECUTE" in text
         assert "所有改价都必须确认" not in text
         assert "绝不未经确认执行写操作" not in text
+
+
+def test_update_price_description_defers_confirmation_to_execution_mode() -> None:
+    description = UPDATE_PRICE_DEFINITION.description
+    assert "ExecutionMode" in description
+    assert "用户确认" not in description
 
 
 async def test_product_skill_is_loaded_only_after_model_requests_it(

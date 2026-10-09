@@ -143,7 +143,7 @@ def test_fingerprint_is_sensitive_to_config_changes(valid_scenario: Scenario) ->
     changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "4"}})
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(
-        update={"tool_versions": {**base_config.tool_versions, "update_price": "2"}}
+        update={"tool_versions": {**base_config.tool_versions, "update_price": "3"}}
     )
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(update={"base_url": "https://api.example.com/v1"})

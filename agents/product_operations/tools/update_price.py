@@ -46,7 +46,7 @@ from runtime.interfaces.tools import ToolDefinition, ToolEffect
 
 
 STABLE_KEY_UPDATE_PRICE: Final = "update_price"
-TOOL_VERSION: Final = 1
+TOOL_VERSION: Final = 2
 PRODUCT_PRICE_WRITE_PERMISSION: Final = "product.price.write"
 
 LISTING_NOT_FOUND: Final = "LISTING_NOT_FOUND"
@@ -104,7 +104,8 @@ UPDATE_PRICE_DEFINITION: Final = ToolDefinition(
     version=TOOL_VERSION,
     description=(
         "在授权店铺内修改指定 SKU 的售价。输入为店铺、SKU 与目标价;"
-        "币种、版本与幂等凭据由服务端补全,写前经权限、价格策略与用户确认。"
+        "币种、版本与幂等凭据由服务端补全;写前始终校验权限与价格策略,"
+        "是否需要人工确认由 Workspace 的 ExecutionMode 决定。"
     ),
     input_json_schema=_input_schema(),
     output_json_schema=_output_schema(),
