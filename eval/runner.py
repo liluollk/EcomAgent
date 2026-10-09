@@ -164,6 +164,23 @@ def _describe(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
+def _symbolize_tool_arguments(
+    environment: IsolatedEnvironment, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
+    """将 Eval Fixture 的内部店铺 UUID 投影回场景符号键。
+
+    Runtime 和数据库继续使用 UUID；只有 CaseResult 捕获使用稳定符号，供
+    ``allowed_side_effects`` / ``forbidden_side_effects`` 跨重复比较。
+    """
+    captured = dict(arguments)
+    store_id = captured.get("store_id")
+    if isinstance(store_id, str):
+        symbol = environment.store_symbol_for_id(store_id)
+        if symbol is not None:
+            captured["store_id"] = symbol
+    return captured
+
+
 class EvalRunner:
     """按 case/repetition 执行 Scenario 的评测运行器。
 
@@ -645,7 +662,9 @@ class EvalRunner:
                     status=tool_call.status.value,
                     failure_code=tool_call.failure_code,
                     normalized_arguments=(
-                        dict(tool_call.normalized_arguments)
+                        _symbolize_tool_arguments(
+                            environment, tool_call.normalized_arguments
+                        )
                         if tool_call.normalized_arguments is not None
                         else None
                     ),
@@ -657,7 +676,6 @@ class EvalRunner:
                 logical_writes=logical_writes
             ),
         )
-
     # -- 内部:结果构造 ---------------------------------------------------
 
     def _skipped_result(self, case: Scenario, *, repetition: int) -> CaseResult:

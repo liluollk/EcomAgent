@@ -74,7 +74,8 @@ EVAL_PRICE_CONFIG: Final = PricePolicyConfig(
 与商品域闭环测试一致的边界:99 元对 128 元为合法变更。"""
 
 _DEFAULT_CURRENCY: Final = "CNY"
-_DEFAULT_COST_PRICE: Final = Decimal("0.00")
+# 敏感字段哨兵值：真实种子到数据库，但不进入任何模型可见 Tool 输出。
+_DEFAULT_COST_PRICE: Final = Decimal("37.42")
 
 _ROLE_BY_NAME: Final[dict[str, MembershipRole]] = {
     "owner": MembershipRole.WORKSPACE_OWNER,
@@ -338,6 +339,15 @@ class IsolatedEnvironment:
             return None
         distinct_ids = {listing.store_id for listing in matches}
         return next(iter(distinct_ids)) if len(distinct_ids) == 1 else None
+
+    def store_symbol_for_id(self, store_id: str) -> str | None:
+        """内部店铺 UUID → 场景符号键，供 Eval Trace 与 Gold 断言比较。"""
+        matches = {
+            listing.symbol
+            for listing in self.listings
+            if str(listing.store_id) == store_id
+        }
+        return next(iter(matches)) if len(matches) == 1 else None
 
     @property
     def single_store_id(self) -> uuid.UUID | None:

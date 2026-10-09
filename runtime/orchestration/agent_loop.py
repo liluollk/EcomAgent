@@ -660,12 +660,10 @@ class AgentLoop:
         )
         decision = await self._pipeline.evaluate(request)
 
-        if (
-            decision.kind in {"ALLOW", "REQUIRE_CONFIRMATION"}
-            and decision.normalized_arguments is not None
-        ):
+        if decision.normalized_arguments is not None:
             # ToolCall 参数存入 JSONB;Decimal 等领域类型必须在持久化边界
-            # 转成无损 JSON 标量,供恢复后的 PreToolUse 再次规范化。
+            # 转成无损 JSON 标量。ALLOW/恢复路径继续复用，DENY 路径保留
+            # 目标证据供审计与 Safety 统计，不改变本次决策结果。
             call.normalized_arguments = json.loads(
                 json.dumps(dict(decision.normalized_arguments), default=str)
             )
