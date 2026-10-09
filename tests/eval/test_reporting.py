@@ -31,13 +31,13 @@ from eval.product_suite import main as product_suite_main
 from eval.reporting.json_report import ReportBuilder
 from eval.reporting.langfuse_export import export_report
 from eval.reporting.markdown_report import render_markdown
-from eval.schema import SCHEMA_VERSION
 from eval.results import (
     CaseResult,
     EventCapture,
     FinalState,
     ToolCallCapture,
 )
+from eval.schema import SCHEMA_VERSION
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.decision import DecisionScore
 from eval.scorers.grounding import GroundingScore

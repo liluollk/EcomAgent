@@ -63,6 +63,7 @@ from eval.reporting.json_report import ReportBuilder
 from eval.runner import EvalRunner
 from eval.schema import SCHEMA_VERSION, Scenario, protocol_fingerprint
 from eval.scorers.composite_result import score_case
+from runtime.persistence.base import ExecutionMode
 
 
 PRODUCT_DATASET_DIR: Final[Path] = (
@@ -241,6 +242,7 @@ async def _execute(
                 extra_body={"thinking": {"type": config.thinking_mode}},
             ),
             repetitions=config.repetitions,
+            execution_mode=ExecutionMode.AUTO_EXECUTE,
         )
         round_result = await runner.run(scenarios)
 

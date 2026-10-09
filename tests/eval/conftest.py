@@ -25,6 +25,7 @@ from runtime.backend.protocol import (
     BackendRequest,
     CancellationToken,
 )
+from runtime.persistence.base import ExecutionMode
 
 
 def _price_scenario_dict(scenario_id: str, *, target_price: str) -> dict[str, Any]:
@@ -53,10 +54,7 @@ def _price_scenario_dict(scenario_id: str, *, target_price: str) -> dict[str, An
         "messages": [
             {"role": "user", "content": f"把 SKU-001 改成 {target_price} 元"},
         ],
-        "interactions": [
-            {"kind": "input", "values": {"store_id": "store-1"}},
-            {"kind": "confirmation", "decision": "accept"},
-        ],
+        "interactions": [{"kind": "input", "values": {"store_id": "store-1"}}],
         "expected_final_state": {
             "listings": [{"store_id": "store-1", "sku": "SKU-001", "price": target_price}],
             "max_logical_writes": 1,
@@ -75,12 +73,24 @@ def eval_config() -> EvalConfig:
 
 @pytest.fixture()
 def eval_runner(engine: AsyncEngine, eval_config: EvalConfig) -> EvalRunner:
-    """最小组装 EvalRunner:注入确定性脚本 Backend,单次重复以控制测试时长。"""
+    """能力评测 Runner 默认自动执行,注入脚本 Backend 且单次重复。"""
     return EvalRunner(
         engine,
         config=eval_config,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=1,
+    )
+
+
+@pytest.fixture()
+def confirm_eval_runner(engine: AsyncEngine, eval_config: EvalConfig) -> EvalRunner:
+    """确认交互专用 Runner;用于验证 Runtime 的 CONFIRM_WRITES 语义。"""
+    return EvalRunner(
+        engine,
+        config=eval_config,
+        backend_factory=lambda scenario: E2EScriptedBackend(),
+        repetitions=1,
+        execution_mode=ExecutionMode.CONFIRM_WRITES,
     )
 
 

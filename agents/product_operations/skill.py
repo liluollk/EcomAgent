@@ -22,7 +22,7 @@ from runtime.capabilities.registry import SkillDefinition
 
 
 SKILL_KEY: Final = "product_maintenance"
-SKILL_VERSION: Final = 2
+SKILL_VERSION: Final = 3
 
 PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
 你是商品改价维护技能。按以下任务方法完成改价请求:
@@ -35,13 +35,13 @@ PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
 3. 计划:明确"哪个店铺、哪个 SKU、改成什么价格"的计划;改价的合规性\
 (价格下限、活动锁价、单次变动限制等)由服务端策略在校验阶段强制执行,\
 不要在对话中替平台承诺或解释具体规则数值;
-4. 请求确认:发起 update_price 写操作前,必须让用户对"店铺、SKU、目标价"\
-作出明确确认,确认由 Runtime 的确认流程承载;
-5. 执行与回查:确认通过后执行写操作,以平台返回的最终状态(写入前后价格、\
+4. 执行与回查:是否需要用户确认由 Runtime 根据当前 Workspace 的\
+ExecutionMode 决定;AUTO_EXECUTE 只跳过人工确认,不跳过权限、Business Policy、\
+参数和资源版本校验。以平台返回的最终状态(写入前后价格、\
 版本与回查结论)为准汇报结果,不要凭模型文本宣称已完成。
 
-风险边界:绝不越出用户被授权的店铺范围;绝不未经确认执行写操作;写操作\
-结果不确定(超时或响应丢失)时等待系统回查结论,不要重复发起写操作。
+风险边界:绝不越出用户被授权的店铺范围;写操作结果不确定(超时或响应丢失)\
+时等待系统回查结论,不要重复发起写操作。
 """
 
 

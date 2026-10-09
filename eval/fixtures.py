@@ -197,7 +197,12 @@ class IsolatedEnvironment:
 
     @classmethod
     async def create(
-        cls, engine: AsyncEngine, scenario: Scenario, *, backend: AgentBackend
+        cls,
+        engine: AsyncEngine,
+        scenario: Scenario,
+        *,
+        backend: AgentBackend,
+        execution_mode: ExecutionMode = ExecutionMode.CONFIRM_WRITES,
     ) -> IsolatedEnvironment:
         """种子身份与业务状态(独立短事务提交)并组装注入 Backend 的商品应用。"""
         workspace_id = uuid.uuid4()
@@ -213,7 +218,7 @@ class IsolatedEnvironment:
                     id=workspace_id,
                     name=f"{scenario.workspace.name}-{uuid.uuid4().hex[:8]}",
                     status=AccountStatus.ACTIVE,
-                    execution_mode=ExecutionMode.CONFIRM_WRITES,
+                    execution_mode=execution_mode,
                 )
                 user = User(
                     id=actor_id,

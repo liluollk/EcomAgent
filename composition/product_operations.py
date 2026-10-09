@@ -129,6 +129,7 @@ from runtime.capabilities.validation import compute_schema_hash
 from runtime.commands.session import SessionCommandService
 from runtime.execution.pretool.decisions import (
     STAGE_ARGUMENT_PROVENANCE,
+    ExecutionModeDecision,
     PolicyDecision,
     PreToolDecision,
     SchemaDiagnostic,
@@ -160,6 +161,7 @@ from runtime.persistence.base import (
     ConfigScope,
     ConfigVersionStatus,
     ConfirmationRequestStatus,
+    ExecutionMode,
     InputRequestStatus,
     MessageRole,
     ModelBackendType,
@@ -182,6 +184,7 @@ from runtime.persistence.models.configuration import (
     ToolVersion as ToolVersionRow,
 )
 from runtime.persistence.models.execution import Operation, ToolCall
+from runtime.persistence.models.identity import Workspace as WorkspaceRow
 from runtime.persistence.models.interaction import (
     ConfirmationRequest,
     InputRequest,
@@ -549,6 +552,19 @@ class _ScopedProductPipeline:
                 session, self._context.workspace_id, self._context.run_id
             )
             requirement_resolver = ProductInputRequirementResolver(session)
+
+            async def resolve_execution_mode(*, effect: ToolEffectKind) -> ExecutionModeDecision:
+                workspace = await session.get(WorkspaceRow, self._context.workspace_id)
+                if workspace is None:
+                    return ExecutionModeDecision(mode="DENY")
+                if effect is not ToolEffectKind.WRITE:
+                    return ExecutionModeDecision(mode="READ_ONLY")
+                if workspace.execution_mode is ExecutionMode.AUTO_EXECUTE:
+                    return ExecutionModeDecision(mode="AUTO")
+                if workspace.execution_mode is ExecutionMode.CONFIRM_WRITES:
+                    return ExecutionModeDecision(mode="CONFIRM")
+                return ExecutionModeDecision(mode="DENY")
+
             dependencies = PreToolDependencies(
                 tool_registry=RuntimeToolRegistry(self._tool_registry),
                 schema_validator=RuntimeSchemaValidator(),
@@ -576,6 +592,7 @@ class _ScopedProductPipeline:
                     tool_call_id=tool_call.tool_call_id,
                     version_bindings=self._version_bindings,
                 ),
+                execution_mode_resolver=resolve_execution_mode,
                 accepted_confirmation_lookup=_AcceptedConfirmationLookup(
                     session=session, workspace_id=self._context.workspace_id
                 ),

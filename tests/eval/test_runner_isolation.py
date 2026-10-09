@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from agents.product_operations.persistence.models import Product
 from apps.worker.e2e import E2EScriptedBackend
 from eval.config import EvalConfig
-from eval.fixtures import _seed_listing
+from eval.fixtures import IsolatedEnvironment, _seed_listing
 from eval.results import EvalRoundResult, by_case_id
 from eval.runner import EvalRunner
 from eval.schema import Scenario, protocol_fingerprint
@@ -36,7 +36,8 @@ from runtime.backend.protocol import (
     BackendFailed,
     CancellationToken,
 )
-from runtime.persistence.base import AccountStatus
+from runtime.persistence.base import AccountStatus, ExecutionMode
+from runtime.persistence.models.execution import Run
 from runtime.persistence.models.identity import Workspace
 
 
@@ -97,19 +98,19 @@ async def test_completed_case_captures_full_trace(
 ) -> None:
     """确定性 case 端到端跑通真实 Runtime:事件/ToolCall/Operation/权威状态完整捕获。"""
     result = await eval_runner.run_one(valid_case)
-    assert result.status == "COMPLETED"
+    assert result.status == "COMPLETED", result.error
     assert result.included_in_quality_score is True
     assert result.case_id == "price-001"
     assert result.repetition == 0
     assert result.fingerprint == protocol_fingerprint(valid_case, eval_config)
     assert result.run_id is not None
 
-    # 事件流:ToolCall 提案 → 等输入 → 恢复 → 等确认 → 恢复 → 写结果 →
+    # 事件流:ToolCall 提案 → 等输入 → 恢复 → 写结果 →
     # 完成(QUEUED→RUNNING 迁移发生在租约领取,不产生 AgentEvent)。
     event_types = [event.event_type for event in result.events]
     assert "TOOL_CALL_PROPOSED" in event_types
     assert "RUN_WAITING_INPUT" in event_types
-    assert "RUN_WAITING_CONFIRMATION" in event_types
+    assert "RUN_WAITING_CONFIRMATION" not in event_types
     assert "TOOL_RESULT_RECORDED" in event_types
     assert event_types[-1] == "RUN_COMPLETED"
     assert [event.sequence_no for event in result.events] == sorted(
@@ -130,6 +131,76 @@ async def test_completed_case_captures_full_trace(
     assert listing.store_id == "store-1"
     assert listing.sku == "SKU-001"
     assert listing.price == Decimal("99.00")
+
+
+async def test_product_eval_uses_auto_execute(
+    engine: AsyncEngine,
+    eval_config: EvalConfig,
+    valid_case: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner 将 AUTO_EXECUTE 写入评测 Workspace,且测试后清理隔离环境。"""
+    environments: list[IsolatedEnvironment] = []
+    original_create = IsolatedEnvironment.create
+
+    async def track_environment(
+        engine: AsyncEngine,
+        scenario: Scenario,
+        *,
+        backend: Any,
+        execution_mode: ExecutionMode = ExecutionMode.CONFIRM_WRITES,
+    ) -> IsolatedEnvironment:
+        environment = await original_create(
+            engine, scenario, backend=backend, execution_mode=execution_mode
+        )
+        environments.append(environment)
+        return environment
+
+    monkeypatch.setattr(IsolatedEnvironment, "create", staticmethod(track_environment))
+    runner = EvalRunner(
+        engine,
+        config=eval_config,
+        backend_factory=lambda scenario: E2EScriptedBackend(),
+        repetitions=1,
+        cleanup_environments=False,
+        execution_mode=ExecutionMode.AUTO_EXECUTE,
+    )
+    try:
+        result = await runner.run_one(valid_case)
+        assert result.status == "COMPLETED", result.error
+        assert result.run_id is not None
+        async with AsyncSession(engine) as session:
+            run = await session.get(Run, result.run_id)
+            assert run is not None
+            workspace = await session.get(Workspace, run.workspace_id)
+            assert workspace is not None
+            assert workspace.execution_mode is ExecutionMode.AUTO_EXECUTE
+    finally:
+        for environment in environments:
+            await environment.aclose()
+            await environment.cleanup()
+
+
+async def test_read_only_execution_mode_denies_writes_without_confirmation(
+    engine: AsyncEngine,
+    eval_runner: EvalRunner,
+    valid_case: Scenario,
+) -> None:
+    runner = EvalRunner(
+        engine,
+        config=eval_runner.config,
+        backend_factory=lambda scenario: E2EScriptedBackend(),
+        repetitions=1,
+        execution_mode=ExecutionMode.READ_ONLY,
+    )
+    result = await runner.run_one(valid_case)
+    assert result.status == "COMPLETED"
+    assert result.final_state is not None
+    assert result.final_state.logical_writes == 0
+    assert [(call.stable_key, call.status) for call in result.tool_calls] == [
+        ("update_price", "DENIED")
+    ]
+    assert "RUN_WAITING_CONFIRMATION" not in {event.event_type for event in result.events}
 
 
 async def test_runner_does_not_infer_missing_store_answer(
@@ -199,7 +270,7 @@ async def test_actor_without_write_permission_is_seeded_and_denied(
 
 
 async def test_explicit_confirmation_rejection_never_writes(
-    eval_runner: EvalRunner, valid_case: Scenario
+    confirm_eval_runner: EvalRunner, valid_case: Scenario
 ) -> None:
     """场景明确拒绝写前确认时,Runtime 不得写入平台。"""
     from eval.schema import UserInteraction
@@ -218,18 +289,18 @@ async def test_explicit_confirmation_rejection_never_writes(
             ),
         }
     )
-    result = await eval_runner.run_one(case)
+    result = await confirm_eval_runner.run_one(case)
     assert result.final_state is not None
     assert result.final_state.listings[0].price == Decimal("128.00")
     assert result.final_state.logical_writes == 0
 
 
 async def test_runner_does_not_auto_confirm_when_decision_is_missing(
-    eval_runner: EvalRunner, valid_case: Scenario
+    confirm_eval_runner: EvalRunner, valid_case: Scenario
 ) -> None:
     """缺少明确确认决定时按执行失败处理,且不写入。"""
     case = valid_case.model_copy(update={"interactions": valid_case.interactions[:1]})
-    result = await eval_runner.run_one(case)
+    result = await confirm_eval_runner.run_one(case)
     assert result.status == "FAILED"
     assert result.included_in_quality_score is True
     assert result.final_state is not None
@@ -288,39 +359,38 @@ async def test_seed_reuses_product_for_same_sku_across_stores(
     """同一 Workspace 的跨店铺 Listing 必须引用同一 SKU Product。"""
     workspace_id = uuid.uuid4()
     products_by_sku: dict[str, Product] = {}
-    async with AsyncSession(engine, expire_on_commit=False) as session:
-        async with session.begin():
-            session.add(
-                Workspace(
-                    id=workspace_id,
-                    name="eval-cross-store-sku",
-                    status=AccountStatus.ACTIVE,
+    async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
+        session.add(
+            Workspace(
+                id=workspace_id,
+                name="eval-cross-store-sku",
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.flush()
+        for symbol, price in (
+            ("store-alpha", Decimal("128.00")),
+            ("store-beta", Decimal("130.00")),
+        ):
+            await _seed_listing(
+                session,
+                workspace_id=workspace_id,
+                symbol=symbol,
+                sku="SKU-SHARED",
+                price=price,
+                currency="CNY",
+                status="ACTIVE",
+                products_by_sku=products_by_sku,
+            )
+        products = (
+            await session.scalars(
+                select(Product).where(
+                    Product.workspace_id == workspace_id,
+                    Product.sku == "SKU-SHARED",
                 )
             )
-            await session.flush()
-            for symbol, price in (
-                ("store-alpha", Decimal("128.00")),
-                ("store-beta", Decimal("130.00")),
-            ):
-                await _seed_listing(
-                    session,
-                    workspace_id=workspace_id,
-                    symbol=symbol,
-                    sku="SKU-SHARED",
-                    price=price,
-                    currency="CNY",
-                    status="ACTIVE",
-                    products_by_sku=products_by_sku,
-                )
-            products = (
-                await session.scalars(
-                    select(Product).where(
-                        Product.workspace_id == workspace_id,
-                        Product.sku == "SKU-SHARED",
-                    )
-                )
-            ).all()
-            assert len(products) == 1
+        ).all()
+        assert len(products) == 1
 
 
 async def test_skipped_case_invalidates_round_protocol(

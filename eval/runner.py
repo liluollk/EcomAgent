@@ -68,6 +68,7 @@ from runtime.backend.protocol import (
     CancellationToken,
 )
 from runtime.interfaces.state import RunStatus
+from runtime.persistence.base import ExecutionMode
 from runtime.persistence.models.configuration import ToolDefinition, ToolVersion
 from runtime.persistence.models.events import AgentEvent
 from runtime.persistence.models.execution import Operation, Run, ToolCall
@@ -178,6 +179,7 @@ class EvalRunner:
         backend_factory: Callable[[Scenario], AgentBackend],
         repetitions: int | None = None,
         cleanup_environments: bool = True,
+        execution_mode: ExecutionMode = ExecutionMode.AUTO_EXECUTE,
     ) -> None:
         self._engine = engine
         self.config = config
@@ -185,6 +187,7 @@ class EvalRunner:
         self._backend_factory = backend_factory
         self._repetitions = config.repetitions if repetitions is None else repetitions
         self._cleanup_environments = cleanup_environments
+        self._execution_mode = execution_mode
 
     # -- 执行入口 ---------------------------------------------------------
 
@@ -223,7 +226,10 @@ class EvalRunner:
         state = _DriveState(observed=observing, run_ids=[])
         try:
             environment = await IsolatedEnvironment.create(
-                self._engine, case, backend=observing
+                self._engine,
+                case,
+                backend=observing,
+                execution_mode=self._execution_mode,
             )
         except _INFRASTRUCTURE_EXCEPTIONS as error:
             return self._result_of_failure(

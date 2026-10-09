@@ -119,6 +119,14 @@ def test_agent_prompt_requires_loading_matching_skill() -> None:
     assert SKILL_KEY in PRODUCT_AGENT_PROMPT
 
 
+def test_confirmation_is_owned_by_runtime_execution_mode() -> None:
+    for text in (PRODUCT_AGENT_PROMPT, PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS):
+        assert "ExecutionMode" in text
+        assert "AUTO_EXECUTE" in text
+        assert "所有改价都必须确认" not in text
+        assert "绝不未经确认执行写操作" not in text
+
+
 async def test_product_skill_is_loaded_only_after_model_requests_it(
     product_application,
 ) -> None:
