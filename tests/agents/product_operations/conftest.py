@@ -25,6 +25,7 @@ from runtime.backend.protocol import (
     CancellationToken,
 )
 from runtime.persistence.base import (
+    ExecutionMode,
     MembershipRole,
     ResourceScopeMode,
 )
@@ -154,6 +155,9 @@ async def _seed_committed_environment(
         async with session.begin():
             seeder = ProductOperationsSeeder(session)
             seed = await seeder.seed()
+            # 该商品业务夹具覆盖确认/恢复流程，显式使用确认模式；Eval Runner
+            # 则单独显式使用 AUTO_EXECUTE。
+            seed.workspace.execution_mode = ExecutionMode.CONFIRM_WRITES
             # 对齐计划原文用例:店铺名/别名为"淘宝旗舰店",SKU 为 SKU-001;
             # 移除默认活动锁价(锁价分支由 price policy 单测覆盖)。
             seed.store.name = "淘宝旗舰店"

@@ -132,15 +132,15 @@ def test_fingerprint_is_sensitive_to_config_changes(valid_scenario: Scenario) ->
     variants: dict[str, Any] = {
         "model": "deepseek-reasoner",
         "temperature": 0.7,
-        "agent_version": "3",
-        "prompt_version": "product-agent-prompt-v3",
+        "agent_version": "4",
+        "prompt_version": "product-agent-prompt-v4",
         "repetitions": 5,
-        "scorer_version": "v3",
+        "scorer_version": "v4",
     }
     for field, value in variants.items():
         changed = base_config.model_copy(update={field: value})
         assert protocol_fingerprint(valid_scenario, changed) != base, field
-    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "3"}})
+    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "4"}})
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(
         update={"tool_versions": {**base_config.tool_versions, "update_price": "2"}}
@@ -242,10 +242,10 @@ def test_eval_config_has_fixed_fields() -> None:
     assert config.temperature == 0
     assert config.thinking_mode == "disabled"
     assert config.repetitions == 3
-    assert config.agent_version == "2"
-    assert config.prompt_version == "product-agent-prompt-v2"
+    assert config.agent_version == "3"
+    assert config.prompt_version == "product-agent-prompt-v3"
     assert config.scorer_version
-    assert config.skill_versions == {"product_maintenance": "2"}
+    assert config.skill_versions == {"product_maintenance": "3"}
     assert set(config.tool_versions) >= {
         "load_skill",
         "search_products",
