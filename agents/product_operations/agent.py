@@ -25,11 +25,11 @@ from runtime.capabilities.skill_activation import LOAD_SKILL_KEY
 
 
 AGENT_KEY: Final = "product-maintenance"
-AGENT_VERSION: Final = 3
+AGENT_VERSION: Final = 4
 
 PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
     name="ProductMaintenanceAgent",
-    system_prompt_version="product-agent-prompt-v3",
+    system_prompt_version="product-agent-prompt-v4",
     required_backend_capabilities=frozenset({"streaming", "tool_calling"}),
     required_skill_keys=frozenset({SKILL_KEY}),
     required_tool_keys=frozenset(

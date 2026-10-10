@@ -126,7 +126,12 @@ def build_report(
     split: str = "core",
 ) -> dict[str, Any]:
     """经真实 ReportBuilder 组装报告(真实分母、协议指纹、脱敏结构)。"""
-    report = ReportBuilder().build(results, protocol_fingerprint=fingerprint)
+    report = ReportBuilder().build(
+        results,
+        protocol_fingerprint="full-" + fingerprint,
+        benchmark_fingerprint=fingerprint,
+        system_fingerprint="system-under-test",
+    )
     report["dataset"] = {"split": split}
     return report
 
@@ -142,7 +147,7 @@ def report_with_completion(passed: int, total: int) -> dict[str, Any]:
 
 
 def report_with_protocol(fingerprint: str) -> dict[str, Any]:
-    """计划用例助手:同一份干净报告,仅协议指纹不同。"""
+    """计划用例助手:同一份干净报告,仅评测基准指纹不同。"""
     return build_report(clean_results(), fingerprint=fingerprint)
 
 
@@ -163,7 +168,7 @@ def gate() -> ReleaseGate:
 
 
 def test_release_gate_rejects_protocol_drift(gate: ReleaseGate) -> None:
-    """计划原文用例:协议指纹与 Gate 记录不一致即拒绝。"""
+    """评测基准指纹与 Gate 记录不一致即拒绝。"""
     result = gate.check(report_with_protocol("different"))
     assert result.passed is False
     assert "PROTOCOL_MISMATCH" in result.failures
@@ -297,7 +302,7 @@ def test_derive_baseline_captures_fingerprint_and_baselines() -> None:
     """派生结果记录协议指纹、完成率基线、固定容差与来源报告摘要。"""
     gate = derive_baseline(build_report(clean_results()))
     assert gate.gate_version == "v1"
-    assert gate.protocol_fingerprint == FINGERPRINT
+    assert gate.benchmark_fingerprint == FINGERPRINT
     assert gate.baselines.task_completion_rate == pytest.approx(0.5)
     assert gate.hard_rules.task_completion_tolerance == 0.02
     assert gate.derived_from_report.totals["quality_denominator"] == 2
@@ -349,8 +354,8 @@ def test_derive_baseline_rejects_empty_denominator() -> None:
 
 
 def test_derive_baseline_rejects_missing_fingerprint() -> None:
-    """空协议指纹的门无比较意义 → 拒绝派生。"""
-    with pytest.raises(BaselineDerivationError, match="protocol_fingerprint"):
+    """空评测基准指纹的门无比较意义 → 拒绝派生。"""
+    with pytest.raises(BaselineDerivationError, match="benchmark_fingerprint"):
         derive_baseline(build_report(clean_results(), fingerprint=""))
 
 
@@ -383,7 +388,7 @@ def test_derive_cli_writes_gate_file(
 
     assert code == 0
     gate = ReleaseGate.model_validate_json(gate_path.read_text(encoding="utf-8"))
-    assert gate.protocol_fingerprint == FINGERPRINT
+    assert gate.benchmark_fingerprint == FINGERPRINT
     assert gate.baselines.task_completion_rate == pytest.approx(0.5)
     assert FINGERPRINT in capsys.readouterr().out
 

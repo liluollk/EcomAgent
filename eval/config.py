@@ -25,15 +25,15 @@ API_KEY_ENV_VAR: Final[str] = "EVAL_API_KEY"
 PROVIDERS_DIR: Final[Path] = Path(__file__).resolve().parent / "providers"
 DEEPSEEK_CONFIG_PATH: Final[Path] = PROVIDERS_DIR / "deepseek.json"
 
-_FIXED_AGENT_VERSION: Final[str] = "3"
-_FIXED_PROMPT_VERSION: Final[str] = "product-agent-prompt-v3"
-_FIXED_SKILL_VERSIONS: Final[dict[str, str]] = {"product_maintenance": "3"}
+_FIXED_AGENT_VERSION: Final[str] = "4"
+_FIXED_PROMPT_VERSION: Final[str] = "product-agent-prompt-v4"
+_FIXED_SKILL_VERSIONS: Final[dict[str, str]] = {"product_maintenance": "4"}
 _FIXED_TOOL_VERSIONS: Final[dict[str, str]] = {
     "load_skill": "1",
-    "search_products": "1",
-    "get_product_snapshot": "1",
-    "compare_listing_prices": "1",
-    "update_price": "2",
+    "search_products": "2",
+    "get_product_snapshot": "2",
+    "compare_listing_prices": "2",
+    "update_price": "3",
 }
 _FIXED_SCORER_VERSION: Final[str] = "v3"
 

@@ -35,7 +35,7 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 3
+REPORT_SCHEMA_VERSION: int = 4
 """报告结构版本:字段语义或结构变化时递增。"""
 
 
@@ -50,6 +50,8 @@ class ReportBuilder:
         results: Sequence[ScoredCaseResult | CaseResult],
         *,
         protocol_fingerprint: str = "",
+        benchmark_fingerprint: str = "",
+        system_fingerprint: str = "",
         infrastructure_errors: Sequence[Mapping[str, Any]] | None = None,
         config: EvalConfig | None = None,
     ) -> dict[str, Any]:
@@ -77,6 +79,8 @@ class ReportBuilder:
             "report_schema_version": REPORT_SCHEMA_VERSION,
             "report_type": "product_suite_eval",
             "protocol_fingerprint": protocol_fingerprint,
+            "benchmark_fingerprint": benchmark_fingerprint,
+            "system_fingerprint": system_fingerprint,
             "config": config.model_dump(mode="json") if config is not None else None,
             "totals": self._totals(case_results, scored, denominator),
             "metrics": self._metrics(contributing, denominator),

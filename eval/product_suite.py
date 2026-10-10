@@ -61,7 +61,13 @@ from eval.config import (
 from eval.dataset_loader import DatasetManifest, load_dataset, load_manifest
 from eval.reporting.json_report import ReportBuilder
 from eval.runner import EvalRunner
-from eval.schema import SCHEMA_VERSION, Scenario, protocol_fingerprint
+from eval.schema import (
+    SCHEMA_VERSION,
+    Scenario,
+    benchmark_fingerprint,
+    protocol_fingerprint,
+    system_fingerprint,
+)
 from eval.scorers.composite_result import score_case
 from runtime.persistence.base import ExecutionMode
 
@@ -203,6 +209,22 @@ def run_protocol_fingerprint(scenarios: Sequence[Scenario], config: EvalConfig) 
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def run_benchmark_fingerprint(
+    scenarios: Sequence[Scenario], config: EvalConfig
+) -> str:
+    """整轮可比性指纹:固定题目、模型、采样配置和 Scorer。"""
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "scenario_fingerprints": sorted(
+            benchmark_fingerprint(scenario, config) for scenario in scenarios
+        ),
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # 运行与报告
 # ---------------------------------------------------------------------------
@@ -235,6 +257,8 @@ async def _execute(
             report = ReportBuilder().build(
                 [],
                 protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+                benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
+                system_fingerprint=system_fingerprint(config),
                 infrastructure_errors=infrastructure_errors,
                 config=config,
             )
@@ -266,6 +290,8 @@ async def _execute(
         report = ReportBuilder().build(
             [*round_result.results, *scored],
             protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+            benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
+            system_fingerprint=system_fingerprint(config),
             infrastructure_errors=infrastructure_errors,
             config=config,
         )
@@ -346,6 +372,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"skipped={totals['skipped']}"
     )
     print(f"protocol_fingerprint={report['protocol_fingerprint']}")
+    print(f"benchmark_fingerprint={report['benchmark_fingerprint']}")
+    print(f"system_fingerprint={report['system_fingerprint']}")
     metrics = report["metrics"]
     metric_names = (
         ("dangerous_attempt_rate", "dangerous_side_effect_rate")

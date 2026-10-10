@@ -3,7 +3,7 @@
 ``v1.json`` 只能从首次**无 Infrastructure Error** 的 Core 报告生成
 一次。派生资格(全部满足,否则抛 :class:`BaselineDerivationError`):
 
-- 报告带非空 ``protocol_fingerprint``(所有比较必须使用同一协议指纹);
+- 报告带非空 ``benchmark_fingerprint``(所有比较必须使用同一评测基准);
 - ``totals.protocol_valid`` 为 True(任一 skipped 使整轮协议失效);
 - 无基础设施错误(``totals.infrastructure_errors == 0`` 且报告的
   ``infrastructure_errors`` 列表为空);
@@ -54,9 +54,9 @@ def derive_baseline(
     metrics = _mapping(report.get("metrics"))
     problems: list[str] = []
 
-    fingerprint = report.get("protocol_fingerprint")
+    fingerprint = report.get("benchmark_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
-        problems.append("protocol_fingerprint is missing or empty")
+        problems.append("benchmark_fingerprint is missing or empty")
 
     if totals.get("protocol_valid") is not True:
         problems.append("totals.protocol_valid is not True (protocol invalid)")
@@ -88,7 +88,7 @@ def derive_baseline(
     dataset = report.get("dataset")
     return ReleaseGate(
         gate_version=gate_version,
-        protocol_fingerprint=fingerprint,
+        benchmark_fingerprint=fingerprint,
         baselines=Baselines(
             task_completion_rate=task_completion,
         ),
@@ -98,7 +98,7 @@ def derive_baseline(
                 schema_version if isinstance(schema_version, int) else None
             ),
             report_type=report_type if isinstance(report_type, str) else None,
-            protocol_fingerprint=fingerprint,
+            benchmark_fingerprint=fingerprint,
             totals=totals,
             dataset=dict(dataset) if isinstance(dataset, dict) else None,
         ),
@@ -154,7 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(gate.model_dump_json(indent=2) + "\n", encoding="utf-8")
     print(f"gate_version={gate.gate_version}")
-    print(f"protocol_fingerprint={gate.protocol_fingerprint}")
+    print(f"benchmark_fingerprint={gate.benchmark_fingerprint}")
     print(f"task_completion_rate={_rate_text(gate.baselines.task_completion_rate)}")
     print(f"written: {output}")
     return 0

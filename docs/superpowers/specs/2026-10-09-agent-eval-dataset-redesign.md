@@ -75,7 +75,7 @@ eval/datasets/product_operations/
 6. 优化结束后运行 10 条 Blind Case；Blind 只作过拟合检查，不参与继续调参。
 7. Clarification、Safety、Runtime 和 Recovery 分别运行并分别报告。
 
-如果场景、Scorer、模型配置或影响决策的 Prompt/Tool 版本发生变化，协议指纹必须变化，不直接与旧结果比较。
+场景、Scorer 或模型配置变化时，`benchmark_fingerprint` 必须变化，不直接与旧结果比较。Prompt、Skill、Tool 或 Agent 版本变化时，`system_fingerprint` 必须变化；这类变化正是优化对象，只要 `benchmark_fingerprint` 相同即可进行前后对比。完整 `protocol_fingerprint` 保留作单轮审计。
 
 ## 6. 独立验证
 

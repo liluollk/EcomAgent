@@ -31,7 +31,9 @@ from eval.schema import (
     Message,
     Scenario,
     UserInteraction,
+    benchmark_fingerprint,
     protocol_fingerprint,
+    system_fingerprint,
 )
 
 
@@ -132,22 +134,62 @@ def test_fingerprint_is_sensitive_to_config_changes(valid_scenario: Scenario) ->
     variants: dict[str, Any] = {
         "model": "deepseek-reasoner",
         "temperature": 0.7,
-        "agent_version": "4",
-        "prompt_version": "product-agent-prompt-v4",
+        "agent_version": "5",
+        "prompt_version": "product-agent-prompt-v5",
         "repetitions": 5,
         "scorer_version": "v4",
     }
     for field, value in variants.items():
         changed = base_config.model_copy(update={field: value})
         assert protocol_fingerprint(valid_scenario, changed) != base, field
-    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "4"}})
+    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "5"}})
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(
-        update={"tool_versions": {**base_config.tool_versions, "update_price": "3"}}
+        update={"tool_versions": {**base_config.tool_versions, "update_price": "4"}}
     )
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(update={"base_url": "https://api.example.com/v1"})
     assert protocol_fingerprint(valid_scenario, changed) != base
+
+
+def test_benchmark_fingerprint_ignores_system_version_changes(
+    valid_scenario: Scenario,
+) -> None:
+    config = fixed_eval_config()
+    base = benchmark_fingerprint(valid_scenario, config)
+    changed = config.model_copy(
+        update={
+            "agent_version": "next-agent",
+            "prompt_version": "next-prompt",
+            "skill_versions": {"product_maintenance": "next-skill"},
+            "tool_versions": {"update_price": "next-tool"},
+        }
+    )
+    assert benchmark_fingerprint(valid_scenario, changed) == base
+
+
+def test_benchmark_fingerprint_tracks_eval_protocol_changes(
+    valid_scenario: Scenario,
+) -> None:
+    config = fixed_eval_config()
+    base = benchmark_fingerprint(valid_scenario, config)
+    assert benchmark_fingerprint(
+        valid_scenario, config.model_copy(update={"model": "another-model"})
+    ) != base
+    assert benchmark_fingerprint(
+        valid_scenario, config.model_copy(update={"scorer_version": "next-scorer"})
+    ) != base
+
+
+def test_system_fingerprint_tracks_only_system_versions() -> None:
+    config = fixed_eval_config()
+    base = system_fingerprint(config)
+    assert system_fingerprint(
+        config.model_copy(update={"prompt_version": "next-prompt"})
+    ) != base
+    assert system_fingerprint(
+        config.model_copy(update={"model": "another-model"})
+    ) == base
 
 
 def test_fingerprint_tracks_message_wording_and_structure(
@@ -242,10 +284,10 @@ def test_eval_config_has_fixed_fields() -> None:
     assert config.temperature == 0
     assert config.thinking_mode == "disabled"
     assert config.repetitions == 3
-    assert config.agent_version == "3"
-    assert config.prompt_version == "product-agent-prompt-v3"
+    assert config.agent_version == "4"
+    assert config.prompt_version == "product-agent-prompt-v4"
     assert config.scorer_version
-    assert config.skill_versions == {"product_maintenance": "3"}
+    assert config.skill_versions == {"product_maintenance": "4"}
     assert set(config.tool_versions) >= {
         "load_skill",
         "search_products",

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,7 +46,7 @@ from runtime.interfaces.tools import ToolDefinition, ToolEffect
 
 
 STABLE_KEY_UPDATE_PRICE: Final = "update_price"
-TOOL_VERSION: Final = 2
+TOOL_VERSION: Final = 3
 PRODUCT_PRICE_WRITE_PERMISSION: Final = "product.price.write"
 
 LISTING_NOT_FOUND: Final = "LISTING_NOT_FOUND"
@@ -66,9 +66,15 @@ class _FrozenModel(BaseModel):
 class UpdatePriceInput(_FrozenModel):
     """``update_price`` 模型可见输入:恰为 store_id/sku/target_price 三字段。"""
 
-    store_id: str
-    sku: str
-    target_price: Decimal
+    store_id: str = Field(
+        description=(
+            "用户当前消息明确给出的店铺名称或别名;不要复制 ToolResult 中的内部 ID。"
+        )
+    )
+    sku: str = Field(description="用户当前消息明确给出的 SKU 原值。")
+    target_price: Decimal = Field(
+        description="最终目标售价;相对改价任务先依据读取结果完成计算再填写。"
+    )
 
 
 class UpdatePriceResult(_FrozenModel):

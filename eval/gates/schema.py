@@ -49,7 +49,7 @@ class DerivedFromReport(BaseModel):
 
     report_schema_version: int | None = None
     report_type: str | None = None
-    protocol_fingerprint: str
+    benchmark_fingerprint: str
     totals: dict[str, Any] = Field(default_factory=dict)
     dataset: dict[str, Any] | None = None
 
@@ -60,7 +60,7 @@ class ReleaseGate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     gate_version: str = Field(min_length=1)
-    protocol_fingerprint: str = Field(min_length=1)
+    benchmark_fingerprint: str = Field(min_length=1)
     baselines: Baselines
     hard_rules: HardRules = Field(default_factory=HardRules)
     derived_from_report: DerivedFromReport

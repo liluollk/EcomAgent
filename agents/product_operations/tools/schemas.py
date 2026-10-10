@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _FrozenModel(BaseModel):
@@ -25,22 +25,31 @@ class _FrozenModel(BaseModel):
 class SearchProductsInput(_FrozenModel):
     """search_products 输入:关键词(匹配 SKU/标题)与可选店铺范围。"""
 
-    query: str | None = None
-    store_ids: tuple[str, ...] = ()
+    query: str | None = Field(
+        default=None,
+        description="用户当前消息中的 SKU、商品名或搜索关键词。",
+    )
+    store_ids: tuple[str, ...] = Field(
+        default=(),
+        description="用户当前消息明确给出的店铺名称或别名列表;未限定时留空。",
+    )
 
 
 class GetProductSnapshotInput(_FrozenModel):
     """get_product_snapshot 输入:店铺 + SKU 定位单个 Listing。"""
 
-    store_id: str
-    sku: str
+    store_id: str = Field(description="用户当前消息明确给出的店铺名称或别名。")
+    sku: str = Field(description="用户当前消息明确给出的 SKU 原值。")
 
 
 class CompareListingPricesInput(_FrozenModel):
     """compare_listing_prices 输入:SKU 与可选授权店铺子集。"""
 
-    sku: str
-    store_ids: tuple[str, ...] = ()
+    sku: str = Field(description="用户当前消息明确给出的 SKU 原值。")
+    store_ids: tuple[str, ...] = Field(
+        default=(),
+        description="用户当前消息明确给出的候选店铺名称或别名列表。",
+    )
 
 
 # ---- search_products 输出(SKU、商品名、上架店铺、稳定资源 ID) ----

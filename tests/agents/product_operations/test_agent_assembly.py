@@ -19,6 +19,7 @@ from decimal import Decimal
 
 from agents.product_operations.agent import (
     AGENT_KEY,
+    AGENT_VERSION,
     PRODUCT_AGENT_DEFINITION,
 )
 from agents.product_operations.prompt import PRODUCT_AGENT_PROMPT
@@ -26,6 +27,7 @@ from agents.product_operations.skill import (
     PRODUCT_MAINTENANCE_SKILL,
     PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS,
     SKILL_KEY,
+    SKILL_VERSION,
 )
 from agents.product_operations.tools.definitions import (
     COMPARE_LISTING_PRICES_DEFINITION,
@@ -35,6 +37,9 @@ from agents.product_operations.tools.definitions import (
 from agents.product_operations.tools.update_price import (
     STABLE_KEY_UPDATE_PRICE,
     UPDATE_PRICE_DEFINITION,
+)
+from agents.product_operations.tools.update_price import (
+    TOOL_VERSION as UPDATE_PRICE_TOOL_VERSION,
 )
 from runtime.backend.protocol import BackendCompleted, TextDelta, ToolCallCompleted
 from runtime.capabilities.skill_activation import LOAD_SKILL_KEY
@@ -62,7 +67,9 @@ async def test_product_and_runtime_tools_are_registered(
     assert set(registered) == set(PRODUCT_TOOL_KEYS)
     for key in PRODUCT_TOOL_KEYS:
         record = registered[key]
-        expected_version = 2 if key == STABLE_KEY_UPDATE_PRICE else 1
+        expected_version = 3 if key == STABLE_KEY_UPDATE_PRICE else 2
+        if key == LOAD_SKILL_KEY:
+            expected_version = 1
         assert record.version == expected_version
         assert assembly.tools.bindings_for(key), f"tool {key} 缺少 ToolBinding"
 
@@ -78,6 +85,10 @@ async def test_product_and_runtime_tools_are_registered(
         PRODUCT_AGENT_DEFINITION.required_backend_capabilities
     )
     assert assembly.skills.find_by_key(SKILL_KEY) is not None
+    assert AGENT_VERSION == 4
+    assert SKILL_VERSION == 4
+    assert PRODUCT_AGENT_DEFINITION.system_prompt_version == "product-agent-prompt-v4"
+    assert UPDATE_PRICE_TOOL_VERSION == 3
 
 
 async def test_update_price_model_visible_fields_are_exactly_store_sku_price(
@@ -132,6 +143,34 @@ def test_update_price_description_defers_confirmation_to_execution_mode() -> Non
     description = UPDATE_PRICE_DEFINITION.description
     assert "ExecutionMode" in description
     assert "用户确认" not in description
+
+
+def test_write_task_instructions_continue_after_reading() -> None:
+    """用户要求写入时，读取和比较只是前置步骤，不是任务终点。"""
+    for text in (PRODUCT_AGENT_PROMPT, PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS):
+        assert "读取或比较不是任务终点" in text
+        assert "update_price" in text
+
+
+def test_write_task_instructions_preserve_user_business_identifiers() -> None:
+    """后续写调用复用用户业务标识，不把 ToolResult 内部 ID 当作授权来源。"""
+    for text in (PRODUCT_AGENT_PROMPT, PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS):
+        assert "用户当前消息中的店铺名称或别名" in text
+        assert "ToolResult" in text
+        assert "内部 ID" in text
+
+
+def test_tool_input_schema_describes_authoritative_argument_sources() -> None:
+    update_properties = UPDATE_PRICE_DEFINITION.input_json_schema["properties"]
+    assert "用户当前消息" in update_properties["store_id"]["description"]
+    assert "内部 ID" in update_properties["store_id"]["description"]
+    assert "用户当前消息" in update_properties["sku"]["description"]
+    assert "计算" in update_properties["target_price"]["description"]
+
+    snapshot_properties = GET_PRODUCT_SNAPSHOT_DEFINITION.input_json_schema["properties"]
+    assert "用户" in snapshot_properties["store_id"]["description"]
+    compare_properties = COMPARE_LISTING_PRICES_DEFINITION.input_json_schema["properties"]
+    assert "候选店铺" in compare_properties["store_ids"]["description"]
 
 
 async def test_product_skill_is_loaded_only_after_model_requests_it(

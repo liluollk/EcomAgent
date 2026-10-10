@@ -202,6 +202,56 @@ def _scenario_projection(scenario: Scenario) -> dict[str, object]:
     return scenario.model_dump(mode="json")
 
 
+def _sha256(payload: dict[str, object]) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _benchmark_config_projection(config: EvalConfig) -> dict[str, object]:
+    """评测试卷配置:排除被测 Agent/Prompt/Skill/Tool 的版本。"""
+    return {
+        "model": config.model,
+        "base_url": config.base_url,
+        "temperature": config.temperature,
+        "thinking_mode": config.thinking_mode,
+        "repetitions": config.repetitions,
+        "scorer_version": config.scorer_version,
+    }
+
+
+def _system_config_projection(config: EvalConfig) -> dict[str, object]:
+    """被测系统版本:只记录允许在优化前后发生变化的能力版本。"""
+    return {
+        "agent_version": config.agent_version,
+        "prompt_version": config.prompt_version,
+        "skill_versions": config.skill_versions,
+        "tool_versions": config.tool_versions,
+    }
+
+
+def benchmark_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
+    """同一题目、模型、采样和 Scorer 的可比性指纹。"""
+    return _sha256(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "scenario": _scenario_projection(scenario),
+            "benchmark_config": _benchmark_config_projection(config),
+        }
+    )
+
+
+def system_fingerprint(config: EvalConfig) -> str:
+    """Agent/Prompt/Skill/Tool 版本的被测系统指纹。"""
+    return _sha256(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "system_config": _system_config_projection(config),
+        }
+    )
+
+
 def protocol_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
     """计算协议指纹:canonical JSON(排序键)+ SHA-256 十六进制摘要。
 
@@ -213,7 +263,4 @@ def protocol_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
         "scenario": _scenario_projection(scenario),
         "config": config.model_dump(mode="json"),
     }
-    canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _sha256(payload)

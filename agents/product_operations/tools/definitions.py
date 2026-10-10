@@ -24,7 +24,7 @@ from runtime.interfaces.tools import ToolDefinition, ToolEffect
 STABLE_KEY_SEARCH_PRODUCTS: Final = "search_products"
 STABLE_KEY_GET_PRODUCT_SNAPSHOT: Final = "get_product_snapshot"
 STABLE_KEY_COMPARE_LISTING_PRICES: Final = "compare_listing_prices"
-TOOL_VERSION: Final = 1
+TOOL_VERSION: Final = 2
 
 
 def _definition(

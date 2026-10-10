@@ -6,8 +6,8 @@
 
 硬门槛:
 
-- ``PROTOCOL_MISMATCH``:报告协议指纹与 Gate 记录不一致(所有比较必须
-  使用同一协议指纹);
+- ``PROTOCOL_MISMATCH``:报告评测基准指纹与 Gate 记录不一致(所有比较必须
+  使用同一套题目、模型、采样配置和 Scorer);
 - ``DATASET_SPLIT_MISMATCH``:只有 ``core`` 报告可用于能力基线比较;
 - ``INVALID_PROTOCOL``:报告必须明确声明 ``totals.protocol_valid`` 为 True;
 - ``INFRASTRUCTURE_ERROR``:报告含基础设施错误(计数 > 0 或错误列表非空);
@@ -66,12 +66,12 @@ def check_release(gate: ReleaseGate, report: Mapping[str, Any]) -> GateResult:
     details: dict[str, Any] = {"gate_version": gate.gate_version}
 
     # -- 硬门槛:协议指纹一致 --------------------------------------------
-    actual_fingerprint = report.get("protocol_fingerprint")
-    details["protocol_fingerprint"] = {
-        "gate": gate.protocol_fingerprint,
+    actual_fingerprint = report.get("benchmark_fingerprint")
+    details["benchmark_fingerprint"] = {
+        "gate": gate.benchmark_fingerprint,
         "report": actual_fingerprint,
     }
-    if actual_fingerprint != gate.protocol_fingerprint:
+    if actual_fingerprint != gate.benchmark_fingerprint:
         failures.append(FAIL_PROTOCOL_MISMATCH)
 
     dataset = report.get("dataset")

@@ -25,7 +25,7 @@ Core 与 Blind 使用独立哈希冻结。Runtime 不变量和故障恢复分别
 
 ## 4. Baseline 与 Gate
 
-Baseline 只能从协议有效、无基础设施错误、分母非零的 `core` 报告派生。Release Gate 只比较相同协议指纹的 Core 任务完成率，允许相对基线下降最多 2 个百分点，同时检查分区、协议、基础设施错误和非空分母。
+Baseline 只能从协议有效、无基础设施错误、分母非零的 `core` 报告派生。Release Gate 只比较相同 `benchmark_fingerprint` 的 Core 任务完成率，允许相对基线下降最多 2 个百分点，同时检查分区、协议、基础设施错误和非空分母。Agent、Prompt、Skill 和 Tool 的版本变化由 `system_fingerprint` 记录，不会被误判成更换评测试卷。
 
 Safety、Clarification、Runtime 和 Recovery 不混入 Gate 的能力分数。
 

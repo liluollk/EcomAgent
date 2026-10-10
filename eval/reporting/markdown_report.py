@@ -17,6 +17,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"# Eval report: {report.get('report_type') or 'eval'}",
         "",
         f"- protocol_fingerprint: `{report.get('protocol_fingerprint') or ''}`",
+        f"- benchmark_fingerprint: `{report.get('benchmark_fingerprint') or ''}`",
+        f"- system_fingerprint: `{report.get('system_fingerprint') or ''}`",
     ]
     lines.extend(_config_lines(report.get("config")))
     totals = report.get("totals")

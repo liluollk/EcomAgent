@@ -380,9 +380,15 @@ def test_report_carries_fingerprint_config_and_totals(
     report_builder: ReportBuilder, eval_config: EvalConfig
 ) -> None:
     report = report_builder.build(
-        sample_results(), protocol_fingerprint="fp-run-xyz", config=eval_config
+        sample_results(),
+        protocol_fingerprint="fp-run-xyz",
+        benchmark_fingerprint="fp-benchmark-xyz",
+        system_fingerprint="fp-system-xyz",
+        config=eval_config,
     )
     assert report["protocol_fingerprint"] == "fp-run-xyz"
+    assert report["benchmark_fingerprint"] == "fp-benchmark-xyz"
+    assert report["system_fingerprint"] == "fp-system-xyz"
     assert report["config"]["model"] == eval_config.model
     assert report["config"]["temperature"] == 0
     assert report["config"]["repetitions"] == 3
