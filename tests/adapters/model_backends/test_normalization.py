@@ -1,17 +1,32 @@
 """Provider 流事件 → 标准化 BackendEvent 的归一化测试(纯转换,不发网络请求)。"""
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
-from adapters.model_backends.anthropic_backend import AnthropicStreamAccumulator
-from adapters.model_backends.openai_backend import OpenAIStreamAccumulator, normalize_status_code
+from adapters.model_backends.anthropic_backend import (
+    AnthropicBackend,
+    AnthropicStreamAccumulator,
+)
+from adapters.model_backends.openai_backend import (
+    OpenAIBackend,
+    OpenAIStreamAccumulator,
+    normalize_status_code,
+)
 from runtime.backend.protocol import (
     BackendCompleted,
     BackendFailed,
+    BackendMessage,
+    BackendRequest,
+    BackendToolCall,
+    CancellationToken,
     TextDelta,
     ToolCallCompleted,
     ToolCallDelta,
     UsageReported,
 )
+from runtime.capabilities.skill_activation import LOAD_SKILL_DEFINITION
 
 
 def openai_chunk(**kwargs: object) -> dict:
@@ -106,6 +121,137 @@ async def test_openai_stream_ends_with_backend_completed() -> None:
     events = accumulator.finish()
     assert isinstance(events[-1], BackendCompleted)
     assert events[-1].finish_reason == "stop"
+
+
+async def test_openai_backend_sends_json_serializable_tool_definitions() -> None:
+    class EmptyStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class Completions:
+        async def create(self, **kwargs):
+            json.dumps(kwargs["tools"])
+            assert kwargs["tools"] == [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "load_skill",
+                        "description": LOAD_SKILL_DEFINITION.description,
+                        "parameters": LOAD_SKILL_DEFINITION.input_json_schema,
+                    },
+                }
+            ]
+            return EmptyStream()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    backend = OpenAIBackend(client, "deepseek-flash")
+    request = BackendRequest(messages=(), tool_definitions=(LOAD_SKILL_DEFINITION,))
+
+    events = [event async for event in backend.stream(request, CancellationToken())]
+
+    assert isinstance(events[-1], BackendCompleted)
+
+
+async def test_openai_backend_serializes_assistant_tool_call_and_tool_result_pair() -> None:
+    class EmptyStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+            assert kwargs["messages"] == [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-123",
+                            "type": "function",
+                            "function": {
+                                "name": "search_products",
+                                "arguments": '{"query":"coffee"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": '{"items":[]}',
+                    "tool_call_id": "call-123",
+                    "name": "search_products",
+                },
+            ]
+            return EmptyStream()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    backend = OpenAIBackend(
+        client,
+        "deepseek-flash",
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    request = BackendRequest(
+        messages=(
+            BackendMessage(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    BackendToolCall(
+                        id="call-123",
+                        name="search_products",
+                        arguments={"query": "coffee"},
+                    ),
+                ),
+            ),
+            BackendMessage(
+                role="tool",
+                content='{"items":[]}',
+                name="search_products",
+                call_id="call-123",
+            ),
+        )
+    )
+
+    events = [event async for event in backend.stream(request, CancellationToken())]
+
+    assert isinstance(events[-1], BackendCompleted)
+
+
+async def test_anthropic_backend_sends_json_serializable_tool_definitions() -> None:
+    class EmptyStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class Messages:
+        def stream(self, **kwargs):
+            json.dumps(kwargs["tools"])
+            return EmptyStream()
+
+    client = SimpleNamespace(messages=Messages())
+    backend = AnthropicBackend(client, "claude-test")
+    request = BackendRequest(messages=(), tool_definitions=(LOAD_SKILL_DEFINITION,))
+
+    events = [
+        event
+        async for event in backend.stream(request, CancellationToken())
+    ]
+
+    assert isinstance(events[-1], BackendCompleted)
 
 
 @pytest.mark.parametrize(

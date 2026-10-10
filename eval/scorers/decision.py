@@ -46,6 +46,9 @@ class DecisionScore(BaseModel):
     total_decisions: int
     """参与判分的写副作用调用数(已定型且命中声明 SideEffect)。"""
 
+    legal_write_decisions: int
+    """实际出现且命中允许副作用声明的写决策数(误拒率分母)。"""
+
     false_rejections: int
     """合法写(命中 ``allowed_side_effects``)被拒次数——合法任务被误拒。"""
 
@@ -64,7 +67,7 @@ class DecisionScorer:
         self._forbidden = scenario.forbidden_side_effects
 
     def score(self, result: CaseResult) -> DecisionScore:
-        total = correct = false_rejections = false_allowances = 0
+        total = correct = legal_write_decisions = false_rejections = false_allowances = 0
         mismatches: list[str] = []
         for call in sorted(result.tool_calls, key=lambda call: call.ordinal):
             decision = _classify(call)
@@ -72,6 +75,8 @@ class DecisionScorer:
             if decision is None or expectation is None:
                 continue
             total += 1
+            if expectation == "allowed":
+                legal_write_decisions += 1
             if decision == expectation:
                 correct += 1
                 continue
@@ -84,6 +89,7 @@ class DecisionScorer:
             decision_accuracy=(correct == total),
             correct_decisions=correct,
             total_decisions=total,
+            legal_write_decisions=legal_write_decisions,
             false_rejections=false_rejections,
             false_allowances=false_allowances,
             mismatches=tuple(mismatches),

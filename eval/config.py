@@ -16,7 +16,7 @@ DeepSeek 真实模型评测固定 ``temperature=0``、``repetitions=3``:配置�
 import json
 import os
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -25,15 +25,17 @@ API_KEY_ENV_VAR: Final[str] = "EVAL_API_KEY"
 PROVIDERS_DIR: Final[Path] = Path(__file__).resolve().parent / "providers"
 DEEPSEEK_CONFIG_PATH: Final[Path] = PROVIDERS_DIR / "deepseek.json"
 
-_FIXED_PROMPT_VERSION: Final[str] = "product-agent-prompt-v1"
-_FIXED_SKILL_VERSIONS: Final[dict[str, str]] = {"product_maintenance": "1"}
+_FIXED_AGENT_VERSION: Final[str] = "4"
+_FIXED_PROMPT_VERSION: Final[str] = "product-agent-prompt-v4"
+_FIXED_SKILL_VERSIONS: Final[dict[str, str]] = {"product_maintenance": "4"}
 _FIXED_TOOL_VERSIONS: Final[dict[str, str]] = {
-    "search_products": "1",
-    "get_product_snapshot": "1",
-    "compare_listing_prices": "1",
-    "update_price": "1",
+    "load_skill": "1",
+    "search_products": "2",
+    "get_product_snapshot": "2",
+    "compare_listing_prices": "2",
+    "update_price": "3",
 }
-_FIXED_SCORER_VERSION: Final[str] = "v1"
+_FIXED_SCORER_VERSION: Final[str] = "v3"
 
 
 class EvalConfigError(Exception):
@@ -48,6 +50,8 @@ class EvalConfig(BaseModel):
     model: str = Field(min_length=1)
     base_url: str = Field(min_length=1)
     temperature: float = Field(ge=0.0, le=2.0)
+    thinking_mode: Literal["disabled"]
+    agent_version: str = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
     skill_versions: dict[str, str]
     tool_versions: dict[str, str]
@@ -64,6 +68,7 @@ class _ProviderFile(BaseModel):
     base_url: str = Field(min_length=1)
     model: str = Field(min_length=1)
     temperature: float
+    thinking_mode: Literal["disabled"]
     repetitions: int = Field(ge=1)
 
 
@@ -94,6 +99,8 @@ def _eval_config_from_document(path: Path, document: dict[str, object]) -> EvalC
         model=provider.model,
         base_url=provider.base_url,
         temperature=provider.temperature,
+        thinking_mode=provider.thinking_mode,
+        agent_version=_FIXED_AGENT_VERSION,
         prompt_version=_FIXED_PROMPT_VERSION,
         skill_versions=dict(_FIXED_SKILL_VERSIONS),
         tool_versions=dict(_FIXED_TOOL_VERSIONS),

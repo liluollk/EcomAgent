@@ -80,10 +80,10 @@ Eval 是 Runtime 外部的工程验证系统，通过固定场景、Runner 和 S
 ```text
 Agent 工作台 / FastAPI
     ↓
-Runtime Control Plane
+运行配置与治理
     Workspace、成员、权限、版本、Secret、配置
     ↓
-Runtime Execution Plane
+Runtime 执行内核
     Session、Run、RunJob、状态机、恢复、Request、AgentEvent
     └── Agent Harness
         Context、Prompt、AgentBackend、Agent Loop、Tool 暴露与结果回填
@@ -94,7 +94,12 @@ Capability Layer
 Eval ──通过公开 API / 协议验证 Runtime，不进入生产执行链
 ```
 
-Control Plane 与 Execution Plane 是同一模块化单体中的逻辑职责，不对应独立进程、微服务或顶层代码包。Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
+Agent Runtime 包含两组职责：
+
+- 运行配置与治理：Workspace、Actor、权限、版本、Secret 和运行配置；
+- 执行内核：Session、Run、Job、工具调用、交互、恢复和事件。
+
+这只是同一模块化单体中的逻辑职责划分，不对应独立进程、微服务或代码目录。Runtime 抽象模型调用、工具执行、权限等待和异常处理；商品运营 Agent 只定义 Prompt、Skill、Source、Tool Schema 与业务规则；工作台只消费 Runtime 的公开 API 和 AgentEvent。
 
 ## 6. 依赖边界
 
@@ -122,7 +127,7 @@ Runtime 公共接口、Harness 和扩展协议以 `docs/架构/Runtime核心接�
 
 ### 7.1 Workspace / Session
 
-- Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、可用 Agent 与 Sources；
+- Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、当前绑定的商品运营 Agent 版本与 Sources；产品入口不提供业务 Agent 选择或自动路由；
 - Session 管理一次持续对话的消息与上下文，可以包含多个 Run；
 - 一条普通用户消息创建一个新的逻辑 Run；Input Request、Confirmation Request、Worker 重启、失败重试和租约接管只恢复原 Run，不创建新 Run；
 - 每次 Worker 实际调度原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；
@@ -335,16 +340,15 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 
 ### 11.2 商品运营 Agent Eval
 
-商品运营 Agent Eval 使用真实模型验证六类任务：只读查询、合法写操作、信息不完整、未授权或违规写请求、多轮任务和查询—计划—确认—执行—回查组合任务。
+商品运营 Agent Eval 使用真实模型分别验证正常业务能力和安全边界。能力场景覆盖只读查询、合法写操作、信息不完整、多轮任务和查询后执行的组合任务；未授权、违规写请求和对抗表达进入独立 Safety 数据集。
 
-核心指标包括：
+核心结果包括：
 
-- **任务完成率**：仅统计允许执行的任务，以平台或模拟平台的权威最终状态判定，不以模型文字声明为准；
-- **行为决策正确率**：当前状态下是否正确提出业务 ToolCall、用自然语言补充询问或拒绝请求；Input Request 与 Confirmation Request 的状态迁移由 Runtime 核心行为评测单独验证；
-- **危险副作用率**：安全对抗场景中实际产生未授权或违规写入的比例，必须为 0；
-- **合法任务误拒率**：合法任务被错误拒绝或无法推进的比例，用于防止系统通过一律拒绝获得安全高分。
+- **任务完成率**：能力主指标。以平台或模拟平台的权威最终状态、必要执行约束和回答证据共同判定，不以模型文字声明为准；
+- **Safety 结果**：独立记录危险调用尝试、执行前拦截和实际危险副作用；实际未授权或违规写入必须为 0；
+- **失败诊断**：保留逐案例 Tool 轨迹、过程约束和回答证据，用于归因，不包装成额外简历主指标。
 
-缺字段后的询问属于行为决策正确率的一个切片，不单独包装为主要指标。
+缺字段后的询问属于任务完成过程，不单独包装为主要指标。Input Request 与 Confirmation Request 的状态迁移由 Runtime 确定性评测验证。
 
 ### 11.3 故障恢复 Eval
 
@@ -386,7 +390,7 @@ Runtime 核心行为评测使用 `ScriptedBackend`、确定性 Tool 和故障注
 
 评测集按任务类型、信息完整度、权限状态、风险等级、单轮/多轮、正常/故障和普通/对抗表达组合覆盖，不要求穷举笛卡尔积。
 
-数据分为可迭代的开发集、固化历史失败的回归集和不根据单条失败修改规则的冻结测试集。最终报告分别展示 Runtime 核心行为、任务完成率、行为决策正确率、危险副作用率、合法任务误拒率和故障恢复成功率，不生成掩盖问题来源的综合总分。
+商品 Agent 数据集按用途分为 Development、Regression、Held-out 和 Safety。Development 用于迭代，Regression 只收录修复并复跑确认的历史缺陷，Held-out 用于任务完成率基线比较，Safety 独立验证越权和业务规则。Runtime 不变量与故障恢复由确定性套件单独验证。报告保留任务完成率为能力主指标，并分别记录安全、过程与恢复结果，不合并成综合总分。
 
 Eval 结果是项目能力的验证证据，不是工作台的产品功能，也不包装为真实生产业务指标。
 
@@ -418,7 +422,7 @@ adapters/
 
 apps/
     api/                # FastAPI 命令、查询与事件接口
-    worker/             # PostgreSQL Job Worker 与 Runtime Host
+    worker/             # PostgreSQL Job Worker 与 Runtime
     workbench/          # React + TypeScript Agent 工作台
 
 eval/
@@ -440,7 +444,7 @@ docs/
 ## 13. 技术选型
 
 - Runtime：Python 3.12、Pydantic v2、asyncio；
-- Runtime Host：FastAPI、WebSocket、独立 Runtime Worker；
+- Runtime：FastAPI、WebSocket、独立 Runtime Worker；
 - Agent 工作台：React、TypeScript；
 - 能力协议：MCP、本地 Python Tool；业务平台使用代码 Adapter；
 - 状态存储：PostgreSQL、SQLAlchemy 2、Alembic；
@@ -468,8 +472,8 @@ docs/
 11. Runtime Eval 与商品运营 Agent Eval 可以独立运行和报告；
 12. API 进程重启不丢失待执行 Run，Worker 可通过 PostgreSQL 租约继续领取任务；
 13. Mem0、WeKnora 或 Langfuse 单独不可用时，不得破坏 Runtime 权威状态和安全边界；
-14. Runtime 确定性不变量、关键工作台 E2E 和故障恢复用例全部通过；危险副作用与重复逻辑写入均以 `0/N` 报告真实分母；
-15. 模型 Eval 固定模型、温度、Prompt/Skill/Tool 版本、初始数据、重复次数和 Scorer；任务完成率与合法任务误拒率在首次基线后写入版本化发布门槛，正式评测期间不得移动；冻结测试集不参与针对单条失败的调参；
+14. Runtime 确定性不变量、关键工作台 E2E 和故障恢复用例分别验证；Safety 报告危险尝试、拦截和实际危险副作用的计数及适用分母；
+15. 模型 Eval 固定模型、温度、Prompt/Skill/Tool 版本、初始数据、重复次数和 Scorer；Held-out 任务完成率在首次有效基线后写入版本化发布门槛，正式比较期间协议和基线保持不变；
 16. Provider 401、依赖不可用和用例跳过记为基础设施失败，不计入模型质量得分；
 17. 项目文档和简历只声明代码、测试和 Eval 已验证的能力。
 18. ToolResult 必须经过固定的协议校验、输出 Schema、脱敏和 Context 投影，模型与工作台不可看到内部诊断或 Secret；

@@ -71,6 +71,37 @@ async def test_projection_failure_does_not_erase_applied_write(
     assert processed.retry_allowed is False
 
 
+async def test_posttool_uses_schema_selected_for_each_tool_version() -> None:
+    processor = ToolResultProcessor()
+    receipt = ToolExecutionReceipt(
+        tool_call_id=PROCESSOR_TOOL_CALL_ID,
+        status="APPLIED",
+        payload={"alpha": 7, "beta": "ready"},
+    )
+
+    alpha_result = await processor.process(
+        receipt,
+        output_schema={
+            "type": "object",
+            "properties": {"alpha": {"type": "integer"}},
+            "required": ["alpha"],
+        },
+    )
+    beta_result = await processor.process(
+        receipt,
+        output_schema={
+            "type": "object",
+            "properties": {"beta": {"type": "string"}},
+            "required": ["beta"],
+        },
+    )
+
+    assert alpha_result.tool_call_error is None
+    assert alpha_result.context_projection.structured_data == {"alpha": 7}
+    assert beta_result.tool_call_error is None
+    assert beta_result.context_projection.structured_data == {"beta": "ready"}
+
+
 async def test_lost_response_classifies_unknown(
     tool_result_processor: ToolResultProcessor,
 ) -> None:

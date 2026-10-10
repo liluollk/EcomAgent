@@ -34,7 +34,7 @@ describe("TaskComposer", () => {
       "/api/sessions",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ workspace_id: "ws-brand-1", agent_id: "agent-product-ops" }),
+        body: JSON.stringify({ workspace_id: "ws-brand-1" }),
       }),
     );
     expect(fetchMock).not.toHaveBeenCalledWith("/api/agents", expect.anything());

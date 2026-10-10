@@ -210,7 +210,10 @@ class AnthropicBackend:
                     {"role": message.role, "content": message.content}
                     for message in request.messages
                 ],
-                tools=[tool.model_dump() for tool in request.tool_definitions] or None,
+                tools=[
+                    tool.model_dump(mode="json") for tool in request.tool_definitions
+                ]
+                or None,
             ) as stream:
                 async for event in stream:
                     if cancellation.is_cancelled:

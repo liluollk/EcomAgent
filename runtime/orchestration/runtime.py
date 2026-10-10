@@ -1,10 +1,10 @@
-"""RuntimeHost:Runtime 执行平面的组合根(计划 02 Task 9)。
+"""Runtime:Runtime 执行内核的组合根(计划 02 Task 9)。
 
-把既有执行平面服务接成一个真实可调用的 Worker 循环:
+把既有执行内核服务接成一个真实可调用的 Worker 循环:
 
     RunJobWorker.run_once()
       → LeaseService.claim(短事务:Run QUEUED→RUNNING、创建 RunAttempt)
-      → RuntimeHost.handle_lease(lease)(回调真实 AgentLoop.advance)
+      → Runtime.handle_lease(lease)(回调真实 AgentLoop.advance)
       → LeaseService.complete(成功:DONE;确定性失败:DEAD)
 
 - ``handle_lease``:为该租约构造 :class:`AgentLoop`,在一个数据库事务内完成
@@ -26,15 +26,14 @@ adapters/agents/eval/apps。
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from runtime.backend.protocol import AgentBackend
-from runtime.execution.tool_executor import WriteToolHandler
+from runtime.execution.operations import ensure_write_fencing
 from runtime.execution.tool_result_processor import ToolResultProcessor
 from runtime.jobs.lease_service import (
     DEFAULT_LEASE_DURATION,
@@ -47,7 +46,6 @@ from runtime.jobs.worker import RunJobWorker
 from runtime.orchestration.agent_loop import (
     AdvanceResult,
     AgentLoop,
-    ReadToolHandler,
     ToolCallEvaluator,
     ToolPinResolver,
 )
@@ -64,7 +62,7 @@ TOOL_RETRY_SCHEDULED = "TOOL_RETRY_SCHEDULED"
 _TERMINAL_RUN_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
-class RuntimeHost:
+class Runtime:
     """组合根:租约驱动的 Agent Loop Worker 与恢复入口。"""
 
     def __init__(
@@ -76,13 +74,10 @@ class RuntimeHost:
         limits: RunLimits,
         tool_pins: ToolPinResolver,
         pipeline_factory: Callable[[], ToolCallEvaluator],
-        read_handler: ReadToolHandler | None = None,
-        write_handler: WriteToolHandler | None = None,
-        output_schema: Mapping[str, Any],
         adapter_key: str = "local",
         supports_native_idempotency: bool = False,
         supports_reconciliation: bool = False,
-        worker_id: str = "runtime-host",
+        worker_id: str = "runtime-worker",
         lease_duration: timedelta = DEFAULT_LEASE_DURATION,
     ) -> None:
         self._session_factory = session_factory
@@ -91,9 +86,6 @@ class RuntimeHost:
         self._limits = limits
         self._tool_pins = tool_pins
         self._pipeline_factory = pipeline_factory
-        self._read_handler = read_handler
-        self._write_handler = write_handler
-        self._output_schema = dict(output_schema)
         self._adapter_key = adapter_key
         self._supports_native_idempotency = supports_native_idempotency
         self._supports_reconciliation = supports_reconciliation
@@ -113,19 +105,18 @@ class RuntimeHost:
         return await self._worker.run_once()
 
     async def handle_lease(self, lease: Lease) -> LeaseOutcome:
-        """Worker 回调:在单事务内以真实 AgentLoop 推进该租约的 Run。
-
-        状态变更与 AgentEvent 在同一事务提交;事务异常向上冒泡,由
-        RunJobWorker 按暂时性错误释放 Job 重试。
-        """
+        """Worker 回调:以短事务检查点推进 Run,不跨外部 I/O 持有事务。"""
         session = self._session_factory()
         try:
-            async with session.begin():
-                loop = self._build_loop(session, lease)
-                result = await loop.advance(
-                    lease.run_id, lease.workspace_id, lease.lease_token
-                )
+            loop = self._build_loop(session, lease)
+            result = await loop.advance(
+                lease.run_id, lease.workspace_id, lease.lease_token
+            )
+            await self._checkpoint(session, lease)
             requeue = result.next_job_kind is RunJobKind.ADVANCE_RUN
+        except BaseException:
+            await session.rollback()
+            raise
         finally:
             await session.close()
         if not requeue:
@@ -162,13 +153,22 @@ class RuntimeHost:
             limits=self._limits,
             pipeline=self._pipeline_factory(),
             tool_pins=self._tool_pins,
-            read_handler=self._read_handler,
-            write_handler=self._write_handler,
-            processor=ToolResultProcessor(output_schema=self._output_schema),
+            processor=ToolResultProcessor(),
             adapter_key=self._adapter_key,
             supports_native_idempotency=self._supports_native_idempotency,
             supports_reconciliation=self._supports_reconciliation,
+            checkpoint=lambda: self._checkpoint(session, lease),
         )
+
+    async def _checkpoint(self, session: AsyncSession, lease: Lease) -> None:
+        """校验当前租约仍有效后提交一个完整状态/Event 原子组。"""
+        await ensure_write_fencing(
+            session,
+            workspace_id=lease.workspace_id,
+            run_id=lease.run_id,
+            lease_token=lease.lease_token,
+        )
+        await session.commit()
 
     # -- 恢复与回收 -----------------------------------------------------
 
@@ -229,4 +229,4 @@ class RuntimeHost:
         return self._worker_id
 
 
-__all__ = ["RuntimeHost"]
+__all__ = ["Runtime"]

@@ -10,7 +10,7 @@
   指标(recovery_success_rate、actual_duplicate_writes、
   final_state_consistency、unknown_handling_correct)达到发布门槛。
 
-所有用例走真实 Runtime 服务、真实商品运行面(MockCommerceAdapter +
+所有用例走真实 Runtime 服务、真实商品应用环境(MockCommerceAdapter +
 FaultInjector)与真库(复用根 conftest 的已迁移测试库)。
 """
 

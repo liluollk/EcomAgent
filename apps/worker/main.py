@@ -7,7 +7,7 @@
   启动后台主循环任务。校验开关由组合根按 ``WorkerSettings.validate_assembly``
   决定是否注入校验器(None 表示跳过校验);
 - 领取循环:``LeaseGateway.claim`` 全局领取 → 执行注入的 Job 回调
-  (RuntimeHost/ProductRuntime 推进由组合根注入)→ 按结果 ``complete``;
+  (Runtime/ProductApplication 推进由组合根注入)→ 按结果 ``complete``;
   回调异常按暂时性错误 ``release``(``WORKER_ERROR``);领取与停止请求竞争
   时,归还刚领取的 Job(``WORKER_SHUTDOWN``);
 - 心跳:执行中 Job 由后台任务周期 ``heartbeat(token)`` 续租;心跳失败
@@ -332,7 +332,7 @@ async def serve(settings: WorkerSettings | None = None) -> int:
     """组装并运行 Worker 进程;收到停止信号后优雅退出,返回退出码。
 
     ``RUNTIME_E2E=1`` 时使用 E2E 装配开关(:mod:`apps.worker.e2e`):Job
-    回调按租约组装 ScriptedBackend + Mock 平台的 ProductRuntime 并推进
+    回调按租约组装 ScriptedBackend + Mock 平台的 ProductApplication 并推进
     已存在的 Run,供端到端验证在无真实模型下走通完整语义。装配校验随
     RuntimeAssembly 组合根接入时注入;HTTP 健康端点不在本任务范围,
     ``health_port`` 预留。

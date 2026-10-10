@@ -1,5 +1,6 @@
 """ContextAssembler 语义测试(计划 02 Task 5 Step 1/Step 4)。"""
 
+from runtime.backend.protocol import BackendToolCall
 from runtime.interfaces.state import AssistantMessageStatus, MessageType
 from runtime.orchestration.context import ConversationMessage, ConversationView, MemoryItem
 
@@ -44,6 +45,30 @@ def test_priority_order_safety_rules_first_current_user_last(
 def test_only_completed_messages_enter_context(context_assembler, conversation) -> None:
     request = context_assembler.build(conversation)
     assert request.contains("the answer is 42")
+
+
+def test_assistant_tool_calls_are_preserved_in_backend_context(context_assembler) -> None:
+    tool_call = BackendToolCall(
+        id="call-1", name="search_products", arguments={"query": "coffee"}
+    )
+    view = ConversationView(
+        messages=(
+            ConversationMessage(
+                sequence_no=1,
+                role=MessageType.ASSISTANT,
+                content="",
+                status=AssistantMessageStatus.COMPLETED,
+                tool_calls=(tool_call,),
+            ),
+        )
+    )
+
+    request = context_assembler.build(view)
+
+    assistant_message = next(
+        message for message in request.messages if message.role == "assistant"
+    )
+    assert assistant_message.tool_calls == (tool_call,)
 
 
 def test_streaming_assistant_message_is_excluded(context_assembler) -> None:

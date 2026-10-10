@@ -13,7 +13,7 @@
 状态语义(deterministic 分类,见 eval.runner):
 - ``COMPLETED``:用例端到端执行完成(不代表任务成功,判分由 Scorer 负责);
 - ``INFRASTRUCTURE_ERROR``:Provider/连接/依赖失败,不计入质量分母;
-- ``FAILED``:执行中其他意外失败,不计入质量分母;
+- ``FAILED``:Agent/Runtime 执行失败;已建立运行环境时计入任务完成率失败分母;
 - ``SKIPPED``:显式 skip 注入,不计入质量分母并使整轮协议失效。
 """
 
@@ -39,6 +39,17 @@ class EventCapture(BaseModel):
     payload: dict[str, Any]
 
 
+class MessageCapture(BaseModel):
+    """会话中实际持久化的用户、Assistant 与 ToolResult 消息。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: uuid.UUID | None
+    sequence_no: int
+    role: str
+    content: str
+
+
 class ToolCallCapture(BaseModel):
     """一条 ToolCall 捕获(稳定键、序号、结论与规范化参数)。"""
 
@@ -46,6 +57,7 @@ class ToolCallCapture(BaseModel):
 
     stable_key: str
     ordinal: int
+    sequence_no: int | None = None
     status: str
     failure_code: str | None = None
     normalized_arguments: dict[str, Any] | None = None
@@ -84,6 +96,7 @@ class CaseResult(BaseModel):
     workspace_id: uuid.UUID | None = None
     error: str | None = None
     events: tuple[EventCapture, ...] = ()
+    conversation_messages: tuple[MessageCapture, ...] = ()
     tool_calls: tuple[ToolCallCapture, ...] = ()
     operations: tuple[OperationCapture, ...] = ()
     final_state: FinalState | None = None
@@ -206,6 +219,7 @@ __all__ = [
     "EvalRoundResult",
     "EventCapture",
     "FinalState",
+    "MessageCapture",
     "OperationCapture",
     "OperationContent",
     "ToolCallCapture",

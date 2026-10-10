@@ -15,6 +15,7 @@ from runtime.backend.protocol import (
     BackendCompleted,
     BackendEvent,
     BackendFailed,
+    BackendToolCall,
     CancellationToken,
     TextDelta,
 )
@@ -95,6 +96,34 @@ async def test_merged_text_callback_batches_deltas() -> None:
     assert outcome.status == "COMPLETED"
     assert outcome.content == "aaabbbcccd"
     assert not outcome.error_code
+
+
+async def test_stream_persists_and_checkpoints_before_requesting_next_chunk() -> None:
+    store = FakeMessageStore()
+    checkpoints: list[str] = []
+
+    async def checkpoint() -> None:
+        checkpoints.append("commit")
+
+    recorder = StreamingMessageRecorder(
+        store=store,
+        workspace_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        sequence_no=1,
+        merge_threshold_chars=4,
+        checkpoint=checkpoint,
+    )
+
+    async def events() -> AsyncIterator[BackendEvent]:
+        yield TextDelta(text_delta="four")
+        assert checkpoints == ["commit", "commit"]
+        yield BackendCompleted(finish_reason="stop")
+
+    outcome = await recorder.consume(events())
+
+    assert outcome.status == "COMPLETED"
+    assert checkpoints == ["commit", "commit", "commit"]
 
 
 async def test_cancellation_marks_message_aborted() -> None:
@@ -236,6 +265,25 @@ async def test_store_list_completed_messages_excludes_aborted_assistant(
     assert messages[1].status is not None
     tool_message = messages[2]
     assert tool_message.role is MessageType.TOOL
+
+
+async def test_store_restores_tool_calls_on_assistant_history(
+    db_session: AsyncSession, seeded_session
+) -> None:
+    store = MessageStore(session=db_session, workspace_id=seeded_session.workspace_id)
+    assistant = await store.start_assistant_message(
+        session_id=seeded_session.id, run_id=None, sequence_no=1
+    )
+    await store.complete_assistant_message(assistant)
+    tool_call = BackendToolCall(
+        id="call-1", name="search_products", arguments={"query": "coffee"}
+    )
+
+    await store.set_assistant_tool_calls(assistant.id, (tool_call,))
+    messages = await store.list_completed_messages(session_id=seeded_session.id)
+
+    assert len(messages) == 1
+    assert messages[0].tool_calls == (tool_call,)
 
 
 async def test_store_persists_session_summary_provenance(

@@ -1,1 +1,1 @@
-{"provider": "deepseek", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "temperature": 0, "repetitions": 3}
+{"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "temperature": 0, "thinking_mode": "disabled", "repetitions": 3}

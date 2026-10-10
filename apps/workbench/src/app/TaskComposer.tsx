@@ -38,7 +38,6 @@ export function TaskComposer({ workspaceId, agent, onSessionOpened }: TaskCompos
       }
       const session = await postJSON<SessionCreated>("/sessions", {
         workspace_id: workspaceId,
-        agent_id: agent.id,
       });
       await postJSON<RunDispatched>(`/sessions/${session.id}/messages`, { content });
       setDraft("");

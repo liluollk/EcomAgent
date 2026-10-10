@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,8 +37,11 @@ from eval.results import (
     FinalState,
     ToolCallCapture,
 )
+from eval.schema import SCHEMA_VERSION
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.decision import DecisionScore
+from eval.scorers.grounding import GroundingScore
+from eval.scorers.process import ProcessScore
 from eval.scorers.recovery import RecoveryScore
 from eval.scorers.safety import SafetyScore
 from eval.scorers.task_completion import TaskCompletionScore
@@ -45,10 +49,14 @@ from eval.scorers.task_completion import TaskCompletionScore
 
 REQUIRED_METRIC_KEYS = {
     "task_completion_rate",
-    "decision_accuracy",
     "dangerous_side_effect_rate",
-    "false_rejection_rate",
-    "recovery_success_rate",
+    "dangerous_attempt_rate",
+}
+REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
+    "counts",
+    "denominators",
+    "diagnostics",
+    "scenario_stability",
 }
 
 
@@ -91,6 +99,7 @@ def _scored(
     decision_total: int = 1,
     false_rejections: int = 0,
     actual_dangerous: int = 0,
+    safety_applicable: bool = False,
     recovery_success: bool = True,
     duplicate_writes: int = 0,
 ) -> ScoredCaseResult:
@@ -100,6 +109,7 @@ def _scored(
         scorer_version="v1",
         task=TaskCompletionScore(
             passed=task_passed,
+            run_completed=True,
             state_matches=task_passed,
             logical_writes_within_limit=True,
             asserted_listings=1,
@@ -110,16 +120,25 @@ def _scored(
             decision_accuracy=(decision_correct == decision_total),
             correct_decisions=decision_correct,
             total_decisions=decision_total,
+            legal_write_decisions=decision_total,
             false_rejections=false_rejections,
             false_allowances=0,
         ),
+        process=ProcessScore(
+            applicable=False, passed=None, checked_constraints=0
+        ),
+        grounding=GroundingScore(
+            applicable=False, passed=None, expected_facts=0, verified_facts=0
+        ),
         safety=SafetyScore(
+            applicable=safety_applicable,
             passed=(actual_dangerous == 0),
             dangerous_attempts=actual_dangerous,
             prevented_attempts=0,
             actual_dangerous_side_effects=actual_dangerous,
         ),
         recovery=RecoveryScore(
+            recovery_applicable=True,
             recovery_success=recovery_success,
             unknown_encounters=0,
             unknown_handled_correctly=0,
@@ -159,6 +178,7 @@ def sample_results(*, api_key: str | None = None) -> list[CaseResult | ScoredCas
             decision_correct=0,
             false_rejections=1,
             actual_dangerous=1,
+            safety_applicable=True,
             recovery_success=False,
             duplicate_writes=1,
         ),
@@ -189,11 +209,21 @@ def eval_config() -> EvalConfig:
 
 
 def test_report_keeps_dimensions_separate(report_builder: ReportBuilder) -> None:
-    """计划原文用例:分项 metrics 齐全,且绝无综合总分。"""
+    """商品报告只暴露核心结果与安全指标,且绝无综合总分。"""
     report = report_builder.build(sample_results())
     assert "overall_score" not in report
     assert "overall_score" not in json.dumps(report)
-    assert set(report["metrics"]) >= REQUIRED_METRIC_KEYS
+    assert set(report["metrics"]) == REQUIRED_REPORT_METRIC_FIELDS
+    assert set(report["metrics"]["diagnostics"]) == {
+        "process_correctness_rate",
+        "answer_grounding_rate",
+    }
+    assert not {
+        "decision_accuracy",
+        "false_rejection_rate",
+        "recovery_success_rate",
+        "duplicate_write_rate",
+    } & set(report["metrics"])
 
 
 def test_report_redacts_provider_credentials(report_builder: ReportBuilder) -> None:
@@ -215,8 +245,37 @@ def test_infrastructure_errors_stay_out_of_denominator(
         config=fixed_eval_config(),
     )
     assert report["totals"]["quality_denominator"] == 2
-    assert report["metrics"]["task_completion_rate"] == pytest.approx(0.5)
 
+
+def test_process_and_grounding_rates_use_only_declared_applicable_cases(
+    report_builder: ReportBuilder,
+) -> None:
+    scored = _scored("case-process")
+    scored = scored.model_copy(
+        update={
+            "process": ProcessScore(
+                applicable=True,
+                passed=False,
+                checked_constraints=1,
+                violations=("wrong_order:get_listing->update_price",),
+            ),
+            "grounding": GroundingScore(
+                applicable=True,
+                passed=True,
+                expected_facts=1,
+                verified_facts=1,
+            ),
+        }
+    )
+    report = report_builder.build([_case_result("case-process"), scored])
+    assert report["metrics"]["diagnostics"]["process_correctness_rate"] == 0.0
+    assert report["metrics"]["diagnostics"]["answer_grounding_rate"] == 1.0
+
+
+def test_infrastructure_errors_stay_out_of_quality_denominator(
+    report_builder: ReportBuilder,
+) -> None:
+    """基础设施错误不入质量分母,但在报告中可见。"""
     infra = _case_result(
         "case-infra",
         status="INFRASTRUCTURE_ERROR",
@@ -244,19 +303,74 @@ def test_infrastructure_errors_stay_out_of_denominator(
 
 
 def test_metrics_reflect_dimension_failures(report_builder: ReportBuilder) -> None:
-    """各分项 rate 用真实计数:全过/各失败一次的两个 case → 全部 0.5。"""
+    """主指标保留真实分母;过程与依据分项归入失败诊断。"""
     report = report_builder.build(
         sample_results(), protocol_fingerprint="fp-run", config=fixed_eval_config()
     )
     metrics = report["metrics"]
     assert metrics["task_completion_rate"] == pytest.approx(0.5)
-    assert metrics["decision_accuracy"] == pytest.approx(0.5)
-    assert metrics["dangerous_side_effect_rate"] == pytest.approx(0.5)
-    assert metrics["false_rejection_rate"] == pytest.approx(0.5)
-    assert metrics["recovery_success_rate"] == pytest.approx(0.5)
-    assert metrics["duplicate_write_rate"] == pytest.approx(0.5)
+    assert metrics["dangerous_side_effect_rate"] == pytest.approx(1.0)
+    assert metrics["dangerous_attempt_rate"] == pytest.approx(1.0)
     assert metrics["denominators"]["included_in_quality_score"] == 2
-    assert metrics["denominators"]["decisions"] == 2
+    assert metrics["denominators"]["safety_applicable_cases"] == 1
+
+
+def test_task_completion_includes_required_process_and_grounding(
+    report_builder: ReportBuilder,
+) -> None:
+    state_only_pass = _scored("state-only", task_passed=True)
+    bad_grounding = state_only_pass.model_copy(
+        update={
+            "grounding": GroundingScore(
+                applicable=True,
+                passed=False,
+                expected_facts=1,
+                verified_facts=0,
+                omitted_facts=("128.00",),
+            )
+        }
+    )
+    bad_process = state_only_pass.model_copy(
+        update={
+            "process": ProcessScore(
+                applicable=True,
+                passed=False,
+                checked_constraints=1,
+                violations=("compare_listing_prices before update_price",),
+            )
+        }
+    )
+
+    assert report_builder.build([bad_grounding])["metrics"]["task_completion_rate"] == 0.0
+    assert report_builder.build([bad_process])["metrics"]["task_completion_rate"] == 0.0
+    assert report_builder.build([state_only_pass])["metrics"]["task_completion_rate"] == 1.0
+
+
+def test_report_counts_scenarios_that_pass_all_repetitions(
+    report_builder: ReportBuilder,
+) -> None:
+    results: list[CaseResult | ScoredCaseResult] = []
+    for repetition in range(3):
+        results.extend(
+            [
+                _case_result("stable", repetition=repetition),
+                _scored("stable", repetition=repetition),
+                _case_result("flaky", repetition=repetition),
+                _scored(
+                    "flaky",
+                    repetition=repetition,
+                    task_passed=repetition < 2,
+                ),
+            ]
+        )
+
+    stability = report_builder.build(results)["metrics"]["scenario_stability"]
+
+    assert stability == {
+        "total_scenarios": 2,
+        "stable_passed_scenarios": 1,
+        "stable_pass_rate": pytest.approx(0.5),
+    }
 
 
 # ---- 补充语义:指纹、配置与场景计数 ------------------------------------
@@ -266,9 +380,15 @@ def test_report_carries_fingerprint_config_and_totals(
     report_builder: ReportBuilder, eval_config: EvalConfig
 ) -> None:
     report = report_builder.build(
-        sample_results(), protocol_fingerprint="fp-run-xyz", config=eval_config
+        sample_results(),
+        protocol_fingerprint="fp-run-xyz",
+        benchmark_fingerprint="fp-benchmark-xyz",
+        system_fingerprint="fp-system-xyz",
+        config=eval_config,
     )
     assert report["protocol_fingerprint"] == "fp-run-xyz"
+    assert report["benchmark_fingerprint"] == "fp-benchmark-xyz"
+    assert report["system_fingerprint"] == "fp-system-xyz"
     assert report["config"]["model"] == eval_config.model
     assert report["config"]["temperature"] == 0
     assert report["config"]["repetitions"] == 3
@@ -324,6 +444,8 @@ def test_markdown_is_readable_view_of_same_report(
     assert "fp-run-xyz" in markdown
     for key in REQUIRED_METRIC_KEYS:
         assert key in markdown
+    assert "process_correctness_rate" in markdown
+    assert "answer_grounding_rate" in markdown
     assert "0.5000" in markdown
     assert "case-good" in markdown
     assert "case-bad" in markdown
@@ -374,8 +496,22 @@ def test_product_suite_missing_env_fails_fast(
     """缺任一必需环境变量 → 明确报错(提示变量名)、退出码非 0、不产报告。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
+    manifest = _purpose_manifest(core_ids=[], safety_ids=[])
+    manifest["clarification_ids"] = ["clarify-001"]
+    _write_minimal_dataset(
+        tmp_path, manifest, split="clarification", case_id="clarify-001"
+    )
     output = tmp_path / "report.json"
-    code = product_suite_main(["--split", "development", "--output", str(output)])
+    code = product_suite_main(
+        [
+            "--split",
+            "clarification",
+            "--dataset-dir",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ]
+    )
     assert code != 0
     captured = capsys.readouterr()
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
@@ -383,23 +519,95 @@ def test_product_suite_missing_env_fails_fast(
     assert not output.exists()
 
 
-def test_product_suite_rejects_frozen_hash_drift(
+def _scenario_document(case_id: str) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "category": "read_only_query",
+        "risk_level": "low",
+        "initial_state": {"listings": []},
+        "workspace": {"name": "eval-test"},
+        "actor": {"role": "owner", "permissions": [], "store_scope_mode": "NONE"},
+        "messages": [{"role": "user", "content": "只查询商品信息"}],
+        "expected_final_state": {"listings": [], "max_logical_writes": 0},
+    }
+
+
+def _write_minimal_dataset(
+    tmp_path: Path,
+    manifest: dict[str, object],
+    *,
+    split: str,
+    case_id: str,
+) -> None:
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    scenario = _scenario_document(case_id)
+    (tmp_path / f"{split}.yaml").write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "scenarios": [scenario]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _purpose_manifest(*, core_ids: list[str], safety_ids: list[str]) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "scorer_version": fixed_eval_config().scorer_version,
+        "core_ids": core_ids,
+        "blind_ids": [],
+        "clarification_ids": [],
+        "regression_ids": [],
+        "safety_ids": safety_ids,
+        "core_sha256": "0" * 64,
+        "blind_sha256": "0" * 64,
+    }
+
+
+def test_product_suite_accepts_safety_split(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = _purpose_manifest(core_ids=[], safety_ids=["safe-001"])
+    _write_minimal_dataset(tmp_path, manifest, split="safety", case_id="safe-001")
+    monkeypatch.delenv("EVAL_API_KEY", raising=False)
+    code = product_suite_main(["--split", "safety", "--dataset-dir", str(tmp_path)])
+    assert code == 2
+    assert "EVAL_API_KEY" in capsys.readouterr().err
+
+
+def test_product_suite_rejects_empty_regression_before_env_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = _purpose_manifest(core_ids=[], safety_ids=[])
+    _write_minimal_dataset(tmp_path, manifest, split="regression", case_id="unused-001")
+    (tmp_path / "regression.yaml").write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "scenarios": []}), encoding="utf-8"
+    )
+    manifest["regression_ids"] = []
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.delenv("EVAL_API_KEY", raising=False)
+    code = product_suite_main(["--split", "regression", "--dataset-dir", str(tmp_path)])
+    assert code == 2
+    assert "no scenarios" in capsys.readouterr().err
+
+
+def test_product_suite_rejects_core_hash_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """frozen_test 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
+    """Core 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     manifest = {
-        "schema_version": 1,
-        "scorer_version": "v1",
-        "development_ids": [],
+        "schema_version": 2,
+        "scorer_version": "v2",
+        "core_ids": ["core-001"],
+        "blind_ids": [],
+        "clarification_ids": [],
         "regression_ids": [],
-        "frozen_test_ids": ["frozen-001"],
-        "frozen_test_sha256": "0" * 64,
+        "safety_ids": [],
+        "core_sha256": "0" * 64,
+        "blind_sha256": "0" * 64,
     }
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (tmp_path / "frozen_test.yaml").write_text("[]", encoding="utf-8")
-    code = product_suite_main(["--split", "frozen_test", "--dataset-dir", str(tmp_path)])
+    (tmp_path / "core.yaml").write_text("[]", encoding="utf-8")
+    code = product_suite_main(["--split", "core", "--dataset-dir", str(tmp_path)])
     assert code != 0
     captured = capsys.readouterr()
-    assert "frozen_test_sha256" in captured.err
+    assert "core_sha256" in captured.err

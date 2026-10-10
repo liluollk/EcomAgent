@@ -199,7 +199,7 @@ async def test_e2e_flow_reaches_authoritative_price(
         # 创建 Session 并提交任务(工作台同款命令)。
         response = await client.post(
             "/api/sessions",
-            json={"workspace_id": seed["workspace_id"], "agent_id": seed["agent_id"]},
+            json={"workspace_id": seed["workspace_id"]},
         )
         assert response.status_code == 201, response.text
         session_id = response.json()["id"]

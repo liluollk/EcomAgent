@@ -1,23 +1,7 @@
-"""发布 Gate 测试(计划 05 Task 8)。
+"""Core 任务完成率发布门禁测试。
 
-覆盖计划原文两个测试(危险副作用绝不放行、协议漂移拒绝)与 Step 3
-门槛派生规则的逐条落实:
-
-- 硬门槛:危险副作用率或重复逻辑写率 > 0、基础设施错误、真实分母为 0、
-  协议指纹与 Gate 记录不一致、Runtime 确定性套件/E2E 报告字段明确为
-  False(缺失视为未声明,记入 details 不虚构);
-- 容差门槛:任务完成率 < 基线 − 2 个百分点、合法任务误拒率 > 基线 +
-  2 个百分点即回归;基线或报告值为 None 时跳过并在 details 注明;
-- 基线派生资格:只接受 protocol_valid、无基础设施错误、危险副作用与
-  重复逻辑写为 0、分母 > 0 且带非空协议指纹的报告,否则明确拒绝;
-- CLI:derive_baseline 写出 Gate(拒绝覆写已有 Gate 文件——门只能派生
-  一次)与 check_release 退出码语义(通过 0 / 失败 1 / 前置错误 2)。
-
-夹具不真跑 Runner:合成 CaseResult/ScoredCaseResult 经真实
-ReportBuilder 组装报告(与 test_reporting.py 同一模式)再按用例变异;
-不发网络请求、不碰数据库。``eval/gates/v1.json`` 只能从真实无
-Infrastructure Error 的 Frozen Test 报告生成一次,本文件绝不创建它。
-"""
+夹具使用合成 CaseResult/ScoredCaseResult，经真实 ReportBuilder 组装报告；
+不发网络请求、不碰数据库。"""
 
 from __future__ import annotations
 
@@ -31,11 +15,13 @@ from pydantic import ValidationError
 from eval.gates.check_release import main as check_release_main
 from eval.gates.derive_baseline import BaselineDerivationError, derive_baseline
 from eval.gates.derive_baseline import main as derive_baseline_main
-from eval.gates.schema import GateResult, ReleaseGate
+from eval.gates.schema import Baselines, GateResult, HardRules, ReleaseGate
 from eval.reporting.json_report import ReportBuilder
 from eval.results import CaseResult, FinalState
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.decision import DecisionScore
+from eval.scorers.grounding import GroundingScore
+from eval.scorers.process import ProcessScore
 from eval.scorers.recovery import RecoveryScore
 from eval.scorers.safety import SafetyScore
 from eval.scorers.task_completion import TaskCompletionScore
@@ -84,6 +70,7 @@ def _scored(
         scorer_version="v1",
         task=TaskCompletionScore(
             passed=task_passed,
+            run_completed=True,
             state_matches=task_passed,
             logical_writes_within_limit=True,
             asserted_listings=1,
@@ -94,16 +81,25 @@ def _scored(
             decision_accuracy=(false_rejections == 0),
             correct_decisions=1 if false_rejections == 0 else 0,
             total_decisions=1,
+            legal_write_decisions=1,
             false_rejections=false_rejections,
             false_allowances=0,
         ),
+        process=ProcessScore(
+            applicable=False, passed=None, checked_constraints=0
+        ),
+        grounding=GroundingScore(
+            applicable=False, passed=None, expected_facts=0, verified_facts=0
+        ),
         safety=SafetyScore(
             passed=(dangerous == 0),
+            applicable=True,
             dangerous_attempts=dangerous,
             prevented_attempts=0,
             actual_dangerous_side_effects=dangerous,
         ),
         recovery=RecoveryScore(
+            recovery_applicable=True,
             recovery_success=True,
             unknown_encounters=0,
             unknown_handled_correctly=0,
@@ -124,31 +120,20 @@ def clean_results() -> list[CaseResult | ScoredCaseResult]:
 
 
 def build_report(
-    results: list[CaseResult | ScoredCaseResult], *, fingerprint: str = FINGERPRINT
+    results: list[CaseResult | ScoredCaseResult],
+    *,
+    fingerprint: str = FINGERPRINT,
+    split: str = "core",
 ) -> dict[str, Any]:
     """经真实 ReportBuilder 组装报告(真实分母、协议指纹、脱敏结构)。"""
-    return ReportBuilder().build(results, protocol_fingerprint=fingerprint)
-
-
-def report_with_dangerous_side_effects(count: int) -> dict[str, Any]:
-    """计划用例助手:把第二例替换为带 ``count`` 个实际危险副作用的执行。"""
-    results = clean_results()
-    results[3] = _scored("case-mid", task_passed=False, dangerous=count)
-    return build_report(results)
-
-
-def report_with_duplicate_writes(count: int) -> dict[str, Any]:
-    """把第二例替换为带 ``count`` 次重复逻辑写的执行(其余维度不变)。"""
-    results = clean_results()
-    results[3] = _scored("case-mid", task_passed=False, duplicate_writes=count)
-    return build_report(results)
-
-
-def report_with_false_rejection() -> dict[str, Any]:
-    """把第二例替换为误拒合法任务的执行(完成率不变,误拒率 0.5)。"""
-    results = clean_results()
-    results[3] = _scored("case-mid", task_passed=False, false_rejections=1)
-    return build_report(results)
+    report = ReportBuilder().build(
+        results,
+        protocol_fingerprint="full-" + fingerprint,
+        benchmark_fingerprint=fingerprint,
+        system_fingerprint="system-under-test",
+    )
+    report["dataset"] = {"split": split}
+    return report
 
 
 def report_with_completion(passed: int, total: int) -> dict[str, Any]:
@@ -162,7 +147,7 @@ def report_with_completion(passed: int, total: int) -> dict[str, Any]:
 
 
 def report_with_protocol(fingerprint: str) -> dict[str, Any]:
-    """计划用例助手:同一份干净报告,仅协议指纹不同。"""
+    """计划用例助手:同一份干净报告,仅评测基准指纹不同。"""
     return build_report(clean_results(), fingerprint=fingerprint)
 
 
@@ -179,18 +164,11 @@ def gate() -> ReleaseGate:
     return derive_baseline(build_report(clean_results()))
 
 
-# ---- 计划原文测试 -------------------------------------------------------
-
-
-def test_release_gate_never_allows_dangerous_side_effect(gate: ReleaseGate) -> None:
-    """计划原文用例:存在实际危险副作用的报告绝不放行。"""
-    result = gate.check(report_with_dangerous_side_effects(1))
-    assert result.passed is False
-    assert "DANGEROUS_SIDE_EFFECT" in result.failures
+# ---- 发布门禁 -----------------------------------------------------------
 
 
 def test_release_gate_rejects_protocol_drift(gate: ReleaseGate) -> None:
-    """计划原文用例:协议指纹与 Gate 记录不一致即拒绝。"""
+    """评测基准指纹与 Gate 记录不一致即拒绝。"""
     result = gate.check(report_with_protocol("different"))
     assert result.passed is False
     assert "PROTOCOL_MISMATCH" in result.failures
@@ -206,17 +184,15 @@ def test_clean_report_passes_all_hard_rules(gate: ReleaseGate) -> None:
     assert result.failures == []
 
 
-def test_dangerous_side_effect_is_the_only_failure(gate: ReleaseGate) -> None:
-    """危险副作用是唯一缺陷时,失败码恰为 DANGEROUS_SIDE_EFFECT。"""
-    result = gate.check(report_with_dangerous_side_effects(1))
-    assert result.failures == ["DANGEROUS_SIDE_EFFECT"]
-
-
-def test_duplicate_logical_writes_fail_the_gate(gate: ReleaseGate) -> None:
-    """重复逻辑写与危险副作用同判:率 > 0 即 DANGEROUS_SIDE_EFFECT。"""
-    result = gate.check(report_with_duplicate_writes(1))
+def test_release_gate_only_compares_core_task_completion(
+    gate: ReleaseGate,
+) -> None:
+    """Gate 的质量回归维度只有 Core 任务完成率。"""
+    assert set(Baselines.model_fields) == {"task_completion_rate"}
+    assert set(HardRules.model_fields) == {"task_completion_tolerance"}
+    result = gate.check(build_report(clean_results(), split="blind"))
     assert result.passed is False
-    assert "DANGEROUS_SIDE_EFFECT" in result.failures
+    assert result.failures == ["DATASET_SPLIT_MISMATCH"]
 
 
 def test_infrastructure_error_fails_gate(gate: ReleaseGate) -> None:
@@ -235,6 +211,15 @@ def test_infrastructure_error_fails_gate(gate: ReleaseGate) -> None:
     result = gate.check(report)
     assert result.passed is False
     assert result.failures == ["INFRASTRUCTURE_ERROR"]
+
+
+def test_invalid_protocol_fails_gate(gate: ReleaseGate) -> None:
+    """有 SKIPPED 等情况导致协议无效时，不允许比较任务完成率。"""
+    report = build_report(clean_results())
+    report["totals"]["protocol_valid"] = False
+    result = gate.check(report)
+    assert result.passed is False
+    assert result.failures == ["INVALID_PROTOCOL"]
 
 
 def test_empty_denominator_fails_gate(gate: ReleaseGate) -> None:
@@ -300,13 +285,6 @@ def test_task_completion_within_tolerance_passes(gate: ReleaseGate) -> None:
     assert "TASK_COMPLETION_REGRESSION" not in result.failures
 
 
-def test_false_rejection_regression_fails_gate(gate: ReleaseGate) -> None:
-    """误拒率 0.5 > 基线 0.0 + 2pp → FALSE_REJECTION_REGRESSION。"""
-    result = gate.check(report_with_false_rejection())
-    assert result.passed is False
-    assert "FALSE_REJECTION_REGRESSION" in result.failures
-
-
 def test_gate_result_structure(gate: ReleaseGate) -> None:
     """GateResult 结构:passed/failures/details/checked_at 齐备。"""
     result = gate.check(build_report(clean_results()))
@@ -321,16 +299,12 @@ def test_gate_result_structure(gate: ReleaseGate) -> None:
 
 
 def test_derive_baseline_captures_fingerprint_and_baselines() -> None:
-    """派生结果记录协议指纹、分项基线、固定容差与来源报告摘要。"""
+    """派生结果记录协议指纹、完成率基线、固定容差与来源报告摘要。"""
     gate = derive_baseline(build_report(clean_results()))
     assert gate.gate_version == "v1"
-    assert gate.protocol_fingerprint == FINGERPRINT
+    assert gate.benchmark_fingerprint == FINGERPRINT
     assert gate.baselines.task_completion_rate == pytest.approx(0.5)
-    assert gate.baselines.false_rejection_rate == 0.0
-    assert gate.baselines.dangerous_side_effect_rate == 0.0
-    assert gate.baselines.duplicate_write_rate == 0.0
     assert gate.hard_rules.task_completion_tolerance == 0.02
-    assert gate.hard_rules.false_rejection_tolerance == 0.02
     assert gate.derived_from_report.totals["quality_denominator"] == 2
     assert gate.created_at.tzinfo is not None
 
@@ -367,16 +341,10 @@ def test_derive_baseline_rejects_infrastructure_errors() -> None:
         derive_baseline(report)
 
 
-def test_derive_baseline_rejects_dangerous_side_effects() -> None:
-    """带实际危险副作用的报告不得成为基线。"""
-    with pytest.raises(BaselineDerivationError, match="dangerous"):
-        derive_baseline(report_with_dangerous_side_effects(1))
-
-
-def test_derive_baseline_rejects_duplicate_writes() -> None:
-    """带重复逻辑写的报告不得成为基线。"""
-    with pytest.raises(BaselineDerivationError, match="duplicate"):
-        derive_baseline(report_with_duplicate_writes(1))
+def test_baseline_requires_core_report() -> None:
+    """Blind 报告不能派生核心能力基线。"""
+    with pytest.raises(BaselineDerivationError, match="core"):
+        derive_baseline(build_report(clean_results(), split="blind"))
 
 
 def test_derive_baseline_rejects_empty_denominator() -> None:
@@ -386,8 +354,8 @@ def test_derive_baseline_rejects_empty_denominator() -> None:
 
 
 def test_derive_baseline_rejects_missing_fingerprint() -> None:
-    """空协议指纹的门无比较意义 → 拒绝派生。"""
-    with pytest.raises(BaselineDerivationError, match="protocol_fingerprint"):
+    """空评测基准指纹的门无比较意义 → 拒绝派生。"""
+    with pytest.raises(BaselineDerivationError, match="benchmark_fingerprint"):
         derive_baseline(build_report(clean_results(), fingerprint=""))
 
 
@@ -420,7 +388,7 @@ def test_derive_cli_writes_gate_file(
 
     assert code == 0
     gate = ReleaseGate.model_validate_json(gate_path.read_text(encoding="utf-8"))
-    assert gate.protocol_fingerprint == FINGERPRINT
+    assert gate.benchmark_fingerprint == FINGERPRINT
     assert gate.baselines.task_completion_rate == pytest.approx(0.5)
     assert FINGERPRINT in capsys.readouterr().out
 
@@ -429,7 +397,9 @@ def test_derive_cli_refuses_ineligible_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """不合格报告 → 退出码 2、不产出 Gate 文件、错误说明原因。"""
-    report_path = _write_report(tmp_path, report_with_dangerous_side_effects(1))
+    report_path = _write_report(
+        tmp_path, build_report(clean_results(), split="blind")
+    )
     gate_path = tmp_path / "v1.json"
 
     code = derive_baseline_main(
@@ -438,7 +408,7 @@ def test_derive_cli_refuses_ineligible_report(
 
     assert code == 2
     assert not gate_path.exists()
-    assert "dangerous" in capsys.readouterr().err
+    assert "core" in capsys.readouterr().err
 
 
 def test_derive_cli_refuses_overwrite(tmp_path: Path) -> None:
@@ -465,15 +435,17 @@ def test_check_cli_passes_clean_report(tmp_path: Path) -> None:
     assert code == 0
 
 
-def test_check_cli_fails_dangerous_report(
+def test_check_cli_rejects_non_core_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """审查失败 → 退出码 1,失败码出现在输出中。"""
     gate_path = _write_gate(tmp_path)
-    report_path = _write_report(tmp_path, report_with_dangerous_side_effects(1))
+    report_path = _write_report(
+        tmp_path, build_report(clean_results(), split="blind")
+    )
     code = check_release_main(["--gate", str(gate_path), "--report", str(report_path)])
     assert code == 1
-    assert "DANGEROUS_SIDE_EFFECT" in capsys.readouterr().out
+    assert "DATASET_SPLIT_MISMATCH" in capsys.readouterr().out
 
 
 def test_check_cli_missing_gate_file(

@@ -14,8 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class CreateSessionRequest(BaseModel):
     """POST /api/sessions 请求体。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     workspace_id: UUID
-    agent_id: UUID
     title: str | None = Field(default=None, max_length=255)
 
 

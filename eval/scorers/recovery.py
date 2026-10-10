@@ -42,8 +42,11 @@ class RecoveryScore(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    recovery_success: bool
-    """全部 UNKNOWN 处理正确且路径命中 allowed_paths(无 UNKNOWN 时空真)。"""
+    recovery_applicable: bool
+    """场景声明了恢复路径或轨迹中至少出现一次 UNKNOWN。"""
+
+    recovery_success: bool | None
+    """恢复适用时的结果;不适用返回 None,避免普通用例空真通过。"""
 
     unknown_encounters: int
     """出现 UNKNOWN 结论的写操作次数。"""
@@ -80,13 +83,19 @@ class RecoveryScorer:
             paths.append(path)
             if handled_correctly:
                 handled += 1
+        recovery_applicable = bool(self._allowed_paths or unknown_ids)
         paths_match = (
-            all(path in self._allowed_paths for path in paths)
+            bool(paths) and all(path in self._allowed_paths for path in paths)
             if self._allowed_paths
             else True
         )
         return RecoveryScore(
-            recovery_success=(handled == len(unknown_ids) and paths_match),
+            recovery_applicable=recovery_applicable,
+            recovery_success=(
+                handled == len(unknown_ids) and paths_match
+                if recovery_applicable
+                else None
+            ),
             unknown_encounters=len(unknown_ids),
             unknown_handled_correctly=handled,
             duplicate_logical_writes=_duplicate_logical_writes(

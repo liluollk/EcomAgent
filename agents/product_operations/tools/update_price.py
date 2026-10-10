@@ -12,8 +12,8 @@
    ``version`` 作为乐观并发 ``expected_version``;Listing 不存在返回确定
    FAILED,不做外部调用;
 3. 以 Runtime 分配的稳定 operation_id(首次进入确认前分配,重复提交不变)
-   派生幂等键,经注入的 :class:`UpdatePriceGateway` 执行平台写;执行边界
-   在注入 Session 的事务内提交(外部写入不回滚 Runtime 侧事务);
+   派生幂等键,经注入的 :class:`UpdatePriceGateway` 执行平台写;Listing
+   读取事务在 Gateway 请求前提交,平台 Adapter 自己负责写入协议;
 4. 返回写入前后价格、最终 Listing Version、外部引用与 Policy Version 的
    结构化回执;UNKNOWN/FAILED 只携带 reason_code,不臆测结果。
 
@@ -29,12 +29,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.product_operations.input.normalizer import normalize_arguments
-from agents.product_operations.persistence.models import Listing, Product
+from agents.product_operations.persistence.models import Listing, Product, Store
 from runtime.capabilities.registry import ToolBinding
 from runtime.capabilities.validation import (
     OPERATION_CAPABILITY,
@@ -46,7 +46,7 @@ from runtime.interfaces.tools import ToolDefinition, ToolEffect
 
 
 STABLE_KEY_UPDATE_PRICE: Final = "update_price"
-TOOL_VERSION: Final = 1
+TOOL_VERSION: Final = 3
 PRODUCT_PRICE_WRITE_PERMISSION: Final = "product.price.write"
 
 LISTING_NOT_FOUND: Final = "LISTING_NOT_FOUND"
@@ -66,9 +66,15 @@ class _FrozenModel(BaseModel):
 class UpdatePriceInput(_FrozenModel):
     """``update_price`` 模型可见输入:恰为 store_id/sku/target_price 三字段。"""
 
-    store_id: str
-    sku: str
-    target_price: Decimal
+    store_id: str = Field(
+        description=(
+            "用户当前消息明确给出的店铺名称或别名;不要复制 ToolResult 中的内部 ID。"
+        )
+    )
+    sku: str = Field(description="用户当前消息明确给出的 SKU 原值。")
+    target_price: Decimal = Field(
+        description="最终目标售价;相对改价任务先依据读取结果完成计算再填写。"
+    )
 
 
 class UpdatePriceResult(_FrozenModel):
@@ -104,7 +110,8 @@ UPDATE_PRICE_DEFINITION: Final = ToolDefinition(
     version=TOOL_VERSION,
     description=(
         "在授权店铺内修改指定 SKU 的售价。输入为店铺、SKU 与目标价;"
-        "币种、版本与幂等凭据由服务端补全,写前经权限、价格策略与用户确认。"
+        "币种、版本与幂等凭据由服务端补全;写前始终校验权限与价格策略,"
+        "是否需要人工确认由 Workspace 的 ExecutionMode 决定。"
     ),
     input_json_schema=_input_schema(),
     output_json_schema=_output_schema(),
@@ -126,6 +133,8 @@ class UpdatePriceWriteCommand:
     workspace_id: uuid.UUID
     store_id: uuid.UUID
     listing_id: uuid.UUID
+    external_store_ref: str
+    external_product_ref: str
     sku: str
     target_price: Decimal
     currency: str
@@ -158,8 +167,8 @@ class UpdatePriceGateway(Protocol):
 class UpdatePriceToolHandler:
     """``update_price`` 的外部执行端点(实现 Runtime ``WriteToolHandler`` 协议)。
 
-    依赖注入:绑定工作区的长生命周期 Session(与平台 Adapter 共享,保证
-    "解析版本 + CAS 写入"在同一事务内)与平台网关。权限、资源范围、价格
+    依赖注入:绑定工作区的 Session 与平台网关。Listing 查询在短事务中
+    生成带 expected_version 的命令,提交后才调用 Gateway。权限、资源范围、价格
     Policy 与确认校验已由 PreToolUse 管线完成,此处不再重复业务校验;
     ``operation_id`` 与幂等键由 Runtime 的执行边界分配/派生,本 Handler
     不生成、不接受模型转述。
@@ -188,13 +197,17 @@ class UpdatePriceToolHandler:
     ) -> ToolExecutionReceipt:
         """服务端补全 → 平台写 → 结构化回执;异常交由 ToolExecutor 归 UNKNOWN。"""
         del idempotency_key  # 幂等键由 operation_id 确定性派生,不接受调用方转述。
-        async with self._session.begin():
-            # 解析与写入在同一事务:expected_version 与 CAS 写入保持一致。
+        try:
             command = await self._build_command(operation_id, normalized_arguments)
-            if command is None:
-                # 参数/Listing 无法解析:确定失败,零外部调用、零状态变更。
-                return self._failed(tool_call_id, LISTING_NOT_FOUND)
-            receipt = await self._gateway.execute(command)
+            # Listing 读取和版本快照先提交;外部 Gateway 不得继承该事务。
+            await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        if command is None:
+            # 参数/Listing 无法解析:确定失败,零外部调用、零状态变更。
+            return self._failed(tool_call_id, LISTING_NOT_FOUND)
+        receipt = await self._gateway.execute(command)
         return self._to_tool_receipt(tool_call_id, command, receipt)
 
     async def _build_command(
@@ -213,25 +226,31 @@ class UpdatePriceToolHandler:
             parsed_store_id = uuid.UUID(store_id)
         except ValueError:
             return None
-        listing = await self._resolve_listing(parsed_store_id, sku)
-        if listing is None:
+        listing_and_store = await self._resolve_listing(parsed_store_id, sku)
+        if listing_and_store is None:
             return None
+        listing, store = listing_and_store
         return UpdatePriceWriteCommand(
             operation_id=str(operation_id),
             workspace_id=self._workspace_id,
             store_id=parsed_store_id,
             listing_id=listing.id,
+            external_store_ref=store.external_store_ref,
+            external_product_ref=listing.external_product_ref,
             sku=sku,
             target_price=target_price,
             currency=listing.currency,
             expected_version=listing.version,
         )
 
-    async def _resolve_listing(self, store_id: uuid.UUID, sku: str) -> Listing | None:
+    async def _resolve_listing(
+        self, store_id: uuid.UUID, sku: str
+    ) -> tuple[Listing, Store] | None:
         """按 (workspace, store, sku) 解析 Listing;populate_existing 防旧版本。"""
         stmt = (
-            select(Listing)
+            select(Listing, Store)
             .join(Product, Listing.product_id == Product.id)
+            .join(Store, Listing.store_id == Store.id)
             .where(
                 Listing.workspace_id == self._workspace_id,
                 Listing.store_id == store_id,
@@ -239,7 +258,7 @@ class UpdatePriceToolHandler:
             )
             .execution_options(populate_existing=True)
         )
-        return (await self._session.scalars(stmt)).one_or_none()
+        return (await self._session.execute(stmt)).one_or_none()
 
     def _to_tool_receipt(
         self,

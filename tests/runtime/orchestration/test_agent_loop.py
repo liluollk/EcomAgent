@@ -4,9 +4,10 @@
 - 模型流用按轮次回放的 SequencedBackend;PreToolUse 管线与 ToolHandler 用
   确定性 fake;InputService/ConfirmationService/ReconciliationService 用真实
   服务验证持久化语义;
-- RuntimeHost 测试按 jobs 测试模式使用已提交种子行 + 独立 Session 工厂 + 清理。
+- Runtime 测试按 jobs 测试模式使用已提交种子行 + 独立 Session 工厂 + 清理。
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -53,7 +54,7 @@ from runtime.jobs.lease_service import Lease, LeaseService
 from runtime.orchestration.agent_loop import AgentLoop, ToolPin
 from runtime.orchestration.context import ContextAssembler
 from runtime.orchestration.limits import RunLimits
-from runtime.orchestration.runtime_host import RuntimeHost
+from runtime.orchestration.runtime import Runtime
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.persistence.base import (
     ConfigScope,
@@ -189,6 +190,7 @@ class SequencedBackend:
     def __init__(self, rounds: Sequence[Sequence[BackendEvent]]) -> None:
         self.rounds: list[list[BackendEvent]] = [list(round) for round in rounds]
         self.stream_calls = 0
+        self.requests: list[BackendRequest] = []
 
     def capabilities(self) -> AgentBackendCapabilities:
         return AgentBackendCapabilities(
@@ -199,6 +201,7 @@ class SequencedBackend:
         self, request: BackendRequest, cancellation: CancellationToken
     ) -> AsyncIterator[BackendEvent]:
         self.stream_calls += 1
+        self.requests.append(request)
         events = (
             self.rounds.pop(0) if self.rounds else [BackendCompleted(finish_reason="stop")]
         )
@@ -281,7 +284,7 @@ class FakeWriteHandler:
 
 @dataclass(frozen=True)
 class FakeToolPins:
-    """内存 ToolPin 解析器(真实实现由 RuntimeHost 从库装配)。"""
+    """内存 ToolPin 解析器(真实实现由 Runtime 从库装配)。"""
 
     pins: Mapping[str, ToolPin]
 
@@ -382,10 +385,27 @@ def make_agent_loop(
         pipeline,
         read_handler: FakeReadHandler | None = None,
         write_handler: FakeWriteHandler | None = None,
+        tool_pins_override: FakeToolPins | None = None,
         limits: RunLimits = TEST_LIMITS,
         clock: FakeClock | None = None,
     ) -> AgentLoop:
         selected_clock = clock if clock is not None else fake_clock
+        selected_pins = tool_pins_override
+        if selected_pins is None:
+            selected_pins = FakeToolPins(
+                pins={
+                    key: replace(
+                        pin,
+                        handler=(
+                            read_handler
+                            if pin.effect is ToolEffect.READ
+                            else write_handler
+                        ),
+                        output_schema=TEST_OUTPUT_SCHEMA,
+                    )
+                    for key, pin in tool_pins.pins.items()
+                }
+            )
         return AgentLoop(
             db_session,
             workspace_id=seeded_workspace.workspace.id,
@@ -393,10 +413,8 @@ def make_agent_loop(
             assembler=make_assembler(),
             limits=limits,
             pipeline=pipeline,
-            tool_pins=tool_pins,
-            read_handler=read_handler,
-            write_handler=write_handler,
-            processor=ToolResultProcessor(output_schema=TEST_OUTPUT_SCHEMA),
+            tool_pins=selected_pins,
+            processor=ToolResultProcessor(),
             clock=selected_clock.now,
         )
 
@@ -544,6 +562,100 @@ async def test_loop_completes_without_tool_calls(
         )
     ).all()
     assert [message.status for message in messages] == [MessageStatus.COMPLETED]
+
+
+async def test_tool_results_are_replayed_with_their_assistant_tool_call(
+    make_agent_loop, seeded_run: Run
+) -> None:
+    backend = SequencedBackend(
+        [
+            [
+                ToolCallCompleted(
+                    call_id="provider-call-1",
+                    name=READ_TOOL_KEY,
+                    arguments={"listing_id": "L1"},
+                ),
+                BackendCompleted(finish_reason="tool_calls"),
+            ],
+            [BackendCompleted(finish_reason="stop")],
+        ]
+    )
+    loop = make_agent_loop(
+        backend=backend,
+        pipeline=ScriptedPipeline([allow()]),
+        read_handler=FakeReadHandler(payload={"listing_id": "L1", "price": "10"}),
+    )
+
+    result = await loop.advance(seeded_run.id)
+
+    assert result.run_status is RunStatus.COMPLETED
+    assert len(backend.requests) == 2
+    second_messages = backend.requests[1].messages
+    assistant_message = next(
+        message for message in second_messages if message.role == "assistant"
+    )
+    tool_message = next(message for message in second_messages if message.role == "tool")
+    assert len(assistant_message.tool_calls) == 1
+    tool_call = assistant_message.tool_calls[0]
+    assert tool_call.id == tool_message.call_id
+    assert tool_call.name == READ_TOOL_KEY
+    assert tool_call.arguments == {"listing_id": "L1"}
+
+
+async def test_each_read_tool_uses_its_own_bound_handler(
+    db_session: AsyncSession,
+    seeded_run: Run,
+    make_agent_loop,
+) -> None:
+    first_tool_key = "bound_read_tool_one"
+    second_tool_key = "bound_read_tool_two"
+    first_definition, first_version = _tool_rows(first_tool_key, ToolEffect.READ)
+    second_definition, second_version = _tool_rows(second_tool_key, ToolEffect.READ)
+    db_session.add_all([first_definition, first_version, second_definition, second_version])
+    first_handler = FakeReadHandler(payload={"result": "first"})
+    second_handler = FakeReadHandler(payload={"result": "second"})
+    pins = FakeToolPins(
+        pins={
+            first_tool_key: ToolPin(
+                stable_key=first_tool_key,
+                version=1,
+                version_id=first_version.id,
+                effect=ToolEffect.READ,
+                handler=first_handler,
+                output_schema=TEST_OUTPUT_SCHEMA,
+            ),
+            second_tool_key: ToolPin(
+                stable_key=second_tool_key,
+                version=1,
+                version_id=second_version.id,
+                effect=ToolEffect.READ,
+                handler=second_handler,
+                output_schema=TEST_OUTPUT_SCHEMA,
+            ),
+        }
+    )
+    backend = SequencedBackend(
+        [
+            [
+                ToolCallCompleted(call_id="first", name=first_tool_key, arguments={}),
+                ToolCallCompleted(call_id="second", name=second_tool_key, arguments={}),
+                BackendCompleted(finish_reason="tool_calls"),
+            ],
+            [BackendCompleted(finish_reason="stop")],
+        ]
+    )
+
+    result = await make_agent_loop(
+        backend=backend,
+        pipeline=ScriptedPipeline([allow(), allow()]),
+        tool_pins_override=pins,
+    ).advance(seeded_run.id)
+
+    assert result.run_status is RunStatus.COMPLETED
+    persisted_calls = await _load_tool_calls(db_session, seeded_run)
+    assert len(first_handler.calls) == len(second_handler.calls) == 1
+    assert first_handler.calls[0]["tool_call_id"] == persisted_calls[0].id
+    assert second_handler.calls[0]["tool_call_id"] == persisted_calls[1].id
 
 
 async def test_denied_tool_call_does_not_interrupt_loop(
@@ -1010,11 +1122,11 @@ async def test_backend_non_retryable_failure_fails_run(
 
 
 # ---------------------------------------------------------------------------
-# RuntimeHost 组合根接线
+# Runtime 组合根接线
 # ---------------------------------------------------------------------------
 
 
-async def _seed_committed_host_scenario(engine: AsyncEngine) -> dict[str, Any]:
+async def _seed_committed_runtime_scenario(engine: AsyncEngine) -> dict[str, Any]:
     """提交最小种子链 + 两个 Run(一个带 Job,一个无 Job)+ Tool 行。"""
     session = AsyncSession(engine, expire_on_commit=False)
     try:
@@ -1115,7 +1227,7 @@ async def _seed_committed_host_scenario(engine: AsyncEngine) -> dict[str, Any]:
         await session.close()
 
 
-async def _cleanup_host_scenario(engine: AsyncEngine, ids: Mapping[str, Any]) -> None:
+async def _cleanup_runtime_scenario(engine: AsyncEngine, ids: Mapping[str, Any]) -> None:
     """按外键依赖倒序删除已提交种子行,保持测试库干净。"""
     session = AsyncSession(engine, expire_on_commit=False)
     try:
@@ -1161,10 +1273,10 @@ async def _cleanup_host_scenario(engine: AsyncEngine, ids: Mapping[str, Any]) ->
         await session.close()
 
 
-async def test_runtime_host_worker_advances_run_and_recover_requeues(
+async def test_runtime_worker_advances_run_and_recover_requeues(
     engine: AsyncEngine,
 ) -> None:
-    ids = await _seed_committed_host_scenario(engine)
+    ids = await _seed_committed_runtime_scenario(engine)
     try:
         pins = FakeToolPins(
             pins={
@@ -1176,20 +1288,18 @@ async def test_runtime_host_worker_advances_run_and_recover_requeues(
                 )
             }
         )
-        host = RuntimeHost(
+        runtime = Runtime(
             session_factory=lambda: AsyncSession(engine, expire_on_commit=False),
             backend=SequencedBackend([[BackendCompleted(finish_reason="stop")]]),
             assembler=make_assembler(),
             limits=TEST_LIMITS,
             tool_pins=pins,
             pipeline_factory=lambda: ScriptedPipeline([]),
-            read_handler=FakeReadHandler(),
-            output_schema=TEST_OUTPUT_SCHEMA,
         )
 
         # Worker 循环:claim → AgentLoop.advance → complete,回调真实 Loop。
-        assert await host.run_worker_once() is True
-        assert await host.run_worker_once() is False
+        assert await runtime.run_worker_once() is True
+        assert await runtime.run_worker_once() is False
 
         session = AsyncSession(engine, expire_on_commit=False)
         try:
@@ -1201,8 +1311,8 @@ async def test_runtime_host_worker_advances_run_and_recover_requeues(
             await session.close()
 
         # recover:无 Job 的 QUEUED Run 重新排队并可被 Worker 推进。
-        assert await host.recover(ids["run_without_job_id"]) is True
-        assert await host.run_worker_once() is True
+        assert await runtime.recover(ids["run_without_job_id"]) is True
+        assert await runtime.run_worker_once() is True
         session = AsyncSession(engine, expire_on_commit=False)
         try:
             run = await session.get(Run, ids["run_without_job_id"])
@@ -1211,9 +1321,55 @@ async def test_runtime_host_worker_advances_run_and_recover_requeues(
             await session.close()
 
         # 终态 Run 不再恢复。
-        assert await host.recover(ids["run_with_job_id"]) is False
+        assert await runtime.recover(ids["run_with_job_id"]) is False
 
         # Sweeper 调度入口可调用。
-        assert await host.sweep() == 0
+        assert await runtime.sweep() == 0
     finally:
-        await _cleanup_host_scenario(engine, ids)
+        await _cleanup_runtime_scenario(engine, ids)
+
+
+async def test_runtime_does_not_hold_database_transaction_while_backend_waits(
+    engine: AsyncEngine,
+) -> None:
+    ids = await _seed_committed_runtime_scenario(engine)
+    backend_started = asyncio.Event()
+    release_backend = asyncio.Event()
+    host_sessions: list[AsyncSession] = []
+
+    class BlockingBackend(SequencedBackend):
+        async def stream(
+            self, request: BackendRequest, cancellation: CancellationToken
+        ) -> AsyncIterator[BackendEvent]:
+            del request, cancellation
+            backend_started.set()
+            yield_transaction_open.append(host_sessions[-1].in_transaction())
+            await release_backend.wait()
+            yield BackendCompleted(finish_reason="stop")
+
+    yield_transaction_open: list[bool] = []
+
+    def session_factory() -> AsyncSession:
+        session = AsyncSession(engine, expire_on_commit=False)
+        host_sessions.append(session)
+        return session
+
+    runtime = Runtime(
+        session_factory=session_factory,
+        backend=BlockingBackend([]),
+        assembler=make_assembler(),
+        limits=TEST_LIMITS,
+        tool_pins=FakeToolPins(pins={}),
+        pipeline_factory=lambda: ScriptedPipeline([]),
+    )
+    worker_task = asyncio.create_task(runtime.run_worker_once())
+    try:
+        await asyncio.wait_for(backend_started.wait(), timeout=2)
+        assert yield_transaction_open == [False]
+        release_backend.set()
+        assert await worker_task is True
+    finally:
+        release_backend.set()
+        if not worker_task.done():
+            await worker_task
+        await _cleanup_runtime_scenario(engine, ids)

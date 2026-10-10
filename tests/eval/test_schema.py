@@ -26,7 +26,15 @@ from eval.config import (
     load_provider_config,
 )
 from eval.dataset_loader import load_dataset
-from eval.schema import SCHEMA_VERSION, Message, Scenario, protocol_fingerprint
+from eval.schema import (
+    SCHEMA_VERSION,
+    Message,
+    Scenario,
+    UserInteraction,
+    benchmark_fingerprint,
+    protocol_fingerprint,
+    system_fingerprint,
+)
 
 
 def _base_scenario_dict(scenario_id: str) -> dict[str, Any]:
@@ -91,6 +99,8 @@ def test_scenario_accepts_complete_definition(valid_scenario: Scenario) -> None:
     assert valid_scenario.initial_state.listings[0].currency == "CNY"
     assert valid_scenario.workspace.name == "eval-workspace"
     assert valid_scenario.actor.role == "owner"
+    assert valid_scenario.actor.permissions == ()
+    assert valid_scenario.actor.store_scope_mode == "NONE"
     assert valid_scenario.messages == (Message(role="user", content="change price"),)
     assert valid_scenario.faults == ("timeout_before_write",)
     assert valid_scenario.expected_final_state.listings[0].price == Decimal("15.00")
@@ -124,31 +134,72 @@ def test_fingerprint_is_sensitive_to_config_changes(valid_scenario: Scenario) ->
     variants: dict[str, Any] = {
         "model": "deepseek-reasoner",
         "temperature": 0.7,
-        "prompt_version": "product-agent-prompt-v2",
+        "agent_version": "5",
+        "prompt_version": "product-agent-prompt-v5",
         "repetitions": 5,
-        "scorer_version": "v2",
+        "scorer_version": "v4",
     }
     for field, value in variants.items():
         changed = base_config.model_copy(update={field: value})
         assert protocol_fingerprint(valid_scenario, changed) != base, field
-    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "2"}})
+    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "5"}})
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(
-        update={"tool_versions": {**base_config.tool_versions, "update_price": "2"}}
+        update={"tool_versions": {**base_config.tool_versions, "update_price": "4"}}
     )
     assert protocol_fingerprint(valid_scenario, changed) != base
     changed = base_config.model_copy(update={"base_url": "https://api.example.com/v1"})
     assert protocol_fingerprint(valid_scenario, changed) != base
 
 
-def test_fingerprint_ignores_message_wording_but_tracks_structure(
+def test_benchmark_fingerprint_ignores_system_version_changes(
+    valid_scenario: Scenario,
+) -> None:
+    config = fixed_eval_config()
+    base = benchmark_fingerprint(valid_scenario, config)
+    changed = config.model_copy(
+        update={
+            "agent_version": "next-agent",
+            "prompt_version": "next-prompt",
+            "skill_versions": {"product_maintenance": "next-skill"},
+            "tool_versions": {"update_price": "next-tool"},
+        }
+    )
+    assert benchmark_fingerprint(valid_scenario, changed) == base
+
+
+def test_benchmark_fingerprint_tracks_eval_protocol_changes(
+    valid_scenario: Scenario,
+) -> None:
+    config = fixed_eval_config()
+    base = benchmark_fingerprint(valid_scenario, config)
+    assert benchmark_fingerprint(
+        valid_scenario, config.model_copy(update={"model": "another-model"})
+    ) != base
+    assert benchmark_fingerprint(
+        valid_scenario, config.model_copy(update={"scorer_version": "next-scorer"})
+    ) != base
+
+
+def test_system_fingerprint_tracks_only_system_versions() -> None:
+    config = fixed_eval_config()
+    base = system_fingerprint(config)
+    assert system_fingerprint(
+        config.model_copy(update={"prompt_version": "next-prompt"})
+    ) != base
+    assert system_fingerprint(
+        config.model_copy(update={"model": "another-model"})
+    ) == base
+
+
+def test_fingerprint_tracks_message_wording_and_structure(
     valid_scenario: Scenario,
 ) -> None:
     base = protocol_fingerprint(valid_scenario, fixed_eval_config())
     reworded = valid_scenario.model_copy(
         update={"messages": (Message(role="user", content="please set sku-1 to 15.00"),)}
     )
-    assert protocol_fingerprint(reworded, fixed_eval_config()) == base
+    assert protocol_fingerprint(reworded, fixed_eval_config()) != base
 
     structural = valid_scenario.model_copy(update={"faults": ()})
     assert protocol_fingerprint(structural, fixed_eval_config()) != base
@@ -162,11 +213,65 @@ def test_fingerprint_ignores_message_wording_but_tracks_structure(
     assert protocol_fingerprint(altered_state, fixed_eval_config()) != base
 
 
+def test_fingerprint_tracks_explicit_user_decisions(valid_scenario: Scenario) -> None:
+    base = protocol_fingerprint(valid_scenario, fixed_eval_config())
+    changed = valid_scenario.model_copy(
+        update={
+            "interactions": (
+                UserInteraction(kind="confirmation", decision="accept"),
+            )
+        }
+    )
+    assert protocol_fingerprint(changed, fixed_eval_config()) != base
+
+
+def test_interaction_requires_explicit_input_or_confirmation_decision() -> None:
+    data = _base_scenario_dict("interaction-001")
+    data["interactions"] = [{"kind": "input"}]
+    with pytest.raises(ValidationError):
+        Scenario.model_validate(data)
+
+    data["interactions"] = [{"kind": "confirmation", "decision": "accept"}]
+    assert Scenario.model_validate(data).interactions[0].decision == "accept"
+
+
+def test_actor_store_scope_is_validated_fail_closed() -> None:
+    data = _base_scenario_dict("actor-001")
+    data["actor"] = {
+        "role": "operator",
+        "permissions": ["product.read"],
+        "store_scope_mode": "SELECTED",
+        "store_ids": ["store-1"],
+    }
+    actor = Scenario.model_validate(data).actor
+    assert actor.permissions == ("product.read",)
+    assert actor.store_ids == ("store-1",)
+
+    data["actor"]["store_ids"] = []
+    with pytest.raises(ValidationError):
+        Scenario.model_validate(data)
+
+
+def test_interaction_message_index_must_reference_a_user_message() -> None:
+    data = _base_scenario_dict("interaction-index-001")
+    data["interactions"] = [
+        {
+            "kind": "input",
+            "message_index": 1,
+            "values": {"store_id": "store-1"},
+        }
+    ]
+    with pytest.raises(ValidationError, match="message_index"):
+        Scenario.model_validate(data)
+
+
 def test_eval_config_has_fixed_fields() -> None:
     assert set(EvalConfig.model_fields) == {
         "model",
         "base_url",
         "temperature",
+        "thinking_mode",
+        "agent_version",
         "prompt_version",
         "skill_versions",
         "tool_versions",
@@ -174,14 +279,17 @@ def test_eval_config_has_fixed_fields() -> None:
         "scorer_version",
     }
     config = fixed_eval_config()
-    assert config.model == "deepseek-chat"
-    assert config.base_url == "https://api.deepseek.com/v1"
+    assert config.model == "deepseek-flash"
+    assert config.base_url == "https://api.deepseek.com"
     assert config.temperature == 0
+    assert config.thinking_mode == "disabled"
     assert config.repetitions == 3
-    assert config.prompt_version
+    assert config.agent_version == "4"
+    assert config.prompt_version == "product-agent-prompt-v4"
     assert config.scorer_version
-    assert "product_maintenance" in config.skill_versions
+    assert config.skill_versions == {"product_maintenance": "4"}
     assert set(config.tool_versions) >= {
+        "load_skill",
         "search_products",
         "get_product_snapshot",
         "compare_listing_prices",
@@ -195,9 +303,10 @@ def test_deepseek_provider_file_is_fixed_and_keyless() -> None:
     document = json.loads(text)
     assert document == {
         "provider": "deepseek",
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
         "temperature": 0,
+        "thinking_mode": "disabled",
         "repetitions": 3,
     }
 
@@ -207,6 +316,7 @@ def test_load_provider_config_reads_key_from_environment(monkeypatch: pytest.Mon
     config, api_key = load_provider_config(DEEPSEEK_CONFIG_PATH)
     assert api_key == "sk-env-test"
     assert config.temperature == 0
+    assert config.thinking_mode == "disabled"
     assert config.repetitions == 3
     assert "api_key" not in EvalConfig.model_fields
     assert "sk-" not in json.dumps(config.model_dump(mode="json"))
@@ -232,8 +342,8 @@ def test_load_provider_config_rejects_api_key_in_file(tmp_path: Path) -> None:
         json.dumps(
             {
                 "provider": "deepseek",
-                "base_url": "https://api.deepseek.com/v1",
-                "model": "deepseek-chat",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-flash",
                 "temperature": 0,
                 "repetitions": 3,
                 "api_key": "sk-leak",

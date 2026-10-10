@@ -3,7 +3,7 @@
 全部命令为单次处理:RequestService 条件更新 ``PENDING → 目标状态``;重复提交
 409 REQUEST_NOT_PENDING,未声明字段 422 UNDECLARED_FIELD。回答/裁决成功后在
 同一短事务内把 Run 从 WAITING_* 迁回 QUEUED 并创建 ADVANCE_RUN Job——不调用
-Backend/ToolHandler/RuntimeHost 推进循环。
+Backend/ToolHandler/Runtime 推进循环。
 
 路由路径不含 workspace:资源按当前 actor 的有效成员身份范围解析,不属于这些
 工作区一律 404,不泄漏存在性。
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from apps.api.command_errors import translated_commands
 from apps.api.dependencies import ActorDep, SessionDep
 from apps.api.schemas.runs import RequestDecisionView
-from runtime.workspace.session_commands import SessionCommandService
+from runtime.commands.session import SessionCommandService
 
 
 router = APIRouter()

@@ -15,7 +15,7 @@ from apps.api.command_errors import translated_commands
 from apps.api.dependencies import ActorDep, SessionDep
 from apps.api.schemas.runs import RunSnapshotView, RunStatusView, ToolCallView
 from apps.api.schemas.sessions import MessageView
-from runtime.workspace.session_commands import SessionCommandService
+from runtime.commands.session import SessionCommandService
 
 
 router = APIRouter()

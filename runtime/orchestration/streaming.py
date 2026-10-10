@@ -56,6 +56,7 @@ class StreamingMessageRecorder:
         sequence_no: int,
         merge_threshold_chars: int = 256,
         on_merged_text: Callable[[str], Awaitable[None]] | None = None,
+        checkpoint: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if merge_threshold_chars < 1:
             raise ValueError("merge_threshold_chars must be positive")
@@ -66,6 +67,7 @@ class StreamingMessageRecorder:
         self._sequence_no = sequence_no
         self._merge_threshold_chars = merge_threshold_chars
         self._on_merged_text = on_merged_text
+        self._checkpoint = checkpoint
 
     async def consume(
         self,
@@ -78,6 +80,7 @@ class StreamingMessageRecorder:
             run_id=self._run_id,
             sequence_no=self._sequence_no,
         )
+        await self._commit_checkpoint()
         content: list[str] = []
         pending: list[str] = []
         pending_len = 0
@@ -108,11 +111,13 @@ class StreamingMessageRecorder:
         except Exception:
             await self._flush(message, pending)
             await self._store.abort_assistant_message(message)
+            await self._commit_checkpoint()
             raise
 
         await self._flush(message, pending)
         if completed and error_code is None:
             await self._store.complete_assistant_message(message)
+            await self._commit_checkpoint()
             return StreamingOutcome(
                 message_id=message.id,
                 status="COMPLETED",
@@ -120,6 +125,7 @@ class StreamingMessageRecorder:
                 tool_calls=tuple(tool_calls),
             )
         await self._store.abort_assistant_message(message)
+        await self._commit_checkpoint()
         if error_code is None:
             error_code = "STREAM_ENDED_WITHOUT_COMPLETION"
         return StreamingOutcome(
@@ -139,6 +145,11 @@ class StreamingMessageRecorder:
         await self._store.append_assistant_content(message, chunk)
         if self._on_merged_text is not None:
             await self._on_merged_text(chunk)
+        await self._commit_checkpoint()
+
+    async def _commit_checkpoint(self) -> None:
+        if self._checkpoint is not None:
+            await self._checkpoint()
 
 
 __all__ = ["StreamingMessageRecorder", "StreamingOutcome"]

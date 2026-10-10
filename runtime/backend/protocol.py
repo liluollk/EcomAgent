@@ -121,6 +121,16 @@ class BackendFailed(BackendEvent):
     retryable: bool
 
 
+class BackendToolCall(BaseModel):
+    """Provider 无关的已完成函数调用历史,用于重建合法 Assistant 消息。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
 class BackendMessage(BaseModel):
     """进入 BackendRequest 的标准化 Message。"""
 
@@ -130,6 +140,7 @@ class BackendMessage(BaseModel):
     content: str = ""
     name: str | None = None
     call_id: str | None = None
+    tool_calls: tuple[BackendToolCall, ...] = ()
 
 
 class BackendRequest(BaseModel):
@@ -196,6 +207,7 @@ __all__ = [
     "BackendFailed",
     "BackendMessage",
     "BackendRequest",
+    "BackendToolCall",
     "CancellationToken",
     "TextDelta",
     "ToolCallCompleted",

@@ -27,7 +27,6 @@ WORKER_ERROR_CODE = "WORKER_ERROR"
 LeaseHandler = Callable[[Lease], Awaitable[LeaseOutcome | None]]
 """Worker 执行回调:接收租约,返回本次推进结果。"""
 
-
 class RunJobWorker:
     """领取驱动型 Worker;每次 ``run_once`` 至多处理一个 Job。"""
 

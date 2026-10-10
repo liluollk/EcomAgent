@@ -24,10 +24,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.commerce.faults import FaultInjector
 from adapters.commerce.mock_adapter import MockCommerceAdapter
-from adapters.commerce.protocol import ExecutionStatus, UpdatePriceCommand
+from adapters.commerce.protocol import (
+    CommerceAdapter,
+    ExecutionStatus,
+    ReconciliationCommand,
+    UpdatePriceCommand,
+)
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
 from runtime.execution.reconciliation import ReconcileResult
+
+
+async def test_logical_write_count_is_test_observation_not_adapter_contract(
+    mock_adapter: MockCommerceAdapter,
+) -> None:
+    assert "count_logical_writes" not in CommerceAdapter.__dict__
+    assert await mock_adapter.count_logical_writes("missing") == 0
 
 
 def update_command(
@@ -43,11 +55,28 @@ def update_command(
         workspace_id=listing.workspace_id,
         store_id=listing.store_id,
         listing_id=listing.id,
+        external_store_ref=str(listing.store_id),
+        external_product_ref=listing.external_product_ref,
         target_price=target_price,
         currency=listing.currency,
         expected_version=(
             listing.version if expected_version is None else expected_version
         ),
+    )
+
+
+def reconciliation_command(
+    listing: Listing, operation_id: str, expected_price: Decimal
+) -> ReconciliationCommand:
+    return ReconciliationCommand(
+        operation_id=operation_id,
+        workspace_id=listing.workspace_id,
+        store_id=listing.store_id,
+        listing_id=listing.id,
+        external_store_ref=str(listing.store_id),
+        external_product_ref=listing.external_product_ref,
+        expected_price=expected_price,
+        currency=listing.currency,
     )
 
 
@@ -57,7 +86,9 @@ async def test_response_loss_does_not_duplicate_price_write(
     mock_adapter.faults.inject("response_lost_after_commit")
     first = await mock_adapter.execute(update_command(listing, operation_id="op-1"))
     assert first.status == "UNKNOWN"
-    reconciled = await mock_adapter.reconcile("op-1", expected_price=Decimal("99.00"))
+    reconciled = await mock_adapter.reconcile(
+        reconciliation_command(listing, "op-1", Decimal("99.00"))
+    )
     assert reconciled == ReconcileResult.APPLIED
     assert await mock_adapter.count_logical_writes("op-1") == 1
 
@@ -130,7 +161,9 @@ async def test_cas_success_increments_version_and_lands_price(
     assert row is not None
     assert row.current_price == Decimal("99.00")
     assert row.version == previous_version + 1
-    assert await mock_adapter.reconcile("op-1", expected_price=Decimal("99.00")) == (
+    assert await mock_adapter.reconcile(
+        reconciliation_command(listing, "op-1", Decimal("99.00"))
+    ) == (
         ReconcileResult.APPLIED
     )
 
@@ -164,9 +197,10 @@ async def test_reconcile_unknown_is_temporary_then_real_answer(
     mock_adapter.faults.clear()
     mock_adapter.faults.inject("temporary_reconcile_unknown")
 
-    first = await mock_adapter.reconcile("op-1", expected_price=Decimal("99.00"))
-    second = await mock_adapter.reconcile("op-1", expected_price=Decimal("99.00"))
-    third = await mock_adapter.reconcile("op-1", expected_price=Decimal("99.00"))
+    command = reconciliation_command(listing, "op-1", Decimal("99.00"))
+    first = await mock_adapter.reconcile(command)
+    second = await mock_adapter.reconcile(command)
+    third = await mock_adapter.reconcile(command)
 
     assert first == ReconcileResult.UNKNOWN
     assert second == ReconcileResult.APPLIED
@@ -210,8 +244,9 @@ async def test_fault_injection_reproduces_identical_outcomes(
             update_command(seed.listing, operation_id=operation_id)
         )
         adapter.faults.inject("temporary_reconcile_unknown")
-        first = await adapter.reconcile(operation_id, expected_price=Decimal("99.00"))
-        second = await adapter.reconcile(operation_id, expected_price=Decimal("99.00"))
+        command = reconciliation_command(seed.listing, operation_id, Decimal("99.00"))
+        first = await adapter.reconcile(command)
+        second = await adapter.reconcile(command)
         outcomes.append(
             (
                 receipt.status.value,

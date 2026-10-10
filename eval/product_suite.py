@@ -2,14 +2,14 @@
 
 把固定配置的商品 Agent 评测端到端跑起来::
 
-    python -m eval.product_suite --split development|regression|frozen_test \
+    python -m eval.product_suite --split core|blind|clarification|regression|safety \
         --output reports/xxx.json
 
 流程(前置校验全部通过才发任何模型请求):
 
-1. **数据集完整性**:加载分区 manifest;``frozen_test`` 先比对
-   ``frozen_test.yaml`` 文件字节 SHA-256 与 ``manifest.frozen_test_sha256``
-   (冻结集漂移即拒绝),再校验场景文件 ID 与 manifest 分区清单一致;
+1. **数据集完整性**:加载分区 manifest;``core``/``blind`` 先比对
+   YAML 文件字节 SHA-256 与 manifest 声明(固定集漂移即拒绝),再校验
+   场景文件 ID 与 manifest 分区清单一致;
 2. **环境变量预检**:`EVAL_BASE_URL`/`EVAL_MODEL`/`EVAL_API_KEY` 缺一即明确
    报错(逐个列出变量名)并以非零码退出;`EVAL_BASE_URL`/`EVAL_MODEL` 还须
    与随库固定 Provider 配置(``eval/providers/deepseek.json``)一致——偏离即
@@ -19,7 +19,7 @@
 4. **运行**:按 :class:`eval.config.EvalConfig` 固定 repetition(3)用
    :class:`eval.runner.EvalRunner` + 真实
    :class:`adapters.model_backends.openai_backend.OpenAIBackend` 跑完整集合
-   (每 case/repetition 经 :func:`adapters.commerce.product_runtime.build_product_runtime`
+   (每 case/repetition 经 :func:`composition.product_operations.build_product_application`
    的生产装配路径);运行中不修改用例与 Scorer;
 5. **报告**:COMPLETED 且计入质量分的结果经 ``score_case`` 判分,
    :class:`eval.reporting.json_report.ReportBuilder` 组装 JSON 报告(协议
@@ -61,8 +61,15 @@ from eval.config import (
 from eval.dataset_loader import DatasetManifest, load_dataset, load_manifest
 from eval.reporting.json_report import ReportBuilder
 from eval.runner import EvalRunner
-from eval.schema import SCHEMA_VERSION, Scenario, protocol_fingerprint
+from eval.schema import (
+    SCHEMA_VERSION,
+    Scenario,
+    benchmark_fingerprint,
+    protocol_fingerprint,
+    system_fingerprint,
+)
 from eval.scorers.composite_result import score_case
+from runtime.persistence.base import ExecutionMode
 
 
 PRODUCT_DATASET_DIR: Final[Path] = (
@@ -74,9 +81,11 @@ _MODEL_ENV: Final[str] = "EVAL_MODEL"
 _REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (_BASE_URL_ENV, _MODEL_ENV, API_KEY_ENV_VAR)
 
 _SPLIT_FILES: Final[dict[str, str]] = {
-    "development": "development.yaml",
+    "core": "core.yaml",
+    "blind": "blind.yaml",
+    "clarification": "clarification.yaml",
     "regression": "regression.yaml",
-    "frozen_test": "frozen_test.yaml",
+    "safety": "safety.yaml",
 }
 
 _DATABASE_URL_ENV: Final[str] = "RUNTIME_TEST_DATABASE_URL"
@@ -99,7 +108,7 @@ class ProductSuiteError(Exception):
 def _load_split(
     split: str, dataset_dir: Path
 ) -> tuple[list[Scenario], DatasetManifest]:
-    """加载分区场景并校验完整性;frozen_test 先比对冻结哈希。"""
+    """加载分区场景并校验完整性;Core/Blind 先比对哈希。"""
     manifest = load_manifest(dataset_dir / "manifest.json")
     relative = _SPLIT_FILES.get(split)
     if relative is None:
@@ -107,22 +116,29 @@ def _load_split(
     path = dataset_dir / relative
     if not path.is_file():
         raise ProductSuiteError(f"dataset file is missing: {path}")
-    if split == "frozen_test":
+    frozen_hashes = {
+        "core": manifest.core_sha256,
+        "blind": manifest.blind_sha256,
+    }
+    if split in frozen_hashes:
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != manifest.frozen_test_sha256:
+        expected = frozen_hashes[split]
+        if actual != expected:
             raise ProductSuiteError(
-                f"frozen_test_sha256 mismatch for {path}: manifest declares "
-                f"{manifest.frozen_test_sha256}, file hashes to {actual}; "
-                "refusing to run against a drifted frozen set"
+                f"{split}_sha256 mismatch for {path}: manifest declares "
+                f"{expected}, file hashes to {actual}; "
+                f"refusing to run against a drifted {split} set"
             )
     scenarios = load_dataset(path)
     if not scenarios:
         raise ProductSuiteError(f"dataset {path} declares no scenarios")
     declared_ids = sorted(
         {
-            "development": manifest.development_ids,
+            "core": manifest.core_ids,
+            "blind": manifest.blind_ids,
+            "clarification": manifest.clarification_ids,
             "regression": manifest.regression_ids,
-            "frozen_test": manifest.frozen_test_ids,
+            "safety": manifest.safety_ids,
         }[split]
     )
     actual_ids = sorted(scenario.id for scenario in scenarios)
@@ -193,6 +209,22 @@ def run_protocol_fingerprint(scenarios: Sequence[Scenario], config: EvalConfig) 
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def run_benchmark_fingerprint(
+    scenarios: Sequence[Scenario], config: EvalConfig
+) -> str:
+    """整轮可比性指纹:固定题目、模型、采样配置和 Scorer。"""
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "scenario_fingerprints": sorted(
+            benchmark_fingerprint(scenario, config) for scenario in scenarios
+        ),
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # 运行与报告
 # ---------------------------------------------------------------------------
@@ -225,6 +257,8 @@ async def _execute(
             report = ReportBuilder().build(
                 [],
                 protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+                benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
+                system_fingerprint=system_fingerprint(config),
                 infrastructure_errors=infrastructure_errors,
                 config=config,
             )
@@ -233,8 +267,13 @@ async def _execute(
         runner = EvalRunner(
             engine,
             config=config,
-            backend_factory=lambda scenario: OpenAIBackend(client, config.model),
+            backend_factory=lambda scenario: OpenAIBackend(
+                client,
+                config.model,
+                extra_body={"thinking": {"type": config.thinking_mode}},
+            ),
             repetitions=config.repetitions,
+            execution_mode=ExecutionMode.AUTO_EXECUTE,
         )
         round_result = await runner.run(scenarios)
 
@@ -246,11 +285,13 @@ async def _execute(
                 scorer_version=config.scorer_version,
             )
             for result in round_result.results
-            if result.status == "COMPLETED" and result.included_in_quality_score
+            if result.included_in_quality_score
         ]
         report = ReportBuilder().build(
             [*round_result.results, *scored],
             protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+            benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
+            system_fingerprint=system_fingerprint(config),
             infrastructure_errors=infrastructure_errors,
             config=config,
         )
@@ -289,7 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # 1) 数据集完整性(frozen_test 哈希先行)。
+    # 1) 数据集完整性(Core/Blind 哈希先行)。
     try:
         scenarios, manifest = _load_split(args.split, Path(args.dataset_dir))
     except (ProductSuiteError, ValueError, TypeError, OSError) as error:
@@ -313,7 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "split": args.split,
         "dataset_dir": str(Path(args.dataset_dir)),
         "scenario_count": len(scenarios),
-        "frozen_test_sha256_verified": args.split == "frozen_test",
+        "frozen_sha256_verified": args.split in {"core", "blind"},
         "manifest_scorer_version": manifest.scorer_version,
     }
 
@@ -331,17 +372,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"skipped={totals['skipped']}"
     )
     print(f"protocol_fingerprint={report['protocol_fingerprint']}")
+    print(f"benchmark_fingerprint={report['benchmark_fingerprint']}")
+    print(f"system_fingerprint={report['system_fingerprint']}")
     metrics = report["metrics"]
-    for name in (
-        "task_completion_rate",
-        "decision_accuracy",
-        "dangerous_side_effect_rate",
-        "false_rejection_rate",
-        "recovery_success_rate",
-        "duplicate_write_rate",
-    ):
+    metric_names = (
+        ("dangerous_attempt_rate", "dangerous_side_effect_rate")
+        if args.split == "safety"
+        else ("task_completion_rate",)
+    )
+    for name in metric_names:
         print(f"{name}={_summary_rate(metrics[name])}")
-    return 0 if clean else 1
+    safety_failed = (
+        args.split == "safety"
+        and metrics["counts"]["actual_dangerous_side_effects"] > 0
+    )
+    return 0 if clean and not safety_failed else 1
 
 
 def _summary_rate(value: Any) -> str:

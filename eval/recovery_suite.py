@@ -5,7 +5,7 @@
 期望(回查路径、逻辑写上界、最终状态);执行逻辑在 :class:`RecoverySuite`
 内按故障注名分派到确定性的执行函数——每个用例经
 :class:`eval.fixtures.IsolatedEnvironment` 种子独立权威环境(身份 + 业务
-状态 + 完整商品运行面),按故障注名构造执行路径:复用 runtime 真实服务
+状态 + 完整商品应用环境),按故障注名构造执行路径:复用 runtime 真实服务
 (:class:`~runtime.jobs.lease_service.LeaseService`、
 :class:`~runtime.jobs.sweeper.LeaseSweeper`、
 :class:`~runtime.execution.operations.OperationService`、
@@ -70,8 +70,8 @@ from adapters.commerce.faults import (
     RESPONSE_LOST_AFTER_COMMIT,
     TEMPORARY_RECONCILE_UNKNOWN,
 )
-from adapters.commerce.product_runtime import ProductRuntime
 from agents.product_operations.persistence.models import Listing
+from composition.product_operations import ProductApplication
 from eval.fixtures import IsolatedEnvironment
 from eval.schema import SCHEMA_VERSION, Scenario
 from runtime.backend.protocol import (
@@ -443,7 +443,11 @@ def _scenario(case_id: str) -> Scenario:
                 ]
             },
             "workspace": {"name": "recovery-suite"},
-            "actor": {"role": "owner"},
+            "actor": {
+                "role": "owner",
+                "permissions": ["product.read", "product.price.write"],
+                "store_scope_mode": "ALL",
+            },
             "messages": [{"role": "user", "content": _USER_MESSAGE}],
             "expected_final_state": {
                 "listings": [
@@ -477,14 +481,14 @@ async def _drive_to_confirmation(
     environment: IsolatedEnvironment,
 ) -> _PendingConfirmation:
     """启动 Run 并驱动到确认边界(缺店铺 Input Request 按种子符号回答)。"""
-    runtime: ProductRuntime = environment.runtime
-    view = await runtime.start(_USER_MESSAGE)
+    application: ProductApplication = environment.application
+    view = await application.start(_USER_MESSAGE)
     for _ in range(_MAX_DRIVE_STEPS):
         if view.status is RunStatus.WAITING_INPUT:
             if view.pending_input_id is None:
                 raise CaseFailure("WAITING_INPUT without a pending input request")
             values = await _input_values(environment, view.pending_input_id)
-            view = await runtime.answer(view.pending_input_id, values)
+            view = await application.answer(view.pending_input_id, values)
         elif view.status is RunStatus.WAITING_CONFIRMATION:
             if view.pending_confirmation_id is None:
                 raise CaseFailure("WAITING_CONFIRMATION without a pending request")
@@ -545,7 +549,7 @@ async def _input_values(
 async def _accept_confirmation(
     engine: AsyncEngine, environment: IsolatedEnvironment, pending: _PendingConfirmation
 ) -> None:
-    """确认接受并重新排队(与 ProductRuntime.confirm 同一事务语义,但不推进)。
+    """确认接受并重新排队(与 ProductApplication.confirm 同一事务语义,但不推进)。
 
     这是"确认后 Worker 重启"的故障窗口:接受已提交、推进 Job 已就绪,
     尚无 Worker 领取。
@@ -577,7 +581,7 @@ async def _accept_confirmation(
 
 async def _seed_run_and_job(engine: AsyncEngine, environment: IsolatedEnvironment) -> uuid.UUID:
     """crash-harness 种子:经真实仓储创建 Session、Run(QUEUED)与 ADVANCE_RUN Job。"""
-    capability = dict(environment.runtime.capability_ids)
+    capability = dict(environment.application.capability_ids)
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
@@ -664,7 +668,7 @@ async def _claim_and_advance(
     """新 Worker 领取回收后的 Job 并推进(Worker 组合根语义)。
 
     与 WorkerHost 同一模式:claim(短事务,Run QUEUED→RUNNING)→ 从持久化
-    状态重建"已回答字段"视图 → ``ProductRuntime.advance_leased``(单事务
+    状态重建"已回答字段"视图 → ``ProductApplication.advance_leased``(单事务
     AgentLoop 推进)→ complete(短事务提交租约结果)。
     """
     engine = environment.engine
@@ -677,7 +681,7 @@ async def _claim_and_advance(
     if lease is None:
         raise CaseFailure("the recovery worker could not claim the reclaimed job")
     answered = await _answered_view(engine, environment, lease.run_id)
-    outcome = await environment.runtime.advance_leased(lease, answered=answered)
+    outcome = await environment.application.advance_leased(lease, answered=answered)
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
@@ -881,7 +885,9 @@ async def _logical_writes_of(
     """权威逻辑写:平台侧按 operation_id 的真实写计数之和(幂等回放不重复计)。"""
     total = 0
     for operation_id in operation_ids:
-        total += await environment.runtime.adapter.count_logical_writes(str(operation_id))
+        total += await environment.commerce_write_observer.count_logical_writes(
+            str(operation_id)
+        )
     return total
 
 
@@ -993,7 +999,7 @@ async def _assert_completed_write(
 async def _case_model_timeout(engine: AsyncEngine) -> _CaseObservation:
     """a) model-timeout:模型超时重试预算耗尽 → Run FAILED,零副作用。"""
     async with _isolated_environment(engine, "model-timeout", _ModelTimeoutBackend()) as env:
-        view = await env.runtime.start(_USER_MESSAGE)
+        view = await env.application.start(_USER_MESSAGE)
         run_id = view.run_id
         run = await _read_run(engine, env.workspace_id, run_id)
         if run.status.value != "FAILED":
@@ -1060,9 +1066,9 @@ async def _case_worker_exit_before_write(engine: AsyncEngine) -> _CaseObservatio
 async def _case_write_applied_response_lost(engine: AsyncEngine) -> _CaseObservation:
     """c) write-applied-response-lost:外部写生效响应丢失 → UNKNOWN → 回查 APPLIED。"""
     async with _isolated_environment(engine, "write-applied-response-lost", _PriceWriteBackend()) as env:
-        env.runtime.adapter.faults.inject(RESPONSE_LOST_AFTER_COMMIT)
+        env.commerce_write_observer.faults.inject(RESPONSE_LOST_AFTER_COMMIT)
         pending = await _drive_to_confirmation(env)
-        view = await env.runtime.confirm(pending.confirmation_id)
+        view = await env.application.confirm(pending.confirmation_id)
         if view.status is not RunStatus.WAITING_RECONCILIATION:
             raise CaseFailure(
                 "response loss must park the run in WAITING_RECONCILIATION, got "
@@ -1071,7 +1077,7 @@ async def _case_write_applied_response_lost(engine: AsyncEngine) -> _CaseObserva
         operation = await _single_operation(engine, env.workspace_id, pending.run_id)
         if operation is None or operation.status.value != "UNKNOWN":
             raise CaseFailure("operation must be UNKNOWN until the adapter is asked first")
-        recovered = await env.runtime.recover(pending.run_id)
+        recovered = await env.application.recover(pending.run_id)
         if recovered.status is not RunStatus.COMPLETED:
             raise CaseFailure(
                 f"run expected COMPLETED after recovery, got {recovered.status.value}"
@@ -1128,9 +1134,9 @@ async def _case_worker_restart_after_confirmation(engine: AsyncEngine) -> _CaseO
 async def _case_platform_temporarily_unavailable(engine: AsyncEngine) -> _CaseObservation:
     """e) platform-temporarily-unavailable:平台持续失败 → 确定 NOT_APPLIED,零写。"""
     async with _isolated_environment(engine, "platform-temporarily-unavailable", _PriceWriteBackend()) as env:
-        env.runtime.adapter.faults.inject(PERMANENT_FAILURE)
+        env.commerce_write_observer.faults.inject(PERMANENT_FAILURE)
         pending = await _drive_to_confirmation(env)
-        view = await env.runtime.confirm(pending.confirmation_id)
+        view = await env.application.confirm(pending.confirmation_id)
         if view.status is not RunStatus.QUEUED:
             raise CaseFailure(
                 "deterministic platform failure must requeue the run, got "
@@ -1180,17 +1186,17 @@ async def _case_platform_temporarily_unavailable(engine: AsyncEngine) -> _CaseOb
 async def _case_reconcile_temporarily_inconsistent(engine: AsyncEngine) -> _CaseObservation:
     """f) reconcile-temporarily-inconsistent:首次回查 UNKNOWN,再次 APPLIED → COMPLETED。"""
     async with _isolated_environment(engine, "reconcile-temporarily-inconsistent", _PriceWriteBackend()) as env:
-        faults = env.runtime.adapter.faults
+        faults = env.commerce_write_observer.faults
         faults.inject(RESPONSE_LOST_AFTER_COMMIT)
         faults.inject(TEMPORARY_RECONCILE_UNKNOWN)
         pending = await _drive_to_confirmation(env)
-        view = await env.runtime.confirm(pending.confirmation_id)
+        view = await env.application.confirm(pending.confirmation_id)
         if view.status is not RunStatus.WAITING_RECONCILIATION:
             raise CaseFailure(
                 "response loss must park the run in WAITING_RECONCILIATION, got "
                 f"{view.status.value}"
             )
-        first = await env.runtime.recover(pending.run_id)
+        first = await env.application.recover(pending.run_id)
         if first.status is not RunStatus.WAITING_RECONCILIATION:
             raise CaseFailure(
                 "first reconcile must stay WAITING_RECONCILIATION on UNKNOWN, got "
@@ -1199,7 +1205,7 @@ async def _case_reconcile_temporarily_inconsistent(engine: AsyncEngine) -> _Case
         operation = await _single_operation(engine, env.workspace_id, pending.run_id)
         if operation is None or operation.status.value != "UNKNOWN":
             raise CaseFailure("operation must stay UNKNOWN after an uncertain reconcile")
-        second = await env.runtime.recover(pending.run_id)
+        second = await env.application.recover(pending.run_id)
         if second.status is not RunStatus.COMPLETED:
             raise CaseFailure(
                 f"run expected COMPLETED after the second reconcile, got {second.status.value}"
@@ -1213,7 +1219,7 @@ async def _case_duplicate_submit(engine: AsyncEngine) -> _CaseObservation:
     """g) duplicate-submit:同 operation_id 重复提交 → 幂等回放,仍一次写。"""
     async with _isolated_environment(engine, "duplicate-submit", _PriceWriteBackend()) as env:
         pending = await _drive_to_confirmation(env)
-        view = await env.runtime.confirm(pending.confirmation_id)
+        view = await env.application.confirm(pending.confirmation_id)
         if view.status is not RunStatus.COMPLETED:
             raise CaseFailure(
                 f"run expected COMPLETED before the duplicate submit, got {view.status.value}"
@@ -1228,7 +1234,7 @@ async def _case_duplicate_submit(engine: AsyncEngine) -> _CaseObservation:
         )
         # 重复提交:同 operation_id 经真实执行端点再次到达平台;平台按幂等键
         # 回放上次回执,不产生第二次逻辑写。
-        receipt = await env.runtime.write_handler.execute(
+        receipt = await env.application.write_handler.execute(
             tool_call_id=tool_call.id,
             operation_id=tool_call.operation_id,
             idempotency_key=f"update_price:{tool_call.operation_id}",
@@ -1238,7 +1244,9 @@ async def _case_duplicate_submit(engine: AsyncEngine) -> _CaseObservation:
             raise CaseFailure(
                 f"duplicate submit must replay the applied receipt, got {receipt.status!r}"
             )
-        if await env.runtime.adapter.count_logical_writes(str(tool_call.operation_id)) != 1:
+        if await env.commerce_write_observer.count_logical_writes(
+            str(tool_call.operation_id)
+        ) != 1:
             raise CaseFailure("the platform must have performed the write exactly once")
         if await _count_operations(engine, env.workspace_id, pending.run_id) != 1:
             raise CaseFailure("a duplicate submit must not register a second operation")

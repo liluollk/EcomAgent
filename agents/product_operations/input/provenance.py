@@ -66,8 +66,20 @@ class StoreCandidate:
 
     def matched_by_message(self, normalized_message: str) -> bool:
         """归一化消息中是否精确出现本店的名称/别名。"""
-        return any(
-            label in normalized_message
+        return bool(self.matched_labels(normalized_message))
+
+    def matched_labels(self, normalized_message: str) -> frozenset[str]:
+        """返回当前消息实际命中的归一化名称/别名。"""
+        return frozenset(
+            label
+            for label in (normalize_label(item) for item in self._labels())
+            if label and label in normalized_message
+        )
+
+    def normalized_labels(self) -> frozenset[str]:
+        """返回本店非空的归一化名称/别名集合。"""
+        return frozenset(
+            label
             for label in (normalize_label(item) for item in self._labels())
             if label
         )
@@ -154,8 +166,10 @@ class EvidenceResolver:
         """``store_id`` 只接受 USER_EXPLICIT / USER_CONFIRMED。"""
         value = _trimmed_str(arguments.get("store_id"))
         answered_store = _trimmed_str(answers.get("store_id"))
-        evidence = self._unique_store_evidence(normalized_message, stores)
         if value is not None:
+            evidence = self._explicit_store_evidence(
+                normalized_message, value, stores
+            )
             if evidence is not None and evidence.matches_value(value):
                 return ArgumentProvenance.USER_EXPLICIT, evidence.store_id
             if (
@@ -211,13 +225,25 @@ class EvidenceResolver:
         return ArgumentProvenance.UNTRUSTED, None
 
     @staticmethod
-    def _unique_store_evidence(
-        normalized_message: str, stores: Sequence[StoreCandidate]
+    def _explicit_store_evidence(
+        normalized_message: str,
+        value: str,
+        stores: Sequence[StoreCandidate],
     ) -> StoreCandidate | None:
-        """消息店铺证据必须唯一命中授权店铺;零家或多家都不算证据。"""
-        matches = [store for store in stores if store.matched_by_message(normalized_message)]
-        if len(matches) == 1:
-            return matches[0]
+        """ToolCall 目标必须唯一，且消息中至少有一个无歧义标签指向它。
+
+        消息可以同时明确提到多家店；只要当前 ``store_id`` 唯一指向其中
+        一家，就构成该次 ToolCall 的用户显式证据。若同一个消息标签映射到
+        多家店（例如共享别名“旗舰店”），仍按歧义处理。
+        """
+        value_matches = [store for store in stores if store.matches_value(value)]
+        if len(value_matches) != 1:
+            return None
+        selected = value_matches[0]
+        for label in selected.matched_labels(normalized_message):
+            owners = sum(label in store.normalized_labels() for store in stores)
+            if owners == 1:
+                return selected
         return None
 
 

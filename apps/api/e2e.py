@@ -10,7 +10,7 @@
   :func:`apps.worker.assembly._bootstrap_capabilities`(幂等,与 Worker
   组合根共用同一份稳定 Key);
 - 重复调用返回同一套标识,并把 Listing 价格复位到 128.00、清空该工作区
-  上一次验证遗留的运行面数据(sessions/runs/messages/events/requests/
+  上一次验证遗留的Runtime 执行数据(sessions/runs/messages/events/requests/
   tool_calls/operations),保证每次 E2E 从确定状态开始。
 
 本端点只服务本地/CI 端到端验证,不在生产装配中注册。
@@ -151,7 +151,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
     await session.commit()
     capability = await _bootstrap_capabilities(engine, workspace.id)
 
-    # 复位运行面遗留数据与商品域种子(幂等;独立短事务提交)。
+    # 复位 Runtime 执行遗留数据与商品域种子(幂等;独立短事务提交)。
     seed_session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with seed_session.begin():
@@ -259,7 +259,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
 
 
 async def _reset_workspace_runtime_rows(session: Any, workspace_id: uuid.UUID) -> None:
-    """按外键依赖清空该工作区上次验证遗留的运行面数据(幂等)。"""
+    """按外键依赖清空该工作区上次验证遗留的Runtime 执行数据(幂等)。"""
     statements: Final[tuple[str, ...]] = (
         "DELETE FROM audit_events WHERE workspace_id = :ws",
         "DELETE FROM agent_events WHERE workspace_id = :ws",

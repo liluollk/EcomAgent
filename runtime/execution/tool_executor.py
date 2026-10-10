@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
@@ -86,6 +86,8 @@ class ToolExecutor:
         expected_state_version: int,
         handler: WriteToolHandler,
         processor: ToolResultProcessor,
+        output_schema: Mapping[str, Any] | None = None,
+        checkpoint: Callable[[], Awaitable[None]] | None = None,
         adapter_key: str,
         supports_native_idempotency: bool = False,
         supports_reconciliation: bool = False,
@@ -100,6 +102,8 @@ class ToolExecutor:
         )
         self._handler = handler
         self._processor = processor
+        self._output_schema = output_schema
+        self._checkpoint = checkpoint
         self._adapter_key = adapter_key
         self._supports_native_idempotency = supports_native_idempotency
         self._supports_reconciliation = supports_reconciliation
@@ -117,13 +121,17 @@ class ToolExecutor:
             supports_native_idempotency=self._supports_native_idempotency,
             supports_reconciliation=self._supports_reconciliation,
         )
+        if self._checkpoint is not None:
+            await self._checkpoint()
         receipt = await self._invoke_handler(
             tool_call_id=tool_call_id,
             operation_id=begun.operation_id,
             idempotency_key=begun.idempotency_key,
             normalized_arguments=normalized_arguments,
         )
-        processed = await self._processor.process(receipt)
+        processed = await self._processor.process(
+            receipt, output_schema=self._output_schema
+        )
         recorded = await self._operations.record_result(
             OperationResultRecord(
                 tool_call_id=tool_call_id,
@@ -134,6 +142,8 @@ class ToolExecutor:
                 retry_allowed=processed.retry_allowed,
             )
         )
+        if self._checkpoint is not None:
+            await self._checkpoint()
         return ExecutedToolCall(
             tool_call_id=tool_call_id, begun=begun, processed=processed, recorded=recorded
         )

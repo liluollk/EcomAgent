@@ -254,10 +254,29 @@ class ProductInputRequirementResolver:
 
 
 class ProductPreToolNormalizer:
-    """``InputNormalizer`` 协议适配:确定性归一化,不做模型猜测。"""
+    """``InputNormalizer`` 适配:按当前用户证据把店铺别名归一为内部 ID。"""
+
+    def __init__(
+        self,
+        resolver: ProductInputRequirementResolver,
+        *,
+        user_message: str,
+        actor: ActorContext,
+        answered: Mapping[str, str] | None = None,
+    ) -> None:
+        self._resolver = resolver
+        self._user_message = user_message
+        self._actor = actor
+        self._answered = answered
 
     async def normalize(self, *, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-        return normalize_arguments(dict(arguments))
+        resolution = await self._resolver.resolve(
+            user_message=self._user_message,
+            arguments=arguments,
+            actor=self._actor,
+            answered=self._answered,
+        )
+        return resolution.normalized_arguments
 
 
 class ProductPreToolProvenanceResolver:

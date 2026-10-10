@@ -25,12 +25,12 @@ from agents.product_operations.tools.access import authorized_store_ids
 from apps.api.services.errors import ApplicationServiceError
 from runtime.access.actor import ActorContext
 from runtime.persistence.base import ConfigVersionStatus
-from runtime.persistence.models.configuration import (
-    Agent,
-    AgentVersion,
-    WorkspaceAgentBinding,
-)
 from runtime.persistence.models.identity import Workspace
+from runtime.workspace.agent_binding import (
+    WorkspaceAgentConfigurationInvalid,
+    WorkspaceAgentNotConfigured,
+    WorkspaceAgentResolver,
+)
 from runtime.workspace.service import (
     BusinessPolicyView,
     ModelConnectionView,
@@ -199,34 +199,20 @@ class WorkspaceOverviewService:
 
     async def _enabled_agent(self, workspace_id: UUID) -> OverviewAgentView | None:
         """启用的商品运营 Agent;0 个 → None,多于 1 个 → 配置不变量破坏。"""
-        rows = (
-            await self._session.execute(
-                sa.select(WorkspaceAgentBinding, AgentVersion, Agent)
-                .join(
-                    AgentVersion,
-                    AgentVersion.id == WorkspaceAgentBinding.agent_version_id,
-                )
-                .join(Agent, Agent.id == AgentVersion.agent_id)
-                .where(WorkspaceAgentBinding.workspace_id == workspace_id)
-                .where(WorkspaceAgentBinding.enabled.is_(True))
-                .where(WorkspaceAgentBinding.effective_at <= sa.func.now())
-                .where(AgentVersion.status == ConfigVersionStatus.PUBLISHED)
-                .order_by(WorkspaceAgentBinding.effective_at, WorkspaceAgentBinding.id)
-            )
-        ).all()
-        if not rows:
+        try:
+            selected = await WorkspaceAgentResolver(self._session).resolve(workspace_id)
+        except WorkspaceAgentNotConfigured:
             return None
-        if len(rows) > 1:
+        except WorkspaceAgentConfigurationInvalid as error:
             raise AgentConfigurationInvalid(
                 "workspace has multiple enabled agent bindings"
-            )
-        _, version, agent = rows[0]
+            ) from error
         return OverviewAgentView(
-            id=agent.id,
-            stable_key=agent.stable_key,
-            name=agent.name,
-            version=version.version,
-            status=version.status.value,
+            id=selected.agent_id,
+            stable_key=selected.stable_key,
+            name=selected.name,
+            version=selected.version,
+            status=ConfigVersionStatus.PUBLISHED.value,
         )
 
 

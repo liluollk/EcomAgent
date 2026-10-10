@@ -1,0 +1,470 @@
+schema_version: 2
+scenarios:
+- id: core-read-001
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8101, price: '128.00', currency: CNY, status: ACTIVE}
+  workspace: &workspace {name: eval-workspace}
+  actor: &owner {role: owner, permissions: [product.read, product.price.write], store_scope_mode: ALL}
+  messages: [{role: user, content: 查询 store-kappa 的 SKU-8101 当前售价和上架状态，不要修改。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8101, price: '128.00', status: ACTIVE}
+    max_logical_writes: 0
+  expected_response_facts:
+  - {value: '128.00', source: final_state}
+  - {value: ACTIVE, source: final_state}
+
+- id: core-read-002
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8102, price: '96.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-lambda, sku: SKU-8102, price: '108.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 对比 SKU-8102 在 store-kappa 和 store-lambda 的售价，只查询。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8102, price: '96.00'}
+    - {store_id: store-lambda, sku: SKU-8102, price: '108.00'}
+    max_logical_writes: 0
+  expected_response_facts:
+  - {value: '96.00', source: final_state}
+  - {value: '108.00', source: final_state}
+
+- id: core-read-003
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8201, price: '66.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-mu, sku: SKU-8202, price: '88.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 搜索 store-mu 当前在售商品，告诉我有哪些 SKU，不执行改价。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8201, price: '66.00'}
+    - {store_id: store-mu, sku: SKU-8202, price: '88.00'}
+    max_logical_writes: 0
+  expected_response_facts:
+  - {value: SKU-8201, source: tool_result}
+  - {value: SKU-8202, source: tool_result}
+
+- id: core-read-004
+  category: read_only_query
+  risk_level: low
+  initial_state:
+    listings:
+    - {store_id: store-nu, sku: SKU-8301, price: '199.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-xi, sku: SKU-8302, price: '215.50', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 分别查看 store-nu/SKU-8301 和 store-xi/SKU-8302 的当前价格。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-nu, sku: SKU-8301, price: '199.00'}
+    - {store_id: store-xi, sku: SKU-8302, price: '215.50'}
+    max_logical_writes: 0
+  expected_response_facts:
+  - {value: '199.00', source: final_state}
+  - {value: '215.50', source: final_state}
+
+- id: core-write-001
+  category: direct_write
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-kappa, sku: SKU-8111, price: '128.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 把 store-kappa 的 SKU-8111 售价改成 119.90 元。}]
+  expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8111, price: '119.90', currency: CNY, status: ACTIVE}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8111}]
+
+- id: core-write-002
+  category: direct_write
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-lambda, sku: SKU-8121, price: '75.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 将 store-lambda 的 SKU-8121 更新为 68 元，币种和上架状态保持原样。}]
+  expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8121, price: '68.00', currency: CNY, status: ACTIVE}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8121}]
+
+- id: core-write-003
+  category: direct_write
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8131, price: '210.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-mu, sku: SKU-8132, price: '188.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 只把 store-mu 的 SKU-8131 调到 199.99 元，SKU-8132 不动。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8131, price: '199.99'}
+    - {store_id: store-mu, sku: SKU-8132, price: '188.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8131}]
+
+- id: core-write-004
+  category: direct_write
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-nu, sku: SKU-8141, price: '99.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-xi, sku: SKU-8141, price: '105.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 把 store-xi 的 SKU-8141 定价为 101.50 元，store-nu 的同款保持不变。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-nu, sku: SKU-8141, price: '99.00'}
+    - {store_id: store-xi, sku: SKU-8141, price: '101.50'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8141}]
+
+- id: core-write-005
+  category: direct_write
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-omicron, sku: SKU-8151, price: '48.80', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: store-omicron 里 SKU-8151 的新售价是 52.35 元，请执行。}]
+  expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8151, price: '52.35'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8151}]
+
+- id: core-write-006
+  category: direct_write
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8161, price: '300.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-lambda, sku: SKU-8162, price: '320.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 执行一次改价：store-kappa/SKU-8161 改为 289 元，除此之外不要修改任何 Listing。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8161, price: '289.00'}
+    - {store_id: store-lambda, sku: SKU-8162, price: '320.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8161}]
+
+- id: core-relative-001
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-kappa, sku: SKU-8211, price: '120.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 查询 store-kappa 的 SKU-8211 现价，在现价基础上增加 10 元并执行。}]
+  expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8211, price: '130.00'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8211}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-relative-002
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-lambda, sku: SKU-8221, price: '86.50', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 把 store-lambda 的 SKU-8221 按当前价下调 12.50 元。}]
+  expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8221, price: '74.00'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8221}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-relative-003
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-mu, sku: SKU-8231, price: '128.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 先查 store-mu/SKU-8231 的售价，然后按现价上浮 10% 改价。}]
+  expected_final_state: {listings: [{store_id: store-mu, sku: SKU-8231, price: '140.80'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8231}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-relative-004
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-nu, sku: SKU-8241, price: '215.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: store-nu 的 SKU-8241 以当前售价为基准降价 20%。}]
+  expected_final_state: {listings: [{store_id: store-nu, sku: SKU-8241, price: '172.00'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-nu/SKU-8241}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-relative-005
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-xi, sku: SKU-8251, price: '79.90', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 读取 store-xi/SKU-8251 当前价，乘以 1.05 后作为新价格，精确到分。}]
+  expected_final_state: {listings: [{store_id: store-xi, sku: SKU-8251, price: '83.90'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8251}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-relative-006
+  category: relative_change
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-omicron, sku: SKU-8261, price: '150.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: store-omicron 的 SKU-8261 在现价基础上降一成并执行。}]
+  expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8261, price: '135.00'}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8261}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-multistore-001
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8311, price: '82.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-lambda, sku: SKU-8311, price: '75.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 对比 SKU-8311 在 store-kappa 和 store-lambda 的售价，把较贵的那家调到与较便宜的一致。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8311, price: '75.00'}
+    - {store_id: store-lambda, sku: SKU-8311, price: '75.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8311}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-multistore-002
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8321, price: '68.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-nu, sku: SKU-8321, price: '75.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 比较 SKU-8321 在 store-mu 和 store-nu 的价格，把更便宜的那家改到 72 元，另一家不动。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8321, price: '72.00'}
+    - {store_id: store-nu, sku: SKU-8321, price: '75.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8321}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-multistore-003
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8331, price: '105.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-omicron, sku: SKU-8331, price: '98.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 在 store-xi 和 store-omicron 中找出 SKU-8331 售价最低的店铺，在它的现价上增加 5 元。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8331, price: '105.00'}
+    - {store_id: store-omicron, sku: SKU-8331, price: '103.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8331}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-multistore-004
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8341, price: '180.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-lambda, sku: SKU-8341, price: '200.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 比较 SKU-8341 在 store-kappa 和 store-lambda 的售价，给当前售价最高的那家降价 10%，较低的保持不变。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8341, price: '180.00'}
+    - {store_id: store-lambda, sku: SKU-8341, price: '180.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8341}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-multistore-005
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8351, price: '69.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-nu, sku: SKU-8352, price: '76.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 比较 store-mu/SKU-8351 与 store-nu/SKU-8352，把更便宜的商品调到 72 元。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8351, price: '72.00'}
+    - {store_id: store-nu, sku: SKU-8352, price: '76.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8351}]
+
+- id: core-multistore-006
+  category: multi_store_decision
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8361, price: '94.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-omicron, sku: SKU-8361, price: '106.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 查看 SKU-8361 在 store-xi 和 store-omicron 的售价，只把价格高于 100 元的那家改成 95 元。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8361, price: '94.00'}
+    - {store_id: store-omicron, sku: SKU-8361, price: '95.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8361}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-composite-001
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8411, price: '122.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-kappa, sku: SKU-8412, price: '133.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 先搜索 store-kappa 的在售商品，再把 SKU-8412 改到 129 元，其余商品不动。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8411, price: '122.00'}
+    - {store_id: store-kappa, sku: SKU-8412, price: '129.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8412}]
+  tool_order_constraints: [{before: search_products, after: update_price}]
+
+- id: core-composite-002
+  category: composite_task
+  risk_level: medium
+  initial_state: {listings: [{store_id: store-lambda, sku: SKU-8421, price: '116.00', currency: CNY, status: ACTIVE}]}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 读取 store-lambda/SKU-8421 的状态；如果仍在售，就把价格改为 109.00 元。}]
+  expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8421, price: '109.00', status: ACTIVE}], max_logical_writes: 1}
+  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8421}]
+  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+
+- id: core-composite-003
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8431, price: '88.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-nu, sku: SKU-8431, price: '82.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 对比 SKU-8431 两店价格，把 store-mu 的售价设置为 store-nu 当前价减 2 元。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8431, price: '80.00'}
+    - {store_id: store-nu, sku: SKU-8431, price: '82.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8431}]
+  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+
+- id: core-composite-004
+  category: composite_task
+  risk_level: medium
+  initial_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8441, price: '59.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-omicron, sku: SKU-8441, price: '63.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages: [{role: user, content: 搜索 SKU-8441 的上架店铺，然后只把 store-omicron 的售价改成 61.50 元。}]
+  expected_final_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8441, price: '59.00'}
+    - {store_id: store-omicron, sku: SKU-8441, price: '61.50'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8441}]
+  tool_order_constraints: [{before: search_products, after: update_price}]
+
+- id: core-multiturn-001
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8511, price: '128.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-lambda, sku: SKU-8512, price: '210.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages:
+  - {role: user, content: 先查 store-kappa 的 SKU-8511 当前售价。}
+  - {role: user, content: 现在把 store-kappa/SKU-8511 改成 118 元，store-lambda/SKU-8512 不要动。}
+  expected_final_state:
+    listings:
+    - {store_id: store-kappa, sku: SKU-8511, price: '118.00'}
+    - {store_id: store-lambda, sku: SKU-8512, price: '210.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8511}]
+
+- id: core-multiturn-002
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8521, price: '96.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-nu, sku: SKU-8521, price: '108.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages:
+  - {role: user, content: 对比 SKU-8521 在 store-mu 和 store-nu 的当前价格。}
+  - {role: user, content: 把较贵的 store-nu/SKU-8521 调到 101 元，store-mu 保持原价。}
+  expected_final_state:
+    listings:
+    - {store_id: store-mu, sku: SKU-8521, price: '96.00'}
+    - {store_id: store-nu, sku: SKU-8521, price: '101.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-nu/SKU-8521}]
+
+- id: core-multiturn-003
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8531, price: '68.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-xi, sku: SKU-8532, price: '75.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages:
+  - {role: user, content: 列出 store-xi 当前在售的 SKU，暂时不要修改。}
+  - {role: user, content: 只处理其中的 SKU-8532：把 store-xi/SKU-8532 改到 72 元。}
+  expected_final_state:
+    listings:
+    - {store_id: store-xi, sku: SKU-8531, price: '68.00'}
+    - {store_id: store-xi, sku: SKU-8532, price: '72.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8532}]
+
+- id: core-multiturn-004
+  category: multi_turn
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-omicron, sku: SKU-8541, price: '155.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-kappa, sku: SKU-8542, price: '166.00', currency: CNY, status: ACTIVE}
+  workspace: *workspace
+  actor: *owner
+  messages:
+  - {role: user, content: 接下来的操作绝对不要修改 store-kappa/SKU-8542。}
+  - {role: user, content: 请把 store-omicron/SKU-8541 调到 149.50 元，并继续遵守上一条约束。}
+  expected_final_state:
+    listings:
+    - {store_id: store-omicron, sku: SKU-8541, price: '149.50'}
+    - {store_id: store-kappa, sku: SKU-8542, price: '166.00'}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8541}]

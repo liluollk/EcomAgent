@@ -1,13 +1,13 @@
-"""商品域运行面组合核心与门面(计划 03 Task 6;计划 05 Task 2 下沉)。
+"""商品域组合核心与门面(计划 03 Task 6;计划 05 Task 2 下沉)。
 
-``build_product_runtime`` 是 ProductMaintenance Agent 的组装核心:
+``build_product_application`` 是 ProductMaintenance Agent 的组装核心:
 
 - 启动期把 Agent/Skill/Tool/Model 版本写入数据库并注册进程内 Registry,
   执行 :class:`~runtime.capabilities.assembly.RuntimeAssembly` 启动校验;
 - 组装 PreToolUse 管线工厂(注入商品域各阶段实现:输入归一化、参数
   Provenance、InputRequirement、店铺资源解析、价格 Policy、执行模式与
   确认校验)、:class:`~runtime.orchestration.context.ContextAssembler`、
-  读写 Tool Handler 与 :class:`~runtime.orchestration.runtime_host.RuntimeHost`;
+  读写 Tool Handler 与 :class:`~runtime.orchestration.runtime.Runtime`;
 - 平台桥接:把 :class:`~agents.product_operations.tools.update_price.UpdatePriceGateway`
   实现到 :class:`~adapters.commerce.mock_adapter.MockCommerceAdapter`。
 
@@ -18,8 +18,8 @@ import agents/adapters、agents 不 import adapters(架构文档 §2),而
 adapters 已依赖 agents(:mod:`adapters.commerce.mock_adapter` 先例),故
 下沉到本模块作为单一事实源;``apps/worker/assembly.py`` 保留为兼容导出。
 
-``ProductRuntime`` 门面供驱动方(Worker、测试、CLI、Eval)使用:``start``
-包装 RunFactory → ADVANCE_RUN Job → RuntimeHost Worker 推进;``answer`` /
+``ProductApplication`` 门面供驱动方(Worker、测试、CLI、Eval)使用:``start``
+包装 RunFactory → ADVANCE_RUN Job → Runtime Worker 推进;``answer`` /
 ``confirm`` 用 Input/Confirmation 服务处理挂起请求后恢复推进;``recover``
 对响应丢失的写操作调度 reconcile 回查后恢复推进。Worker 进程按 Run 亲和
 持有已回答字段的内存视图(真实部署中应由输入请求持久化重建)。
@@ -40,16 +40,26 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from adapters.commerce.mock_adapter import MockCommerceAdapter
+from adapters.commerce.protocol import (
+    CommerceAdapter,
+    ReconciliationCommand,
+)
 from adapters.commerce.protocol import ExecutionReceipt as AdapterExecutionReceipt
-from adapters.commerce.protocol import UpdatePriceCommand as AdapterPriceCommand
-from agents.product_operations.agent import AGENT_KEY, PRODUCT_AGENT_DEFINITION
+from adapters.commerce.protocol import (
+    UpdatePriceCommand as AdapterPriceCommand,
+)
+from agents.product_operations.agent import (
+    AGENT_KEY,
+    AGENT_VERSION,
+    PRODUCT_AGENT_DEFINITION,
+)
 from agents.product_operations.input.requirements import (
     ProductInputRequirementResolver,
     ProductPreToolInputRequirementResolver,
     ProductPreToolNormalizer,
     ProductPreToolProvenanceResolver,
 )
-from agents.product_operations.persistence.models import Listing, Product
+from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.policy.models import (
     PricePolicyConfig,
     PricePolicyDecision,
@@ -68,6 +78,7 @@ from agents.product_operations.skill import (
     PRODUCT_MAINTENANCE_SKILL,
     PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS,
     SKILL_KEY,
+    SKILL_VERSION,
 )
 from agents.product_operations.tools.compare_listing_prices import (
     COMPARE_LISTING_PRICES_DEFINITION,
@@ -109,9 +120,16 @@ from runtime.capabilities.registry import (
     ToolVersionRecord,
 )
 from runtime.capabilities.run_factory import RunFactory
+from runtime.capabilities.skill_activation import (
+    LOAD_SKILL_DEFINITION,
+    LOAD_SKILL_HANDLER,
+    LOAD_SKILL_KEY,
+)
 from runtime.capabilities.validation import compute_schema_hash
+from runtime.commands.session import SessionCommandService
 from runtime.execution.pretool.decisions import (
     STAGE_ARGUMENT_PROVENANCE,
+    ExecutionModeDecision,
     PolicyDecision,
     PreToolDecision,
     SchemaDiagnostic,
@@ -126,28 +144,28 @@ from runtime.execution.pretool.pipeline import (
 )
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.reconciliation import ReconciliationService
-from runtime.execution.run_service import RunService
 from runtime.execution.tool_registry import RuntimeToolRegistry
 from runtime.execution.tool_result_processor import ToolExecutionReceipt
 from runtime.interaction.confirmation_service import ConfirmationService
-from runtime.interaction.input_service import InputService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
 from runtime.jobs.lease_service import Lease, LeaseOutcome, LeaseService
 from runtime.orchestration.agent_loop import ToolCallEvaluator, ToolPin
-from runtime.orchestration.context import ContextAssembler
+from runtime.orchestration.context import ContextAssembler, SkillCatalogEntry
 from runtime.orchestration.limits import RunLimits
 from runtime.orchestration.messages import MessageStore
-from runtime.orchestration.runtime_host import RuntimeHost
+from runtime.orchestration.runtime import Runtime
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.orchestration.token_estimator import HeuristicTokenEstimator
 from runtime.persistence.base import (
     ConfigScope,
     ConfigVersionStatus,
     ConfirmationRequestStatus,
+    ExecutionMode,
     InputRequestStatus,
     MessageRole,
     ModelBackendType,
+    OperationStatus,
     RunJobKind,
     ToolEffect,
 )
@@ -165,7 +183,8 @@ from runtime.persistence.models.configuration import (
 from runtime.persistence.models.configuration import (
     ToolVersion as ToolVersionRow,
 )
-from runtime.persistence.models.execution import ToolCall
+from runtime.persistence.models.execution import Operation, ToolCall
+from runtime.persistence.models.identity import Workspace as WorkspaceRow
 from runtime.persistence.models.interaction import (
     ConfirmationRequest,
     InputRequest,
@@ -179,8 +198,6 @@ ADAPTER_KEY: Final = "mock-commerce"
 BACKEND_KEY: Final = "product-scripted"
 MODEL_CONNECTION_KEY: Final = "product-worker-model"
 
-_RUN_RESUMED_EVENT: Final = "RUN_RESUMED"
-_OUTPUT_SCHEMA: Final[dict[str, Any]] = {"type": "object"}
 _WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset({"operation", "reconciliation"})
 
 _LIMITS: Final = RunLimits(
@@ -206,8 +223,9 @@ def _json_hash(payload: Mapping[str, Any]) -> str:
 
 
 def _tool_definitions() -> tuple[tuple[str, Any], ...]:
-    """四个商品 Tool 的 (stable_key, ToolDefinition) 确定性序列。"""
+    """商品 Tool 与 Runtime 内置 Tool 的确定性注册序列。"""
     return (
+        (LOAD_SKILL_KEY, LOAD_SKILL_DEFINITION),
         (SEARCH_PRODUCTS_DEFINITION.stable_key, SEARCH_PRODUCTS_DEFINITION),
         (GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key, GET_PRODUCT_SNAPSHOT_DEFINITION),
         (COMPARE_LISTING_PRICES_DEFINITION.stable_key, COMPARE_LISTING_PRICES_DEFINITION),
@@ -238,7 +256,8 @@ async def _bootstrap_capabilities(
             agent_version = (
                 await session.scalars(
                     select(AgentVersion).where(
-                        AgentVersion.agent_id == agent.id, AgentVersion.version == 1
+                        AgentVersion.agent_id == agent.id,
+                        AgentVersion.version == AGENT_VERSION,
                     )
                 )
             ).one_or_none()
@@ -247,7 +266,7 @@ async def _bootstrap_capabilities(
                 agent_version = AgentVersion(
                     id=uuid.uuid4(),
                     agent_id=agent.id,
-                    version=1,
+                    version=AGENT_VERSION,
                     status=ConfigVersionStatus.PUBLISHED,
                     definition_json=definition_json,
                     definition_hash=_json_hash(definition_json),
@@ -277,7 +296,8 @@ async def _bootstrap_capabilities(
             skill_version = (
                 await session.scalars(
                     select(SkillVersion).where(
-                        SkillVersion.skill_id == skill.id, SkillVersion.version == 1
+                        SkillVersion.skill_id == skill.id,
+                        SkillVersion.version == SKILL_VERSION,
                     )
                 )
             ).one_or_none()
@@ -287,7 +307,7 @@ async def _bootstrap_capabilities(
                     id=uuid.uuid4(),
                     workspace_id=None,
                     skill_id=skill.id,
-                    version=1,
+                    version=SKILL_VERSION,
                     content_json=content_json,
                     content_hash=_json_hash(content_json),
                 )
@@ -408,11 +428,15 @@ class _RegistryToolPins:
         for record in registry.records():
             if record.effect is None:
                 continue
+            bindings = registry.bindings_for(record.stable_key)
+            binding = bindings[0] if len(bindings) == 1 else None
             pin = ToolPin(
                 stable_key=record.stable_key,
                 version=record.version,
                 version_id=record.version_id,
                 effect=ToolEffect(record.effect.value),
+                handler=binding.handler if binding is not None else None,
+                output_schema=record.output_schema,
             )
             self._by_key[record.stable_key] = pin
             self._by_id[record.version_id] = pin
@@ -528,11 +552,29 @@ class _ScopedProductPipeline:
                 session, self._context.workspace_id, self._context.run_id
             )
             requirement_resolver = ProductInputRequirementResolver(session)
+
+            async def resolve_execution_mode(*, effect: ToolEffectKind) -> ExecutionModeDecision:
+                workspace = await session.get(WorkspaceRow, self._context.workspace_id)
+                if workspace is None:
+                    return ExecutionModeDecision(mode="DENY")
+                if effect is not ToolEffectKind.WRITE:
+                    return ExecutionModeDecision(mode="READ_ONLY")
+                if workspace.execution_mode is ExecutionMode.AUTO_EXECUTE:
+                    return ExecutionModeDecision(mode="AUTO")
+                if workspace.execution_mode is ExecutionMode.CONFIRM_WRITES:
+                    return ExecutionModeDecision(mode="CONFIRM")
+                return ExecutionModeDecision(mode="DENY")
+
             dependencies = PreToolDependencies(
                 tool_registry=RuntimeToolRegistry(self._tool_registry),
                 schema_validator=RuntimeSchemaValidator(),
                 authorizer=Authorizer(),
-                input_normalizer=ProductPreToolNormalizer(),
+                input_normalizer=ProductPreToolNormalizer(
+                    requirement_resolver,
+                    user_message=user_message,
+                    actor=actor,
+                    answered=self._context.answered,
+                ),
                 argument_provenance_resolver=ProductPreToolProvenanceResolver(
                     requirement_resolver,
                     user_message=user_message,
@@ -550,12 +592,14 @@ class _ScopedProductPipeline:
                     tool_call_id=tool_call.tool_call_id,
                     version_bindings=self._version_bindings,
                 ),
+                execution_mode_resolver=resolve_execution_mode,
                 accepted_confirmation_lookup=_AcceptedConfirmationLookup(
                     session=session, workspace_id=self._context.workspace_id
                 ),
             )
             pipeline = PreToolUsePipeline(
-                actor=actor, stages=_product_stages(dependencies)
+                actor=actor,
+                stages=_pretool_stages_for(tool_call.stable_key, dependencies),
             )
             return await pipeline.evaluate(tool_call)
         finally:
@@ -565,6 +609,21 @@ class _ScopedProductPipeline:
 _UNTRUSTED_SOURCE: Final = "UNTRUSTED"
 _PROVENANCE_GUARD_FIELDS: Final[tuple[str, ...]] = ("store_id", "sku")
 _GUARD_DIAGNOSTIC_MESSAGE: Final = "key arguments lack trusted user or authoritative evidence"
+
+
+def _pretool_stages_for(
+    stable_key: str,
+    dependencies: PreToolDependencies,
+) -> tuple[NamedStage, ...]:
+    """Runtime 内置 Tool 只走通用校验；业务 Tool 才注入商品域扩展。"""
+    if stable_key != LOAD_SKILL_KEY:
+        return _product_stages(dependencies)
+    runtime_dependencies = PreToolDependencies(
+        tool_registry=dependencies.tool_registry,
+        schema_validator=dependencies.schema_validator,
+        authorizer=dependencies.authorizer,
+    )
+    return default_stages(runtime_dependencies)
 
 
 def _product_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
@@ -781,11 +840,17 @@ class _AcceptedConfirmationLookup:
 
 
 class _ProductReadToolHandler:
-    """读 Tool 执行端点:按参数形状确定性分派到三个只读 Tool。"""
+    """绑定到单个商品读 Tool 的执行端点。"""
 
     def __init__(
-        self, *, engine: AsyncEngine, workspace_id: uuid.UUID, actor_id: uuid.UUID
+        self,
+        *,
+        stable_key: str,
+        engine: AsyncEngine,
+        workspace_id: uuid.UUID,
+        actor_id: uuid.UUID,
     ) -> None:
+        self._stable_key = stable_key
         self._engine = engine
         self._workspace_id = workspace_id
         self._actor_id = actor_id
@@ -808,7 +873,7 @@ class _ProductReadToolHandler:
             )
             store_ids = _store_ids_of(arguments)
             result: Any
-            if "query" in arguments:
+            if self._stable_key == SEARCH_PRODUCTS_DEFINITION.stable_key:
                 query = arguments.get("query")
                 result = await search_products(
                     actor=actor,
@@ -816,14 +881,14 @@ class _ProductReadToolHandler:
                     query=query if isinstance(query, str) else None,
                     store_ids=store_ids,
                 )
-            elif "store_id" in arguments:
+            elif self._stable_key == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
                 result = await get_product_snapshot(
                     actor=actor,
                     session=session,
                     store_id=str(arguments["store_id"]),
                     sku=str(arguments.get("sku", "")),
                 )
-            elif "sku" in arguments:
+            elif self._stable_key == COMPARE_LISTING_PRICES_DEFINITION.stable_key:
                 result = await compare_listing_prices(
                     actor=actor,
                     session=session,
@@ -831,9 +896,7 @@ class _ProductReadToolHandler:
                     store_ids=store_ids,
                 )
             else:
-                result = await search_products(
-                    actor=actor, session=session, query=None, store_ids=()
-                )
+                raise LookupError(f"no product read tool handler for {self._stable_key}")
             return ToolExecutionReceipt(
                 tool_call_id=tool_call_id,
                 status="OK",
@@ -851,9 +914,9 @@ def _store_ids_of(arguments: Mapping[str, Any]) -> Sequence[str]:
 
 
 class _CommerceGateway:
-    """把商品域写网关实现到 MockCommerceAdapter(apps → adapters 桥接)。"""
+    """把商品写命令映射到注入的商品平台 Adapter。"""
 
-    def __init__(self, adapter: MockCommerceAdapter) -> None:
+    def __init__(self, adapter: CommerceAdapter) -> None:
         self._adapter = adapter
 
     async def execute(self, command: UpdatePriceWriteCommand) -> UpdatePriceWriteReceipt:
@@ -863,6 +926,8 @@ class _CommerceGateway:
                 workspace_id=command.workspace_id,
                 store_id=command.store_id,
                 listing_id=command.listing_id,
+                external_store_ref=command.external_store_ref,
+                external_product_ref=command.external_product_ref,
                 target_price=command.target_price,
                 currency=command.currency,
                 expected_version=command.expected_version,
@@ -879,7 +944,7 @@ class _CommerceGateway:
 
 
 # ---------------------------------------------------------------------------
-# 门面:驱动方(测试/CLI)看到的运行面
+# 门面:驱动方(测试/CLI)看到的商品应用
 # ---------------------------------------------------------------------------
 
 
@@ -904,8 +969,8 @@ class ToolCallSnapshot:
     raw_arguments: Mapping[str, Any]
 
 
-class ProductRuntime:
-    """商品改价运行面门面:管理 RuntimeHost 推进与挂起请求的恢复。"""
+class ProductApplication:
+    """商品改价应用门面:管理 Runtime 推进与挂起请求的恢复。"""
 
     def __init__(
         self,
@@ -915,7 +980,7 @@ class ProductRuntime:
         tool_registry: ToolRegistry,
         price_config: PricePolicyConfig,
         backend: AgentBackend,
-        adapter: MockCommerceAdapter,
+        adapter: CommerceAdapter,
         adapter_session: AsyncSession,
         write_handler: UpdatePriceToolHandler,
         workspace_id: uuid.UUID,
@@ -923,6 +988,7 @@ class ProductRuntime:
         membership_id: uuid.UUID,
         capability: Mapping[str, Any],
         worker_id: str,
+        adapter_key: str,
     ) -> None:
         self._engine = engine
         self._assembly = assembly
@@ -936,6 +1002,7 @@ class ProductRuntime:
         self._actor_id = actor_id
         self._membership_id = membership_id
         self._capability = dict(capability)
+        self._adapter_key = adapter_key
         self._answered: dict[str, str] = {}
         self._scope = _ScopeHolder()
         estimator = HeuristicTokenEstimator()
@@ -951,8 +1018,20 @@ class ProductRuntime:
                 input_budget_tokens=400,
             ),
             estimator=estimator,
+            skill_catalog=tuple(
+                SkillCatalogEntry(
+                    stable_key=record.stable_key,
+                    name=record.content.name or record.stable_key,
+                    description=record.content.description,
+                    version=record.version,
+                )
+                for record in assembly.skills.records()
+            ),
+            tool_definitions=tuple(
+                definition for _, definition in _tool_definitions()
+            ),
         )
-        self._host = RuntimeHost(
+        self._runtime = Runtime(
             session_factory=self._session_factory,
             backend=backend,
             assembler=assembler,
@@ -964,12 +1043,7 @@ class ProductRuntime:
                 price_config=price_config,
                 scope=self._scope,
             ),
-            read_handler=_ProductReadToolHandler(
-                engine=engine, workspace_id=workspace_id, actor_id=actor_id
-            ),
-            write_handler=write_handler,
-            output_schema=_OUTPUT_SCHEMA,
-            adapter_key=ADAPTER_KEY,
+            adapter_key=adapter_key,
             supports_reconciliation=True,
             worker_id=worker_id,
         )
@@ -1003,7 +1077,7 @@ class ProductRuntime:
         return PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS
 
     @property
-    def adapter(self) -> MockCommerceAdapter:
+    def adapter(self) -> CommerceAdapter:
         return self._adapter
 
     @property
@@ -1053,62 +1127,58 @@ class ProductRuntime:
 
     async def answer(self, request_id: uuid.UUID, values: Mapping[str, str]) -> RunView:
         """回答 Input Request 并恢复推进(合并挂起参数后重走完整管线)。"""
-        run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
             async with session.begin():
-                answered = await InputService(
-                    session, workspace_id=self._workspace_id, actor_id=self._actor_id
-                ).answer(request_id, dict(values))
-                run_id = answered.run_id
-                await RunService(
-                    session=session, workspace_id=self._workspace_id
-                ).transition_run(
-                    run_id=run_id,
-                    target_status=RunStatus.QUEUED,
-                    event_kind=_RUN_RESUMED_EVENT,
-                    event_payload={"input_request_id": str(request_id)},
-                    expected_status=RunStatus.WAITING_INPUT,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).answer_input_request(request_id, dict(values))
+                run_id = decision.run_id
         finally:
             await session.close()
-        assert run_id is not None
         self._answered.update({key: str(value) for key, value in values.items()})
         await self._push(run_id)
         return await self.run_view(run_id)
 
     async def confirm(self, confirmation_id: uuid.UUID) -> RunView:
         """接受确认并恢复推进(挂起 ToolCall 重走完整 PreToolUse 后执行)。"""
-        run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
             async with session.begin():
-                request = await ConfirmationService(
-                    session, workspace_id=self._workspace_id, actor_id=self._actor_id
-                ).accept(confirmation_id)
-                run_id = request.run_id
-                await RunService(
-                    session=session, workspace_id=self._workspace_id
-                ).transition_run(
-                    run_id=run_id,
-                    target_status=RunStatus.QUEUED,
-                    event_kind=_RUN_RESUMED_EVENT,
-                    event_payload={"confirmation_id": str(confirmation_id)},
-                    expected_status=RunStatus.WAITING_CONFIRMATION,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).accept_confirmation(confirmation_id)
+                run_id = decision.run_id
         finally:
             await session.close()
-        assert run_id is not None
+        await self._push(run_id)
+        return await self.run_view(run_id)
+
+    async def append_message(self, session_id: uuid.UUID, message: str) -> RunView:
+        """在既有 Session 中提交下一条用户消息并推进新 Run。"""
+        session = self._session_factory()
+        try:
+            async with session.begin():
+                dispatched = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).append_message(session_id, content=message)
+                run_id = dispatched.run.id
+        finally:
+            await session.close()
+        await self._push(run_id)
+        return await self.run_view(run_id)
+
+    async def reject_confirmation(self, confirmation_id: uuid.UUID) -> RunView:
+        """拒绝写前确认并恢复原 Run;挂起写调用经 PreToolUse 拒绝后结束。"""
+        session = self._session_factory()
+        try:
+            async with session.begin():
+                decision = await SessionCommandService(
+                    session, actor_id=self._actor_id
+                ).reject_confirmation(confirmation_id)
+                run_id = decision.run_id
+        finally:
+            await session.close()
         await self._push(run_id)
         return await self.run_view(run_id)
 
@@ -1134,7 +1204,7 @@ class ProductRuntime:
 
         与 :meth:`_push` 的区别:不再次领取 Job——外层 WorkerHost 已完成
         claim(含 QUEUED→RUNNING 迁移),本方法直接以该租约驱动
-        ``RuntimeHost.handle_lease``(单事务 AgentLoop 推进),并把"已回答
+        ``Runtime.handle_lease``(单事务 AgentLoop 推进),并把"已回答
         字段"视图注入本次推进的 PreToolUse 管线。LeaseOutcome 交由外层
         Worker complete;异常向上冒泡按暂时性错误释放重试。
         """
@@ -1147,7 +1217,7 @@ class ProductRuntime:
             )
         )
         try:
-            return await self._host.handle_lease(lease)
+            return await self._runtime.handle_lease(lease)
         finally:
             self._scope.end()
 
@@ -1247,7 +1317,7 @@ class ProductRuntime:
             )
         )
         try:
-            processed = await self._host.run_worker_once()
+            processed = await self._runtime.run_worker_once()
         finally:
             self._scope.end()
         if not processed:
@@ -1266,38 +1336,84 @@ class ProductRuntime:
                 lease = await LeaseService(session).claim("product-reconciler")
                 if lease is None:
                     return False
+                if lease.run_id != run_id or lease.workspace_id != self._workspace_id:
+                    return False
                 run = await RunRepository(session).get(self._workspace_id, run_id)
                 if run is None:
                     raise LookupError(f"run {run_id} vanished")
-                tool_call = (
+                operations = (
                     await session.scalars(
-                        select(ToolCall)
+                        select(Operation)
+                        .join(ToolCall, ToolCall.id == Operation.tool_call_id)
                         .where(
+                            Operation.workspace_id == self._workspace_id,
                             ToolCall.workspace_id == self._workspace_id,
                             ToolCall.run_id == run_id,
+                            Operation.status == OperationStatus.UNKNOWN,
                         )
-                        .order_by(ToolCall.ordinal.desc())
-                        .limit(1)
                     )
-                ).one_or_none()
-                if tool_call is None or tool_call.operation_id is None:
+                ).all()
+                if len(operations) != 1:
                     return False
-                expected_price = _price_of(tool_call)
-                self._adapter_session.expire_all()
-                verdict = await self._adapter.reconcile(
-                    str(tool_call.operation_id), expected_price=expected_price
+                operation = operations[0]
+                tool_call = await session.get(ToolCall, operation.tool_call_id)
+                if (
+                    tool_call is None
+                    or tool_call.workspace_id != self._workspace_id
+                    or tool_call.operation_id != operation.operation_id
+                ):
+                    raise LookupError(
+                        f"tool call for UNKNOWN operation {operation.operation_id} is missing"
+                    )
+                arguments = (
+                    tool_call.normalized_arguments
+                    if tool_call.normalized_arguments is not None
+                    else tool_call.raw_arguments
                 )
+                store_id = uuid.UUID(str(arguments["store_id"]))
+                sku = str(arguments["sku"])
+                listing = await _resolve_listing(
+                    session, self._workspace_id, store_id, sku
+                )
+                store = await session.get(Store, store_id)
+                if listing is None or store is None:
+                    raise LookupError(
+                        f"platform resource for UNKNOWN operation {operation.operation_id} is missing"
+                    )
+                reconcile_command = ReconciliationCommand(
+                    operation_id=str(operation.operation_id),
+                    workspace_id=self._workspace_id,
+                    store_id=store_id,
+                    listing_id=listing.id,
+                    external_store_ref=store.external_store_ref,
+                    external_product_ref=listing.external_product_ref,
+                    expected_price=_price_of(tool_call),
+                    currency=listing.currency,
+                )
+                operation_id = operation.operation_id
+                lease_token = lease.lease_token
+                expected_state_version = run.state_version
+        finally:
+            await session.close()
+
+        # 平台回查可能耗时;此处不得占用 Runtime 状态事务。
+        self._adapter_session.expire_all()
+        verdict = await self._adapter.reconcile(reconcile_command)
+
+        session = self._session_factory()
+        try:
+            async with session.begin():
                 outcome = await ReconciliationService(
                     session,
                     workspace_id=self._workspace_id,
                     actor_id=self._actor_id,
                     run_id=run_id,
-                    operation_id=tool_call.operation_id,
-                    lease_token=lease.lease_token,
-                    expected_state_version=run.state_version,
+                    operation_id=operation_id,
+                    lease_token=lease_token,
+                    expected_state_version=expected_state_version,
                     reconcile_budget=_LIMITS.reconcile_budget,
                 ).apply_result(verdict)
-                await LeaseService(session).complete(job.id, lease.lease_token)
+                await LeaseService(session).complete(job.id, lease_token)
                 return outcome.next_job_kind is RunJobKind.ADVANCE_RUN
         finally:
             await session.close()
@@ -1320,7 +1436,7 @@ class ProductRuntime:
 # ---------------------------------------------------------------------------
 
 
-async def build_product_runtime(
+async def build_product_application(
     engine: AsyncEngine,
     *,
     backend: AgentBackend,
@@ -1329,8 +1445,10 @@ async def build_product_runtime(
     membership_id: uuid.UUID,
     price_config: PricePolicyConfig,
     worker_id: str = "product-worker",
-) -> ProductRuntime:
-    """组装 ProductMaintenance Agent 的完整运行面(启动校验失败即拒绝)。"""
+    commerce_adapter: CommerceAdapter | None = None,
+    adapter_key: str = ADAPTER_KEY,
+) -> ProductApplication:
+    """组装 ProductMaintenance Agent;默认 Mock,可注入专用 CommerceAdapter。"""
     capability = await _bootstrap_capabilities(engine, workspace_id)
 
     agent_registry = AgentRegistry()
@@ -1338,7 +1456,7 @@ async def build_product_runtime(
         AgentVersionRecord(
             stable_key=AGENT_KEY,
             version_id=capability["agent_version_id"],
-            version=1,
+            version=AGENT_VERSION,
             agent_id=capability["agent_id"],
             definition=PRODUCT_AGENT_DEFINITION,
         )
@@ -1348,14 +1466,16 @@ async def build_product_runtime(
         SkillVersionRecord(
             stable_key=SKILL_KEY,
             version_id=capability["skill_version_id"],
-            version=1,
+            version=SKILL_VERSION,
             workspace_id=None,
             content=PRODUCT_MAINTENANCE_SKILL,
         )
     )
 
     adapter_session = AsyncSession(engine, expire_on_commit=False)
-    adapter = MockCommerceAdapter(adapter_session)
+    adapter: CommerceAdapter = (
+        commerce_adapter if commerce_adapter is not None else MockCommerceAdapter(adapter_session)
+    )
     write_handler = UpdatePriceToolHandler(
         workspace_id=workspace_id,
         session=adapter_session,
@@ -1368,8 +1488,15 @@ async def build_product_runtime(
         handler: Any
         if key == STABLE_KEY_UPDATE_PRICE:
             handler = write_handler
+        elif key == LOAD_SKILL_KEY:
+            handler = LOAD_SKILL_HANDLER
         else:
-            handler = _read_handler_of(key)
+            handler = _ProductReadToolHandler(
+                stable_key=key,
+                engine=engine,
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+            )
         tool_registry.register(
             ToolVersionRecord(
                 stable_key=key,
@@ -1410,7 +1537,7 @@ async def build_product_runtime(
     )
     assembly.validate()
 
-    return ProductRuntime(
+    return ProductApplication(
         engine=engine,
         assembly=assembly,
         tool_registry=tool_registry,
@@ -1424,18 +1551,8 @@ async def build_product_runtime(
         membership_id=membership_id,
         capability=capability,
         worker_id=worker_id,
+        adapter_key=adapter_key,
     )
-
-
-def _read_handler_of(stable_key: str) -> Any:
-    """只读 Tool 的可执行实现(按稳定 Key 分派)。"""
-    if stable_key == SEARCH_PRODUCTS_DEFINITION.stable_key:
-        return search_products
-    if stable_key == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
-        return get_product_snapshot
-    if stable_key == COMPARE_LISTING_PRICES_DEFINITION.stable_key:
-        return compare_listing_prices
-    raise LookupError(f"no read handler for tool {stable_key}")
 
 
 # ---------------------------------------------------------------------------
@@ -1517,9 +1634,9 @@ bootstrap_product_capabilities = _bootstrap_capabilities
 
 
 __all__ = [
-    "ProductRuntime",
+    "ProductApplication",
     "RunView",
     "ToolCallSnapshot",
     "bootstrap_product_capabilities",
-    "build_product_runtime",
+    "build_product_application",
 ]

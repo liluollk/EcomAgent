@@ -22,7 +22,7 @@
 - business_policy:注入 :class:`BusinessPolicy`,只返回 :class:`PolicyDecision`
   值对象,不获取 Repository;
 - execution_mode:注入 :class:`ExecutionModeResolver`(缺省为确定性的
-  READ→READ_ONLY、WRITE→CONFIRM 规则),决定是否需要确认;
+  READ→READ_ONLY、WRITE→CONFIRM 规则),决定是否拒绝写入或需要确认;
 - confirmation_verification:注入 :class:`AcceptedConfirmationLookup` 查询回调
   (指纹、Actor、过期与状态校验由交互阶段实现),无已接受确认的写操作返回
   REQUIRE_CONFIRMATION(携带 ConfirmationSpec)。
@@ -44,6 +44,7 @@ from runtime.access.authorization import Authorizer
 from runtime.execution.pretool.decisions import (
     ACCESS_DENIED,
     ARGUMENTS_INCOMPLETE,
+    EXECUTION_MODE_READ_ONLY,
     INVALID_MODEL_OUTPUT,
     PIPELINE_INVARIANT,
     POLICY_DENIED,
@@ -374,6 +375,11 @@ def _execution_mode_stage(dependencies: PreToolDependencies) -> StageHandler:
             return deny(PIPELINE_INVARIANT, safe_message="resolved tool version is unclassified")
         resolver = dependencies.execution_mode_resolver or _default_execution_mode_resolver
         context.execution_mode = await resolver(effect=record.effect)
+        if context.execution_mode.mode == "DENY":
+            return deny(
+                EXECUTION_MODE_READ_ONLY,
+                safe_message="workspace execution mode does not allow write operations",
+            )
         return None
 
     return handler
@@ -474,8 +480,18 @@ class PreToolUsePipeline:
         for stage in self._stages:
             decision = await stage.handler(context)
             if decision is not None:
-                return decision
-        return allow()
+                return self._with_normalized_arguments(decision, context)
+        return self._with_normalized_arguments(allow(), context)
+
+    @staticmethod
+    def _with_normalized_arguments(
+        decision: PreToolDecision, context: PreToolContext
+    ) -> PreToolDecision:
+        if context.normalized_arguments is None:
+            return decision
+        return decision.model_copy(
+            update={"normalized_arguments": dict(context.normalized_arguments)}
+        )
 
 
 __all__ = [

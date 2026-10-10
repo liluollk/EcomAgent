@@ -50,6 +50,7 @@ TOOL_DISABLED: Final = "TOOL_DISABLED"
 ARGUMENTS_INCOMPLETE: Final = "ARGUMENTS_INCOMPLETE"
 POLICY_DENIED: Final = "POLICY_DENIED"
 CONFIRMATION_REQUIRED: Final = "CONFIRMATION_REQUIRED"
+EXECUTION_MODE_READ_ONLY: Final = "EXECUTION_MODE_READ_ONLY"
 ACCESS_DENIED: Final = "ACCESS_DENIED"
 PIPELINE_INVARIANT: Final = "PIPELINE_INVARIANT"
 
@@ -88,7 +89,7 @@ class ExecutionModeDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["READ_ONLY", "CONFIRM", "AUTO"]
+    mode: Literal["READ_ONLY", "CONFIRM", "AUTO", "DENY"]
 
 
 # ---- 统一决策 ----
@@ -115,6 +116,7 @@ class PreToolDecision(BaseModel):
     schema_diagnostic: SchemaDiagnostic | None = None
     confirmation_spec: ConfirmationSpec | None = None
     policy_decision: PolicyDecision | None = None
+    normalized_arguments: Mapping[str, Any] | None = None
 
 
 def allow() -> PreToolDecision:
@@ -165,6 +167,7 @@ __all__ = [
     "ACCESS_DENIED",
     "ARGUMENTS_INCOMPLETE",
     "CONFIRMATION_REQUIRED",
+    "EXECUTION_MODE_READ_ONLY",
     "INVALID_MODEL_OUTPUT",
     "PIPELINE_INVARIANT",
     "POLICY_DENIED",

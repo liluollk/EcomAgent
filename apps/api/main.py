@@ -28,7 +28,6 @@ from apps.api.errors import (
     VALIDATION_ERROR,
     ApiError,
 )
-from apps.api.routes.agents import router as agents_router
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
 from apps.api.routes.events import router as events_router
@@ -150,7 +149,6 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.exception_handler(Exception)(_unhandled_error_handler)
     app.include_router(health_router)
     app.include_router(auth_router)
-    app.include_router(agents_router)
     app.include_router(workspaces_router)
     app.include_router(memberships_router)
     app.include_router(configuration_router)

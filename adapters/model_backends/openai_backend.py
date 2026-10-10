@@ -6,7 +6,7 @@ Tool Calling 格式归一化、Provider 错误映射、Usage 归一化、取消�
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import openai
@@ -54,6 +54,45 @@ def normalize_provider_exception(exc: Exception) -> BackendFailed:
         error_message=type(exc).__name__,
         retryable=retryable,
     )
+
+
+def _serialize_tool_definition(tool: Any) -> dict[str, Any]:
+    """把 Runtime Tool 定义映射为 OpenAI Chat Completions 的函数格式。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.stable_key,
+            "description": tool.description,
+            "parameters": tool.input_json_schema,
+        },
+    }
+
+
+def _serialize_message(message: Any) -> dict[str, Any]:
+    """把统一消息映射为 Chat Completions 的历史消息格式。"""
+    serialized: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.role == "assistant" and message.tool_calls:
+        serialized["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(
+                        tool_call.arguments, ensure_ascii=False, separators=(",", ":")
+                    ),
+                },
+            }
+            for tool_call in message.tool_calls
+        ]
+    if message.role == "tool":
+        if message.call_id is not None:
+            serialized["tool_call_id"] = message.call_id
+        if message.name is not None:
+            serialized["name"] = message.name
+    elif message.name is not None:
+        serialized["name"] = message.name
+    return serialized
 
 
 class _PendingToolCall:
@@ -168,9 +207,11 @@ class OpenAIBackend:
         client: Any,
         model: str,
         extra_capability_keys: frozenset[str] = frozenset(),
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
         self._model = model
+        self._extra_body = dict(extra_body) if extra_body is not None else None
         self._capabilities = AgentBackendCapabilities(
             capability_keys=frozenset({"streaming", "tool_calling"}) | extra_capability_keys
         )
@@ -183,11 +224,21 @@ class OpenAIBackend:
     ) -> AsyncIterator[BackendEvent]:
         accumulator = OpenAIStreamAccumulator()
         try:
+            request_parameters: dict[str, Any] = {
+                "model": self._model,
+                "messages": [
+                    _serialize_message(message) for message in request.messages
+                ],
+                "tools": [
+                    _serialize_tool_definition(tool) for tool in request.tool_definitions
+                ]
+                or None,
+                "stream": True,
+            }
+            if self._extra_body is not None:
+                request_parameters["extra_body"] = self._extra_body
             response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[message.model_dump(exclude_none=True) for message in request.messages],
-                tools=[tool.model_dump() for tool in request.tool_definitions] or None,
-                stream=True,
+                **request_parameters,
             )
             async for chunk in response:
                 if cancellation.is_cancelled:

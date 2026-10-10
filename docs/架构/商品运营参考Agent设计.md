@@ -64,7 +64,9 @@ price_locks
 - Listing 写入使用 `version` 做乐观并发校验；
 - Runtime 的 `membership_resource_scopes` 只保存 `resource_type = store` 与 Store ID，不对上述表建立商品专用逻辑。
 
-Mock Adapter 将这些表视为外部平台的权威状态，并支持注入超时、响应丢失、暂时失败和回查延迟。未来接入真实平台时替换 Adapter，Tool Schema、Runtime 和 Eval 协议不变。
+`MockCommerceAdapter` 将这些表视为外部平台的权威状态，并支持注入超时、响应丢失、暂时失败和回查延迟。另有固定契约的 `RestCommerceAdapter`：只调用 allowlist 中 HTTPS 主机上的价格更新与 Operation 回查接口；端点 URL/方法不由模型生成，写请求携带稳定幂等键和期望版本。当前 REST 行为通过 `httpx.MockTransport` 验证，没有淘宝/抖音官方 API 授权或真实店铺联调，不能将本地契约测试表述为已接通真实平台。
+
+`build_product_application` 默认组装 Mock Adapter；调用方可注入实现 `CommerceAdapter` 的平台适配器并提供对应 `adapter_key`。注入的 Adapter 实例由调用方管理生命周期；例如 `RestCommerceAdapter.aclose()` 会关闭它持有的 HTTP Client。
 
 ## 4. Tool 集合
 
@@ -167,7 +169,7 @@ Mock Adapter 必须支持可重现的故障注入，用于验证“写入已生�
 
 ## 8. Context、Skill 与知识
 
-首版只需一个发布的 `product_maintenance` Skill，说明任务方法、可用 Tool 和风险边界。它不重复存储商品事实、价格规则或 SOP 正文。
+当前只发布一个 `product_maintenance` Skill，说明任务方法、可用 Tool 和风险边界。Context 常驻展示其名称与描述，模型在商品任务开始前通过 `load_skill` 加载完整指令；它不重复存储商品事实、价格规则或知识库中的 SOP 正文。
 
 - 当前商品与价格通过 Tool 读取；
 - 硬性业务规则通过 Policy 读取；
@@ -176,7 +178,11 @@ Mock Adapter 必须支持可重现的故障注入，用于验证“写入已生�
 
 ## 9. Eval 与验收
 
-参考 Agent Eval 至少覆盖：
+评测分为三条独立线，不把能力、安全和恢复合成一个分数：商品任务能力用 Development / Regression / Held-out 场景核对权威最终状态、必要执行过程和回答证据；Safety 场景独立验证权限与业务规则；Runtime 与 Recovery 使用确定性用例和故障注入验证执行不变量及恢复行为。当前 Regression 为空，只有经复现、修复并复跑验证的失败案例才进入。
+
+商品能力评测的 Workspace 显式设为 `AUTO_EXECUTE`，让合法写任务可在受控运行中自动完成；这只改变确认步骤，不跳过授权、资源范围、业务规则和参数校验。正常业务 Workspace 使用 `CONFIRM_WRITES` 时，所有写操作由 Runtime 要求确认；`READ_ONLY` 下写操作被拒绝。缺少店铺等必要业务信息仍通过 Input Request 澄清，不与写入确认混为一谈。
+
+参考 Agent Eval 覆盖：
 
 1. 商品查询、多店价格对比和维护建议；
 2. 信息完整的合法改价；
@@ -192,7 +198,7 @@ Mock Adapter 必须支持可重现的故障注入，用于验证“写入已生�
 
 ## 10. 实现验证状态
 
-> 本小节由阶段 3 Gate（计划 03 Task 7）追加，只记录安全矩阵各场景的验证状态与实际行为，不修改上文设计语义。测试入口：`tests/agents/product_operations/test_safety_matrix.py`（夹具复用 `product_runtime` 组装；权威统计口径为 `MockCommerceAdapter.count_logical_writes` 与 `listings.current_price`）。
+> 本小节由阶段 3 Gate（计划 03 Task 7）追加，只记录安全矩阵各场景的验证状态与实际行为，不修改上文设计语义。测试入口：`tests/agents/product_operations/test_safety_matrix.py`（夹具复用 `product_application` 组装；权威统计口径为 `MockCommerceAdapter.count_logical_writes` 与 `listings.current_price`）。
 
 | 场景 | 测试 | ToolCall 实际状态 | 失败码 | 权威写 | 最终价格 |
 |---|---|---|---|---|---|

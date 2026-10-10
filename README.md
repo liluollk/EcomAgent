@@ -14,7 +14,7 @@ Python 3.12、Pydantic v2、SQLAlchemy 2、Alembic、PostgreSQL 16 + pgvector、
 
 - **工程基础与持久化**:公共接口与类型、PostgreSQL 持久化(41 张表)、Workspace 隔离的 Repository 与事务所有权、本地身份与授权、Secret 加密与外部端点防护、只追加审计;
 - **Runtime 执行内核**:Backend 流式归一化(工具增量不直接执行)、固定 PreToolUse/PostToolUse 顺序与写前确认(TOCTOU 重校验)、Session 隔离、Context 预算与 Summary(受保护事实保留)、记忆生命周期(删除后不再进入上下文)、幂等与 Reconciliation(UNKNOWN 先回查)、租约 fencing 与接管、事件重放去重、限额终止、取消后永不恢复——以上 10 条不变式由确定性 Runtime Eval 全部验证通过;
-- **商品运营参考 Agent**:改价等商品任务的完整闭环——缺店铺 Input 澄清、写前确认、ScriptedBackend/Mock 平台权威落库、断线重连后由快照恢复最终权威状态(E2E 验证);故障注入下的恢复(7 个故障点)实际重复写为 0;
+- **商品运营参考 Agent**:改价等商品任务的完整闭环——缺店铺 Input 澄清、写前确认、Mock 平台权威落库、断线重连后由快照恢复最终权威状态(E2E 验证);提供固定商品 REST Adapter 并以 `httpx.MockTransport` 验证幂等键、版本冲突和不确定写回查。未接入淘宝/抖音官方 API 或真实店铺;
 - **API 与工作台**:FastAPI API(统一错误响应体、请求标识、健康检查)与 React 工作台;Workspace overview 聚合真实成员角色、店铺授权与已启用能力,前端支持切换 Workspace,任务只使用当前 Workspace Agent;Session 固定创建时唯一有效的 AgentVersion,后续 Run 不受绑定变更影响;前端单测覆盖 EventReducer 的重复/乱序/缺口/快照/终态不变量;
 - **确定性 Eval 与发布门槛**:Runtime 不变式套件(10 用例)与故障恢复套件(7 故障)确定性可重复;商品 Agent 数据集三层分区(development 18 / regression 12 / frozen_test 15,ID 互斥 + 冻结 SHA-256);权威状态 Scorer(分项判分、无综合总分、真实分母);JSON/Markdown 报告与发布 Gate(`eval/gates/`)。评测方法与首版状态见 `docs/评测/`;
 - **CI**:`.github/workflows/` 三个 workflow——backend(PR:postgres/pgvector service + Alembic + Ruff + mypy + pytest)、workbench(PR:lint + Vitest + build,另有完整 E2E job:postgres service + 后端 + Playwright chromium)、eval(PR:确定性 Eval + 数据集校验;真实模型评测仅 `workflow_dispatch` 手动触发,使用仓库 Secrets,不在 PR 中消耗额度)。
@@ -46,6 +46,7 @@ npm --prefix apps/workbench run test:e2e              # 2 passed
 
 - `runtime/` — 公共接口、持久化、访问控制、安全、审计(禁止反向依赖上层模块,有架构测试防护)
 - `agents/`、`adapters/` — 商品运营参考 Agent 与后端/平台适配
+- `composition/` — 商品运营 Agent、Runtime、Adapter 与集成服务的产品组合根
 - `apps/` — API(`apps/api`)、Worker(`apps/worker`)与工作台(`apps/workbench`)
 - `eval/` — Eval Schema、Runner、Scorer、数据集、报告与发布 Gate
 - `migrations/` — Alembic 迁移

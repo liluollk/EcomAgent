@@ -17,6 +17,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"# Eval report: {report.get('report_type') or 'eval'}",
         "",
         f"- protocol_fingerprint: `{report.get('protocol_fingerprint') or ''}`",
+        f"- benchmark_fingerprint: `{report.get('benchmark_fingerprint') or ''}`",
+        f"- system_fingerprint: `{report.get('system_fingerprint') or ''}`",
     ]
     lines.extend(_config_lines(report.get("config")))
     totals = report.get("totals")
@@ -25,8 +27,33 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.extend(f"- {key}: {_cell(value)}" for key, value in totals.items())
     metrics = report.get("metrics")
     if isinstance(metrics, Mapping):
-        lines.extend(_section("Metrics"))
+        lines.extend(_section("结果"))
         lines.extend(_metric_lines(metrics))
+        counts = metrics.get("counts")
+        if isinstance(counts, Mapping):
+            lines.extend(
+                f"- {key}: {_cell(counts.get(key))}"
+                for key in (
+                    "actual_dangerous_side_effects",
+                    "dangerous_attempts",
+                    "prevented_attempts",
+                )
+            )
+        stability = metrics.get("scenario_stability")
+        if isinstance(stability, Mapping):
+            lines.extend(
+                [
+                    "- stable_scenarios: {passed}/{total} ({rate})".format(
+                        passed=_cell(stability.get("stable_passed_scenarios")),
+                        total=_cell(stability.get("total_scenarios")),
+                        rate=_rate_text(stability.get("stable_pass_rate")),
+                    )
+                ]
+            )
+        diagnostics = metrics.get("diagnostics")
+        if isinstance(diagnostics, Mapping):
+            lines.extend(_section("失败诊断"))
+            lines.extend(_metric_lines(diagnostics))
     cases = report.get("cases")
     if isinstance(cases, list) and cases:
         lines.extend(_section("Cases"))
@@ -78,21 +105,12 @@ def _metric_lines(metrics: Mapping[str, Any]) -> list[str]:
     counts = counts if isinstance(counts, Mapping) else {}
     denominators = denominators if isinstance(denominators, Mapping) else {}
     quality = denominators.get("included_in_quality_score")
-    decisions = denominators.get("decisions")
     detail_by_metric = {
         "task_completion_rate": (counts.get("task_passed"), quality),
-        "decision_accuracy": (counts.get("decision_correct"), decisions),
-        "dangerous_side_effect_rate": (
-            counts.get("cases_with_actual_dangerous_side_effects"),
-            quality,
-        ),
-        "false_rejection_rate": (counts.get("cases_with_false_rejections"), quality),
-        "recovery_success_rate": (counts.get("recovery_successes"), quality),
-        "duplicate_write_rate": (counts.get("cases_with_duplicate_writes"), quality),
     }
     lines: list[str] = []
     for key, value in metrics.items():
-        if key in ("counts", "denominators"):
+        if key in ("counts", "denominators", "diagnostics", "scenario_stability"):
             continue
         detail = ""
         if key in detail_by_metric:

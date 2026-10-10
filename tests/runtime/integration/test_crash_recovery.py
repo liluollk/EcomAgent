@@ -1,10 +1,10 @@
 """崩溃恢复集成测试(计划 02 Task 10;架构文档 §8、§13、§14)。
 
 以 ``crash_harness`` 夹具封装故障注入:seed Run → 以受控故障点运行
-RuntimeHost/AgentLoop → 恢复 → 断言。外部世界(模型流、写 Tool handler、
+Runtime/AgentLoop → 恢复 → 断言。外部世界(模型流、写 Tool handler、
 回查适配器)用确定性 fake 注入;状态机、租约、回查与事件全部走真实
 Runtime 服务与真库(沿用 tests/runtime 现有模式:种子行提交 + 独立
-Session 工厂 + 结束清理,因 RuntimeHost 使用独立 Session)。
+Session 工厂 + 结束清理,因 Runtime 使用独立 Session)。
 
 覆盖场景:
 1. 执行前 Worker 退出(租约被 Sweeper 回收,Run 回 QUEUED 可重新领取);
@@ -70,7 +70,7 @@ from runtime.orchestration.context import (
     ToolResultProjection,
 )
 from runtime.orchestration.limits import RunLimits
-from runtime.orchestration.runtime_host import RuntimeHost
+from runtime.orchestration.runtime import Runtime
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.persistence.base import (
     ConfigScope,
@@ -316,18 +316,18 @@ class CrashHarness:
     def _session(self) -> AsyncSession:
         return AsyncSession(self._engine, expire_on_commit=False)
 
-    def _host(self) -> RuntimeHost:
-        return RuntimeHost(
+    def _runtime(self) -> Runtime:
+        return Runtime(
             session_factory=lambda: AsyncSession(self._engine, expire_on_commit=False),
             backend=self.backend,
             assembler=make_assembler(),
             limits=TEST_LIMITS,
             tool_pins=_write_tool_pins(
-                self._ids["write_tool_key"], self._ids["tool_version_id"]
+                self._ids["write_tool_key"],
+                self._ids["tool_version_id"],
+                self.write_handler,
             ),
             pipeline_factory=lambda: AlwaysAllowPipeline(),
-            write_handler=self.write_handler,
-            output_schema=TEST_OUTPUT_SCHEMA,
             adapter_key="crash-adapter",
             supports_reconciliation=True,
             worker_id="crash-worker",
@@ -336,9 +336,9 @@ class CrashHarness:
     # -- 受控故障推进与恢复 ----------------------------------------------
 
     async def run_until(self, crash_point: str) -> RecoverySnapshot:
-        """以受控故障点推进一轮 Worker:RuntimeHost claim → advance → complete。"""
+        """以受控故障点推进一轮 Worker:Runtime claim → advance → complete。"""
         self.write_handler.crash_point = crash_point
-        assert await self._host().run_worker_once() is True
+        assert await self._runtime().run_worker_once() is True
         self.write_handler.crash_point = None
         return await self.snapshot()
 
@@ -357,7 +357,7 @@ class CrashHarness:
         snapshot = await self.snapshot()
         if snapshot.run.status is PersistenceRunStatus.QUEUED:
             await self.requeue_advance_job()
-            assert await self._host().run_worker_once() is True
+            assert await self._runtime().run_worker_once() is True
         return await self.snapshot()
 
     async def reconcile(self, verdict: ReconcileResult) -> ReconcileOutcome:
@@ -407,7 +407,7 @@ class CrashHarness:
 
     async def run_worker_once(self) -> bool:
         """直接驱动一轮真实 Worker 循环(重新领取路径)。"""
-        return await self._host().run_worker_once()
+        return await self._runtime().run_worker_once()
 
     # -- 低层边界(场景 a/b/e:Worker 退出与 fencing)--------------------
 
@@ -440,8 +440,8 @@ class CrashHarness:
             await session.close()
 
     async def sweep(self) -> int:
-        """LeaseSweeper 回收过期租约(RuntimeHost.sweep 调度入口)。"""
-        return await self._host().sweep()
+        """LeaseSweeper 回收过期租约(Runtime.sweep 调度入口)。"""
+        return await self._runtime().sweep()
 
     async def seed_pending_write_tool_call(self) -> ToolCall:
         """为"执行边界已提交"场景 seed VALIDATING ToolCall(执行 conftest 同模式)。"""
@@ -634,13 +634,15 @@ class CrashHarness:
 class _WriteToolPins:
     """内存 ToolPin 解析器:仅解析集成测试 seed 的写 Tool 版本。"""
 
-    def __init__(self, stable_key: str, tool_version_id: uuid.UUID) -> None:
+    def __init__(self, stable_key: str, tool_version_id: uuid.UUID, handler: Any) -> None:
         self._key = stable_key
         self._pin = ToolPin(
             stable_key=stable_key,
             version=1,
             version_id=tool_version_id,
             effect=ToolEffect.WRITE,
+            handler=handler,
+            output_schema=TEST_OUTPUT_SCHEMA,
         )
 
     def by_stable_key(self, stable_key: str) -> ToolPin | None:
@@ -650,8 +652,10 @@ class _WriteToolPins:
         return self._pin if version_id == self._pin.version_id else None
 
 
-def _write_tool_pins(stable_key: str, tool_version_id: uuid.UUID) -> _WriteToolPins:
-    return _WriteToolPins(stable_key, tool_version_id)
+def _write_tool_pins(
+    stable_key: str, tool_version_id: uuid.UUID, handler: Any
+) -> _WriteToolPins:
+    return _WriteToolPins(stable_key, tool_version_id, handler)
 
 
 async def _seed_committed_scenario(engine: AsyncEngine) -> dict[str, Any]:

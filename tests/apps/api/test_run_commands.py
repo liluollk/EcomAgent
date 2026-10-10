@@ -5,7 +5,7 @@
 - 私有 Session:非创建者/非成员读取一律 404,不泄漏存在性;
 - 取消 Run 经 transitions 合法路径迁移 CANCELLED,终态再取消 409;
 - Input Request 单次回答:未声明字段 422 UNDECLARED_FIELD,已处理 409 REQUEST_NOT_PENDING,
-  成功后 Run 回到 QUEUED(等价 RuntimeHost 恢复推进的最小事务,不调用推进循环);
+  成功后 Run 回到 QUEUED(等价 Runtime 恢复推进的最小事务,不调用推进循环);
 - Confirmation Request 单次 accept/reject,二次 409;
 - Run 快照(status/messages/tool_calls/events cursor);跨工作区资源 404。
 """
@@ -19,10 +19,12 @@ from uuid import UUID
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from apps.api.main import create_app
+from apps.api.schemas.sessions import CreateSessionRequest
 from runtime.access.tokens import issue_token
 from runtime.execution.run_service import RunService
 from runtime.interaction.confirmation_service import ConfirmationService
@@ -299,12 +301,10 @@ async def session_client(
     return owner_client
 
 
-async def _create_session(
-    client: AsyncClient, workspace_id: UUID, agent_id: UUID
-) -> dict[str, object]:
+async def _create_session(client: AsyncClient, workspace_id: UUID) -> dict[str, object]:
     response = await client.post(
         "/api/sessions",
-        json={"workspace_id": str(workspace_id), "agent_id": str(agent_id), "title": "t"},
+        json={"workspace_id": str(workspace_id), "title": "t"},
     )
     assert response.status_code == 201, response.text
     body: dict[str, object] = response.json()
@@ -327,9 +327,7 @@ async def _create_run(
     owner_client: AsyncClient, workspace: SeededWorkspace
 ) -> CreatedRun:
     """经 API 创建 Session 并提交首条消息,返回消息与 Run 标识。"""
-    created = await _create_session(
-        owner_client, workspace.id, workspace.agent_id
-    )
+    created = await _create_session(owner_client, workspace.id)
     session_id = UUID(str(created["id"]))
     dispatched = await _submit_message(owner_client, session_id)
     return CreatedRun(
@@ -398,12 +396,23 @@ async def test_waiting_run_blocks_new_user_message(
 # ---------------------------------------------------------------------------
 
 
+def test_create_session_request_forbids_client_selected_agent() -> None:
+    request = CreateSessionRequest(workspace_id=uuid.uuid4())
+
+    assert request.title is None
+    with pytest.raises(ValidationError):
+        CreateSessionRequest(
+            workspace_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+        )
+
+
 async def test_create_session_binds_current_actor(
     owner_client: AsyncClient, workspace: SeededWorkspace
 ) -> None:
     response = await owner_client.post(
         "/api/sessions",
-        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+        json={"workspace_id": str(workspace.id)},
     )
     assert response.status_code == 201, response.text
     body = response.json()
@@ -435,7 +444,7 @@ async def test_create_session_rejects_inactive_workspace_agent_binding(
 
     response = await owner_client.post(
         "/api/sessions",
-        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+        json={"workspace_id": str(workspace.id)},
     )
 
     assert response.status_code == 409
@@ -473,7 +482,7 @@ async def test_create_session_rejects_multiple_enabled_agent_versions(
 
     response = await owner_client.post(
         "/api/sessions",
-        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+        json={"workspace_id": str(workspace.id)},
     )
 
     assert response.status_code == 409
@@ -507,7 +516,7 @@ async def test_agent_binding_in_another_workspace_does_not_authorize_session(
     try:
         response = await owner_client.post(
             "/api/sessions",
-            json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+            json={"workspace_id": str(workspace.id)},
         )
         assert response.status_code == 409
         assert response.json()["code"] == "AGENT_NOT_ENABLED_FOR_WORKSPACE"
@@ -530,7 +539,7 @@ async def test_non_member_cannot_create_session_in_workspace(
 ) -> None:
     response = await non_member_client.post(
         "/api/sessions",
-        json={"workspace_id": str(workspace.id), "agent_id": str(workspace.agent_id)},
+        json={"workspace_id": str(workspace.id)},
     )
     assert response.status_code == 403
     assert response.json()["code"] == "PERMISSION_DENIED"
@@ -541,7 +550,7 @@ async def test_submit_message_creates_run_and_advance_job(
     workspace: SeededWorkspace,
     engine: AsyncEngine,
 ) -> None:
-    created_session = await _create_session(owner_client, workspace.id, workspace.agent_id)
+    created_session = await _create_session(owner_client, workspace.id)
     session_id = UUID(str(created_session["id"]))
 
     # Publish and bind v2 after Session creation. Existing Session must remain pinned to v1.
@@ -708,9 +717,7 @@ async def test_resource_from_other_workspace_returns_404(
         transport=ASGITransport(app=app), base_url="http://testserver", headers=headers
     ) as other_client:
         try:
-            other_session = await _create_session(
-                other_client, other_ws.id, workspace.agent_id
-            )
+            other_session = await _create_session(other_client, other_ws.id)
             other_run = await _submit_message(
                 other_client, UUID(str(other_session["id"]))
             )

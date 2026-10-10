@@ -10,8 +10,8 @@
 
 决策分流(每个 ToolCall 独立执行 PreToolUse):
 
-- ``ALLOW``:读 Tool 走注入的 ReadToolHandler;写 Tool 走 ToolExecutor 两阶段
-  执行(要求有效 lease token);
+- ``ALLOW``:按 Run 固定 Tool 对应的 ToolBinding Handler 执行;写 Tool 走
+  ToolExecutor 两阶段执行(要求有效 lease token);
 - ``DENY``:ToolCall DENIED、拒绝事件落库、拒绝结果作为 ToolResult 回填,
   继续下一个调用(不中断循环);
 - ``REQUIRE_INPUT`` / ``REQUIRE_CONFIRMATION``:经 InputService /
@@ -25,14 +25,15 @@
 预算(:class:`~runtime.orchestration.limits.RunLimits`):每轮模型调用前记账
 模型轮次,每个新 ToolCall 处理前记账 ToolCall 数;轮次开始前检查 Run
 Deadline;读 Tool 执行后检查单 Tool 超时(写 Tool 的不确定性由两阶段执行与
-回查语义覆盖);Reconciliation 次数由 Task 8 的 ReconciliationService 预算
+回查语义覆盖);ueconciliation 次数由 Task 8 的 ReconciliationService 预算
 执行,Loop 只传递。超限抛
 :class:`~runtime.orchestration.limits.LoopLimitExceeded`,Run 以对应错误码
 FAILED,不能继续自动循环。可重试 BackendFailed 重启流并创建新 RunAttempt;
 不可重试 → Run FAILED。
 
-事务边界:本服务在调用方事务内执行,只 flush 不 commit——Run 状态变更与
-AgentEvent 在同一事务提交由编排层(RuntimeHost)保证。已知的模型可见信息
+事务边界:本服务按持久化检查点提交;每次状态变更与对应 AgentEvent 在同一
+短事务内提交。所有模型/Tool 外部等待前先提交,流式事件落库后立即提交。
+已知的模型可见信息
 限制:ToolCall 表没有 provider call_id 列,恢复处理的挂起调用以 ToolCall
 行 ID 作为 ToolResult 消息的 call_id。
 """
@@ -41,7 +42,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast
@@ -55,18 +56,25 @@ from runtime.backend.protocol import (
     BackendEvent,
     BackendFailed,
     BackendRequest,
+    BackendToolCall,
     CancellationToken,
     ToolCallCompleted,
+)
+from runtime.capabilities.skill_activation import (
+    LOAD_SKILL_KEY,
+    SkillActivationError,
+    SkillActivationService,
 )
 from runtime.events.writer import AgentEventWriter
 from runtime.execution.operations import OperationOutcome
 from runtime.execution.pretool.decisions import PreToolDecision
 from runtime.execution.pretool.pipeline import ToolCallRequest
 from runtime.execution.run_service import RunService
-from runtime.execution.tool_executor import ToolExecutor, WriteToolHandler
+from runtime.execution.tool_executor import ToolExecutor
 from runtime.execution.tool_registry import TOOL_UNKNOWN
 from runtime.execution.tool_result_processor import (
     ProcessedToolResult,
+    ToolExecutionReceipt,
     ToolResultProcessor,
 )
 from runtime.interaction.confirmation_service import ConfirmationService
@@ -80,6 +88,7 @@ from runtime.orchestration.messages import MessageStore
 from runtime.orchestration.streaming import StreamingMessageRecorder
 from runtime.persistence.base import (
     MessageRole,
+    MessageStatus,
     OperationStatus,
     RunAttemptStatus,
     RunJobKind,
@@ -124,12 +133,14 @@ _PENDING_TOOL_CALL_STATUSES: Final[frozenset[ToolCallStatus]] = frozenset(
 
 @dataclass(frozen=True)
 class ToolPin:
-    """Run 已固定的 Tool 版本(稳定 Key、版本号、版本 ID 与副作用分类)。"""
+    """Run 固定的 Tool 版本及其进程内 Handler、结果 Schema。"""
 
     stable_key: str
     version: int
     version_id: uuid.UUID
     effect: ToolEffect
+    handler: Any | None = None
+    output_schema: Mapping[str, Any] | None = None
 
 
 class ToolPinResolver(Protocol):
@@ -203,12 +214,11 @@ class AgentLoop:
         limits: RunLimits,
         pipeline: ToolCallEvaluator,
         tool_pins: ToolPinResolver,
-        read_handler: ReadToolHandler | None = None,
-        write_handler: WriteToolHandler | None = None,
         processor: ToolResultProcessor,
         adapter_key: str = "local",
         supports_native_idempotency: bool = False,
         supports_reconciliation: bool = False,
+        checkpoint: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] | None = None,
         input_request_ttl: timedelta = DEFAULT_INPUT_REQUEST_TTL,
         confirmation_ttl: timedelta = DEFAULT_CONFIRMATION_TTL,
@@ -220,12 +230,11 @@ class AgentLoop:
         self._limits = limits
         self._pipeline = pipeline
         self._tool_pins = tool_pins
-        self._read_handler = read_handler
-        self._write_handler = write_handler
         self._processor = processor
         self._adapter_key = adapter_key
         self._supports_native_idempotency = supports_native_idempotency
         self._supports_reconciliation = supports_reconciliation
+        self._checkpoint_callback = checkpoint
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._input_request_ttl = input_request_ttl
         self._confirmation_ttl = confirmation_ttl
@@ -234,6 +243,17 @@ class AgentLoop:
         self._writer = AgentEventWriter(session=session, workspace_id=workspace_id)
         self._store = MessageStore(session=session, workspace_id=workspace_id)
         self._cancellation = CancellationToken()
+
+    async def _checkpoint(self) -> None:
+        """提交当前状态/Event 原子组,确保下一次外部等待不继承数据库事务。
+
+        Runtime 显式提供生产提交策略;直接构造 Loop 的调用方默认只
+        flush,可继续把更大的事务边界交给自己的 UnitOfWork。
+        """
+        if self._checkpoint_callback is None:
+            await self._session.flush()
+        else:
+            await self._checkpoint_callback()
 
     # -- 交互服务(Run 级 Actor)----------------------------------------
 
@@ -336,8 +356,16 @@ class AgentLoop:
                 if resolved is not None:
                     return resolved
 
-            # 无待处理调用且流完成:Run COMPLETED(assistant message 已落库)。
+            # ToolResult 已持久化后必须回填给下一轮模型；只有纯文本轮次结束
+            # 才能把 Run 标记为完成。
+            if self._needs_model_followup(outcome):
+                continue
             return await self._complete_run(run.id, persisted, processed)
+
+    @staticmethod
+    def _needs_model_followup(outcome: _RoundOutcome) -> bool:
+        """只要模型产生过 ToolCall，就必须再进行一轮综合或后续决策。"""
+        return bool(outcome.tool_calls)
 
     async def _resolve_stop(
         self,
@@ -388,6 +416,7 @@ class AgentLoop:
     async def _model_round(self, run: Run, budget: LoopBudget) -> _RoundOutcome:
         """一轮模型调用:装配上下文 → 流式消费 → 返回完整 ToolCall。"""
         try:
+            await self._abort_interrupted_streams(run)
             built = self._assembler.build(await self._conversation_view(run))
             request = await built
         except ContextBudgetExceeded:
@@ -410,6 +439,7 @@ class AgentLoop:
             session_id=run.session_id,
             run_id=run.id,
             sequence_no=await self._next_message_sequence(run.session_id),
+            checkpoint=self._checkpoint,
         )
         outcome = await recorder.consume(
             self._stream_with_retries(request, budget, run),
@@ -427,6 +457,25 @@ class AgentLoop:
             assistant_message_id=outcome.message_id,
             tool_calls=outcome.tool_calls,
         )
+
+    async def _abort_interrupted_streams(self, run: Run) -> None:
+        """恢复时关闭上次 Worker 崩溃留下的部分 Assistant Message。"""
+        rows = (
+            await self._session.scalars(
+                select(Message).where(
+                    Message.workspace_id == self._workspace_id,
+                    Message.run_id == run.id,
+                    Message.role == MessageRole.ASSISTANT,
+                    Message.status == MessageStatus.STREAMING,
+                )
+            )
+        ).all()
+        if not rows:
+            return
+        for row in rows:
+            row.status = MessageStatus.ABORTED
+        await self._session.flush()
+        await self._checkpoint()
 
     async def _stream_with_retries(
         self, request: BackendRequest, budget: LoopBudget, run: Run
@@ -465,16 +514,22 @@ class AgentLoop:
             )
         )
         await self._session.flush()
+        await self._checkpoint()
 
     async def _conversation_view(self, run: Run) -> ConversationView:
         """以已完成消息构造装配视图:仅当最后一条是用户消息时视作当前消息。"""
         messages = await self._store.list_completed_messages(session_id=run.session_id)
+        active_skills = await SkillActivationService(
+            self._session,
+            workspace_id=self._workspace_id,
+        ).active_for_run(run.id)
         current = (
             messages[-1] if messages and messages[-1].role is MessageType.USER else None
         )
         return ConversationView(
             messages=tuple(messages) if current is None else tuple(messages[:-1]),
             current_user_message=current,
+            active_skill_instructions=active_skills,
         )
 
     async def _next_message_sequence(self, session_id: uuid.UUID) -> int:
@@ -492,6 +547,7 @@ class AgentLoop:
         """先把本轮全部完整 ToolCall 按 ordinal 持久化为 PROPOSED(§8)。"""
         assert outcome.assistant_message_id is not None
         rows: list[ToolCall] = []
+        history_tool_calls: list[BackendToolCall] = []
         for event in outcome.tool_calls:
             pin = self._tool_pins.by_stable_key(event.name)
             if pin is None:
@@ -504,6 +560,13 @@ class AgentLoop:
                         "tool_name": event.name,
                         "reason_code": TOOL_UNKNOWN,
                     },
+                )
+                history_tool_calls.append(
+                    BackendToolCall(
+                        id=event.call_id,
+                        name=event.name,
+                        arguments=dict(event.arguments),
+                    )
                 )
                 await self._append_tool_message(
                     run, call_id=event.call_id, tool_name=event.name, content=TOOL_UNKNOWN
@@ -527,7 +590,18 @@ class AgentLoop:
                 {"call_id": event.call_id, "tool_name": event.name, "ordinal": ordinal},
                 tool_call_id=row.id,
             )
+            history_tool_calls.append(
+                BackendToolCall(
+                    id=str(row.id),
+                    name=event.name,
+                    arguments=dict(event.arguments),
+                )
+            )
             rows.append(row)
+        if history_tool_calls:
+            await self._store.set_assistant_tool_calls(
+                outcome.assistant_message_id, tuple(history_tool_calls)
+            )
         return rows
 
     async def _next_tool_call_ordinal(self, run_id: uuid.UUID) -> int:
@@ -585,6 +659,15 @@ class AgentLoop:
             raw_arguments=json.dumps(self._base_arguments(call)),
         )
         decision = await self._pipeline.evaluate(request)
+
+        if decision.normalized_arguments is not None:
+            # ToolCall 参数存入 JSONB;Decimal 等领域类型必须在持久化边界
+            # 转成无损 JSON 标量。ALLOW/恢复路径继续复用，DENY 路径保留
+            # 目标证据供审计与 Safety 统计，不改变本次决策结果。
+            call.normalized_arguments = json.loads(
+                json.dumps(dict(decision.normalized_arguments), default=str)
+            )
+            await self._session.flush()
 
         if decision.kind == "DENY":
             return await self._handle_deny(run, call, pin, decision)
@@ -733,15 +816,20 @@ class AgentLoop:
         arguments: dict[str, Any],
     ) -> _Stop | None:
         """读 Tool:注入 handler 执行 + 单 Tool 超时 + PostToolUse 处理。"""
-        if self._read_handler is None:
-            return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
         started_at = self._clock()
         deadline = budget.tool_deadline(now=started_at)
-        receipt = await self._read_handler.read(
-            tool_call_id=call.id,
-            normalized_arguments=arguments,
-            deadline=deadline,
-        )
+        if pin.stable_key == LOAD_SKILL_KEY:
+            receipt = await self._load_skill_receipt(run, call, arguments)
+        else:
+            handler = pin.handler
+            if handler is None or not callable(getattr(handler, "read", None)):
+                return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
+            await self._checkpoint()
+            receipt = await handler.read(
+                tool_call_id=call.id,
+                normalized_arguments=arguments,
+                deadline=deadline,
+            )
         try:
             budget.ensure_tool_timeout(started_at=started_at, now=self._clock())
         except LoopLimitExceeded as limit:
@@ -749,7 +837,9 @@ class AgentLoop:
                 call, ToolCallStatus.FAILED, failure_code=limit.failure_code
             )
             return _Stop(RunStatus.RUNNING, failure_code=limit.failure_code)
-        processed = await self._processor.process(receipt)
+        processed = await self._processor.process(
+            receipt, output_schema=pin.output_schema
+        )
         await self._finish_read_tool_call(call, processed)
         await self._append_tool_message(
             run,
@@ -757,7 +847,39 @@ class AgentLoop:
             tool_name=pin.stable_key,
             content=_projection_content(processed),
         )
+        await self._checkpoint()
         return None
+
+    async def _load_skill_receipt(
+        self,
+        run: Run,
+        call: ToolCall,
+        arguments: Mapping[str, Any],
+    ) -> ToolExecutionReceipt:
+        """执行 Runtime 内置 `load_skill`，不下沉到业务 ReadToolHandler。"""
+        skill_key = arguments.get("skill_key")
+        if not isinstance(skill_key, str) or not skill_key.strip():
+            return ToolExecutionReceipt(
+                tool_call_id=call.id,
+                status="FAILED",
+                error_code="INVALID_SKILL_KEY",
+            )
+        try:
+            activated = await SkillActivationService(
+                self._session,
+                workspace_id=self._workspace_id,
+            ).activate(run.id, skill_key.strip())
+        except SkillActivationError as error:
+            return ToolExecutionReceipt(
+                tool_call_id=call.id,
+                status="FAILED",
+                error_code=type(error).__name__.upper(),
+            )
+        return ToolExecutionReceipt(
+            tool_call_id=call.id,
+            status="SUCCEEDED",
+            payload=activated.tool_payload(),
+        )
 
     async def _execute_write(
         self,
@@ -768,7 +890,8 @@ class AgentLoop:
         arguments: dict[str, Any],
     ) -> _Stop | None:
         """写 Tool:begin → 外部调用 → PostToolUse → 结果事务(含 fencing)。"""
-        if self._write_handler is None:
+        handler = pin.handler
+        if handler is None or not callable(getattr(handler, "execute", None)):
             return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
         if lease_token is None:
             raise RuntimeError(
@@ -782,8 +905,10 @@ class AgentLoop:
             run_id=run.id,
             lease_token=lease_token,
             expected_state_version=fresh.state_version,
-            handler=self._write_handler,
+            handler=handler,
             processor=self._processor,
+            checkpoint=self._checkpoint,
+            output_schema=pin.output_schema,
             adapter_key=self._adapter_key,
             supports_native_idempotency=self._supports_native_idempotency,
             supports_reconciliation=self._supports_reconciliation,

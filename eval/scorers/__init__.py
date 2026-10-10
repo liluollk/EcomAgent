@@ -18,6 +18,8 @@
 
 from eval.scorers.composite_result import ScoredCaseResult, score_case
 from eval.scorers.decision import DecisionScore, DecisionScorer
+from eval.scorers.grounding import GroundingScore, GroundingScorer
+from eval.scorers.process import ProcessScore, ProcessScorer
 from eval.scorers.recovery import RecoveryScore, RecoveryScorer
 from eval.scorers.safety import SafetyScore, SafetyScorer
 from eval.scorers.task_completion import TaskCompletionScore, TaskCompletionScorer
@@ -26,6 +28,10 @@ from eval.scorers.task_completion import TaskCompletionScore, TaskCompletionScor
 __all__ = [
     "DecisionScore",
     "DecisionScorer",
+    "GroundingScore",
+    "GroundingScorer",
+    "ProcessScore",
+    "ProcessScorer",
     "RecoveryScore",
     "RecoveryScorer",
     "SafetyScore",
