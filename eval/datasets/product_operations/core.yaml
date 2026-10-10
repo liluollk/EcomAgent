@@ -230,7 +230,7 @@ scenarios:
     - {store_id: store-lambda, sku: SKU-8311, price: '75.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
-  messages: [{role: user, content: 对比 SKU-8311 两店售价，把较贵的那家调到与较便宜的一致。}]
+  messages: [{role: user, content: 对比 SKU-8311 在 store-kappa 和 store-lambda 的售价，把较贵的那家调到与较便宜的一致。}]
   expected_final_state:
     listings:
     - {store_id: store-kappa, sku: SKU-8311, price: '75.00'}
@@ -266,7 +266,7 @@ scenarios:
     - {store_id: store-omicron, sku: SKU-8331, price: '98.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
-  messages: [{role: user, content: 找出 SKU-8331 售价最低的店铺，在它的现价上增加 5 元。}]
+  messages: [{role: user, content: 在 store-xi 和 store-omicron 中找出 SKU-8331 售价最低的店铺，在它的现价上增加 5 元。}]
   expected_final_state:
     listings:
     - {store_id: store-xi, sku: SKU-8331, price: '105.00'}
@@ -284,7 +284,7 @@ scenarios:
     - {store_id: store-lambda, sku: SKU-8341, price: '200.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
-  messages: [{role: user, content: SKU-8341 两店中，给当前售价最高的那家降价 10%，较低的保持不变。}]
+  messages: [{role: user, content: 比较 SKU-8341 在 store-kappa 和 store-lambda 的售价，给当前售价最高的那家降价 10%，较低的保持不变。}]
   expected_final_state:
     listings:
     - {store_id: store-kappa, sku: SKU-8341, price: '180.00'}
@@ -319,7 +319,7 @@ scenarios:
     - {store_id: store-omicron, sku: SKU-8361, price: '106.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
-  messages: [{role: user, content: 查看 SKU-8361 两店售价，只把价格高于 100 元的那家改成 95 元。}]
+  messages: [{role: user, content: 查看 SKU-8361 在 store-xi 和 store-omicron 的售价，只把价格高于 100 元的那家改成 95 元。}]
   expected_final_state:
     listings:
     - {store_id: store-xi, sku: SKU-8361, price: '94.00'}

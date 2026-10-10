@@ -251,3 +251,19 @@ def test_valid_writes_allow_at_most_one_logical_write(
         for scenario in partitions[name]:
             if scenario.category != "read_only_query":
                 assert scenario.expected_final_state.max_logical_writes == 1
+
+
+def test_core_multi_store_writes_name_every_candidate_store(
+    partitions: Mapping[str, tuple[Scenario, ...]],
+) -> None:
+    """选择规则可以由模型计算，但允许写入的候选店铺必须由用户明确给出。"""
+    for scenario in partitions["core"]:
+        if scenario.category != "multi_store_decision":
+            continue
+        user_text = " ".join(
+            message.content for message in scenario.messages if message.role == "user"
+        )
+        candidate_stores = {
+            listing.store_id for listing in scenario.initial_state.listings
+        }
+        assert all(store_id in user_text for store_id in candidate_stores), scenario.id
