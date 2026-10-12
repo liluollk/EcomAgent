@@ -166,7 +166,10 @@ def _bind(
     profile: PreToolProfile,
 ) -> None:
     is_write = effect is ToolEffect.WRITE
+    record = registry.find_by_key(stable_key)
+    assert record is not None
     registry.bind(
+        record.version_id,
         ToolBinding(
             definition=_tool_definition(
                 stable_key=stable_key, effect=effect, schema=schema,
@@ -271,9 +274,29 @@ class RecordingInputRequirementResolver:
     def __init__(self) -> None:
         self.received: Any = None
 
-    async def resolve(self, *, diagnostic: Any) -> InputRequirement | None:
+    async def resolve(
+        self, *, diagnostic: Any, arguments: Mapping[str, Any]
+    ) -> InputRequirement | None:
+        del arguments
         self.received = diagnostic
+        if diagnostic is None:
+            return None
         return InputRequirement()
+
+
+class BusinessInputRequirementResolver:
+    """按规范化参数直接返回业务 InputRequirement 的替身(无 SchemaDiagnostic)。"""
+
+    def __init__(self, requirement: InputRequirement) -> None:
+        self._requirement = requirement
+        self.received_arguments: Mapping[str, Any] | None = None
+
+    async def resolve(
+        self, *, diagnostic: Any, arguments: Mapping[str, Any]
+    ) -> InputRequirement | None:
+        assert diagnostic is None, "业务输入需求不应携带 SchemaDiagnostic"
+        self.received_arguments = arguments
+        return self._requirement
 
 
 class ListingResourceResolver:
@@ -309,6 +332,23 @@ class AutoModeResolver:
         return ExecutionModeDecision(mode="AUTO")
 
 
+class RevisionedPolicy:
+    """业务策略替身:允许执行,并携带一个业务策略修订号。"""
+
+    def __init__(self, revision: int) -> None:
+        self.revision = revision
+
+    async def evaluate(
+        self,
+        *,
+        stable_key: str,
+        arguments: Mapping[str, Any],
+        resources: frozenset[tuple[str, str]],
+    ) -> PolicyDecision:
+        del stable_key, arguments, resources
+        return PolicyDecision(allowed=True, policy_revision=self.revision)
+
+
 class StaticConfirmationLookup:
     """已接受 Confirmation 查询回调替身。"""
 
@@ -316,11 +356,19 @@ class StaticConfirmationLookup:
         self.accepted = accepted
         self.requested: dict[str, Any] = {}
 
-    async def __call__(self, *, tool_call_id: UUID, stable_key: str, actor_id: UUID) -> bool:
+    async def __call__(
+        self,
+        *,
+        tool_call_id: UUID,
+        stable_key: str,
+        actor_id: UUID,
+        policy_version: int | None,
+    ) -> bool:
         self.requested = {
             "tool_call_id": tool_call_id,
             "stable_key": stable_key,
             "actor_id": actor_id,
+            "policy_version": policy_version,
         }
         return self.accepted
 
@@ -498,6 +546,33 @@ async def test_missing_business_fields_require_input_with_diagnostic() -> None:
     assert decision.detail["field_paths"] == ("store_id",)
 
 
+async def test_business_input_requirement_without_diagnostic_requires_input() -> None:
+    """Schema 无诊断时,业务层仍可按规范化参数要求补充执行前提字段。
+
+    ``location_ref`` 这类字段在 Schema 中可选:缺省不会产生任何 SchemaDiagnostic,
+    但多位置店铺下它是执行前提。管线必须在无诊断时也咨询业务层,否则该需求
+    永远不会变成 REQUIRE_INPUT。
+    """
+    resolver = BusinessInputRequirementResolver(
+        InputRequirement(
+            field_paths=("location_ref",),
+            question="请选择要操作的位置",
+            options={"location_ref": ({"value": "默认仓", "label": "默认仓"},)},
+        )
+    )
+    business_pipeline = make_pipeline(input_requirement_resolver=resolver)
+
+    decision = await business_pipeline.evaluate(valid_tool_call())
+
+    assert decision.kind == "REQUIRE_INPUT"
+    assert decision.schema_diagnostic is None
+    assert decision.input_requirement is not None
+    assert decision.input_requirement.field_paths == ("location_ref",)
+    # 无诊断时 detail 的 field_paths 取自 InputRequirement 本身。
+    assert decision.detail["field_paths"] == ("location_ref",)
+    assert resolver.received_arguments == {"query": "running shoes"}
+
+
 # ---------------------------------------------------------------------------
 # 授权两阶段 / 业务策略
 # ---------------------------------------------------------------------------
@@ -560,6 +635,31 @@ async def test_write_with_accepted_confirmation_allows() -> None:
     assert decision.kind == "ALLOW"
     assert lookup.requested["stable_key"] == "listing.publish"
     assert lookup.requested["actor_id"] is not None
+
+
+async def test_confirmation_spec_carries_current_policy_revision() -> None:
+    """当前策略修订号进入 ConfirmationSpec,确认因此绑定"当时那一版规则"。"""
+    confirming_pipeline = make_pipeline(
+        authorization_resource_resolver=ListingResourceResolver(),
+        business_policy=RevisionedPolicy(revision=7),
+    )
+    decision = await confirming_pipeline.evaluate(write_tool_call())
+    assert decision.kind == "REQUIRE_CONFIRMATION"
+    assert decision.confirmation_spec is not None
+    assert decision.confirmation_spec.policy_version == 7
+
+
+async def test_lookup_receives_current_policy_revision() -> None:
+    """查询已接受确认时必须带上当前修订号,供指纹重算判定旧确认是否失效。"""
+    lookup = StaticConfirmationLookup(accepted=True)
+    confirming_pipeline = make_pipeline(
+        authorization_resource_resolver=ListingResourceResolver(),
+        business_policy=RevisionedPolicy(revision=9),
+        accepted_confirmation_lookup=lookup,
+    )
+    decision = await confirming_pipeline.evaluate(write_tool_call())
+    assert decision.kind == "ALLOW"
+    assert lookup.requested["policy_version"] == 9
 
 
 async def test_execution_mode_auto_skips_confirmation() -> None:

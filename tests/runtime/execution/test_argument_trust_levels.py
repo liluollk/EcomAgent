@@ -121,13 +121,22 @@ class _StubProvenanceResolver:
 
 
 class _RecordingRequirementResolver:
-    """把诊断转成 InputRequirement,并记录收到的诊断。"""
+    """把诊断转成 InputRequirement,并记录收到的诊断。
+
+    ``diagnostic`` 为 ``None`` 表示管线在无 Schema 诊断时咨询业务层;本替身只
+    实现诊断驱动路径,因此返回 ``None``(不产生业务输入需求)。
+    """
 
     def __init__(self) -> None:
         self.received: Any = None
 
-    async def resolve(self, *, diagnostic: Any) -> InputRequirement | None:
+    async def resolve(
+        self, *, diagnostic: Any, arguments: Any
+    ) -> InputRequirement | None:
+        del arguments
         self.received = diagnostic
+        if diagnostic is None:
+            return None
         return InputRequirement(
             field_paths=diagnostic.field_paths, question="补充关键参数"
         )
@@ -161,20 +170,20 @@ def _profile_with(
 def _pipeline(profile: PreToolProfile) -> PreToolUsePipeline:
     definition = _definition()
     registry = ToolRegistry()
-    registry.register(
-        ToolVersionRecord(
-            stable_key=definition.stable_key,
-            version_id=uuid4(),
-            version=definition.version,
-            source_kind="LOCAL",
-            effect=definition.effect,
-            input_schema=definition.input_json_schema,
-            output_schema=definition.output_json_schema,
-            schema_hash=definition.schema_hash,
-            required_permissions=definition.required_permissions,
-        )
+    record = ToolVersionRecord(
+        stable_key=definition.stable_key,
+        version_id=uuid4(),
+        version=definition.version,
+        source_kind="LOCAL",
+        effect=definition.effect,
+        input_schema=definition.input_json_schema,
+        output_schema=definition.output_json_schema,
+        schema_hash=definition.schema_hash,
+        required_permissions=definition.required_permissions,
     )
+    registry.register(record, make_current=True)
     registry.bind(
+        record.version_id,
         ToolBinding(
             definition=definition,
             handler=object(),

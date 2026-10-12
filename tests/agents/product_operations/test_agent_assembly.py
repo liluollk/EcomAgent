@@ -72,7 +72,7 @@ async def test_product_and_runtime_tools_are_registered(
         if key == LOAD_SKILL_KEY:
             expected_version = 1
         assert record.version == expected_version
-        assert assembly.tools.bindings_for(key), f"tool {key} 缺少 ToolBinding"
+        assert assembly.tools.binding_for_key(key), f"tool {key} 缺少 ToolBinding"
 
     update_price = registered[STABLE_KEY_UPDATE_PRICE]
     assert update_price.effect == ToolEffect.WRITE
@@ -101,6 +101,7 @@ def test_agent_definition_carries_reference_loop_limits() -> None:
         "run_deadline_seconds": 3600,
         "backend_retries": 1,
         "reconcile_budget": 3,
+        "write_retry_budget": 1,
     }
 
 
@@ -141,7 +142,7 @@ async def test_agent_prompt_and_skill_do_not_leak_policy_numbers(
     product_application,
 ) -> None:
     """Prompt/Skill 不复制代码 Policy 数字(最低允许价、变动阈值、种子现价)。"""
-    config = product_application.price_config
+    config = product_application.pricing_policy.config
     forbidden_numbers = (
         str(config.min_allowed_price),
         str(config.max_price_change),

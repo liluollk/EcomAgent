@@ -9,7 +9,7 @@ import pytest
 
 from agents.product_operations.agent import PRODUCT_AGENT_DEFINITION
 from agents.product_operations.skill import PRODUCT_MAINTENANCE_SKILL
-from composition.product_operations import _tool_definitions
+from composition.provisioning.product_operations import product_tool_definitions
 from runtime.access.actor import ActorContext
 from runtime.access.authorization import Authorizer
 from runtime.capabilities.registry import (
@@ -72,7 +72,7 @@ def test_product_agent_declares_loadable_skill_metadata() -> None:
 
 def test_product_composition_registers_the_runtime_load_skill_tool() -> None:
     module = importlib.import_module("runtime.capabilities.skill_activation")
-    definitions = dict(_tool_definitions())
+    definitions = dict(product_tool_definitions())
 
     assert definitions[module.LOAD_SKILL_KEY] == module.LOAD_SKILL_DEFINITION
 
@@ -81,28 +81,28 @@ async def test_load_skill_skips_product_argument_normalization() -> None:
     module = importlib.import_module("runtime.capabilities.skill_activation")
     definition = module.LOAD_SKILL_DEFINITION
     registry = ToolRegistry()
-    registry.register(
-        ToolVersionRecord(
-            stable_key=definition.stable_key,
-            version_id=uuid.uuid4(),
-            version=definition.version,
-            workspace_id=None,
-            source_kind="LOCAL",
-            effect=definition.effect,
-            input_schema=definition.input_json_schema,
-            output_schema=definition.output_json_schema,
-            schema_hash=definition.schema_hash,
-            required_permissions=definition.required_permissions,
-        )
+    record = ToolVersionRecord(
+        stable_key=definition.stable_key,
+        version_id=uuid.uuid4(),
+        version=definition.version,
+        workspace_id=None,
+        source_kind="LOCAL",
+        effect=definition.effect,
+        input_schema=definition.input_json_schema,
+        output_schema=definition.output_json_schema,
+        schema_hash=definition.schema_hash,
+        required_permissions=definition.required_permissions,
     )
+    registry.register(record, make_current=True)
     # load_skill 是 Runtime 内置 Tool:绑定 Runtime 控制 Profile,
     # 不带任何商品业务扩展(归一化 / 来源 / 策略均为显式空实现)。
     registry.bind(
+        record.version_id,
         ToolBinding(
             definition=definition,
             handler=module.LOAD_SKILL_HANDLER,
             pretool_registration=runtime_control_registration(),
-        )
+        ),
     )
 
     actor = ActorContext(

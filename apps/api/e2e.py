@@ -6,9 +6,9 @@
   授予 ``product.read``/``product.price.write`` 与 store ALL 范围);
 - 工作区 ``品牌一``,店铺 ``淘宝旗舰店``(别名同名),商品 ``SKU-001``,
   Listing 初始价 128.00 CNY;
-- 能力版本(Agent/Skill/Tool/Model Connection)复用
-  :func:`apps.worker.assembly._bootstrap_capabilities`(幂等,与 Worker
-  组合根共用同一份稳定 Key);
+- 能力版本(Agent/Skill/Tool/Model Connection)经
+  :class:`~composition.provisioning.product_operations.ProductOperationsProvisioner`
+  幂等发布(与 Worker 组合根共用同一份稳定 Key);
 - 重复调用返回同一套标识,并把 Listing 价格复位到 128.00、清空该工作区
   上一次验证遗留的Runtime 执行数据(sessions/runs/messages/events/requests/
   tool_calls/operations),保证每次 E2E 从确定状态开始。
@@ -32,12 +32,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
 from apps.api.dependencies import SessionDep
-from apps.worker.assembly import _bootstrap_capabilities
+from composition.provisioning.product_operations import (
+    ModelConnectionProvisioningSpec,
+    ProductOperationsProvisioner,
+)
 from runtime.access.passwords import hash_password
 from runtime.persistence.base import (
     AccountStatus,
     ExecutionMode,
     MembershipRole,
+    ModelBackendType,
     ResourceScopeMode,
 )
 from runtime.persistence.models.configuration import WorkspaceAgentBinding
@@ -61,6 +65,15 @@ E2E_SKU: Final = "SKU-001"
 E2E_INITIAL_PRICE: Final = Decimal("128.00")
 E2E_COST_PRICE: Final = Decimal("88.00")
 E2E_CURRENCY: Final = "CNY"
+
+E2E_MODEL_SPEC: Final = ModelConnectionProvisioningSpec(
+    stable_key="product-scripted",
+    backend_type=ModelBackendType.OPENAI,
+    base_url="https://scripted.model.invalid/v1",
+    model="product-scripted",
+    non_secret_options={},
+)
+"""E2E 发布的确定性脚本模型规范(仅本地/CI 端到端验证使用)。"""
 
 
 class E2ESeedView(BaseModel):
@@ -147,9 +160,11 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
     else:
         membership, workspace = membership_row
 
-    # 身份/工作区先提交(引导能力用独立连接读取它们)。
+    # 身份/工作区先提交(发布能力用独立连接读取它们)。
     await session.commit()
-    capability = await _bootstrap_capabilities(engine, workspace.id)
+    capabilities = await ProductOperationsProvisioner(
+        lambda: AsyncSession(engine, expire_on_commit=False)
+    ).provision(workspace_id=workspace.id, model=E2E_MODEL_SPEC)
 
     # 复位 Runtime 执行遗留数据与商品域种子(幂等;独立短事务提交)。
     seed_session = AsyncSession(engine, expire_on_commit=False)
@@ -161,7 +176,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
                     select(WorkspaceAgentBinding).where(
                         WorkspaceAgentBinding.workspace_id == workspace.id,
                         WorkspaceAgentBinding.agent_version_id
-                        == capability["agent_version_id"],
+                        == capabilities.agent_version_id,
                     )
                 )
             ).one_or_none()
@@ -170,7 +185,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
                     WorkspaceAgentBinding(
                         id=uuid.uuid4(),
                         workspace_id=workspace.id,
-                        agent_version_id=capability["agent_version_id"],
+                        agent_version_id=capabilities.agent_version_id,
                         enabled=True,
                     )
                 )
@@ -245,7 +260,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
             return E2ESeedView(
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
-                agent_id=capability["agent_id"],
+                agent_id=capabilities.agent_id,
                 store_id=store.id,
                 store_name=store.name,
                 sku=E2E_SKU,

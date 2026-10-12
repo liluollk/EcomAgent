@@ -27,6 +27,7 @@ from runtime.backend.protocol import (
 from runtime.persistence.base import (
     ExecutionMode,
     MembershipRole,
+    ModelBackendType,
     ResourceScopeMode,
 )
 from runtime.persistence.models.identity import (
@@ -54,6 +55,28 @@ from apps.worker.assembly import (
     ProductApplication,
     build_product_application,
 )
+from composition.provisioning.product_operations import (
+    ModelConnectionProvisioningSpec,
+    ProductOperationsProvisioner,
+)
+
+
+_PRODUCT_MODEL_SPEC: Final = ModelConnectionProvisioningSpec(
+    stable_key="product-scripted",
+    backend_type=ModelBackendType.OPENAI,
+    base_url="https://scripted.model.invalid/v1",
+    model="product-scripted",
+    non_secret_options={},
+)
+"""测试夹具显式发布的确定性脚本模型规范(装配只消费已发布快照)。"""
+
+PRODUCT_PRICE_POLICY: Final = PricePolicyConfig(
+    policy_version="price-policy-v1",
+    currency="CNY",
+    min_allowed_price=Decimal("50.00"),
+    max_price_change=Decimal("100.00"),
+)
+"""夹具显式发布的价格规则:装配期只能从已发布行读到它,不再由调用方直接注入。"""
 
 
 @pytest.fixture()
@@ -127,7 +150,7 @@ class ScriptedAgentBackend:
 class ProductApplicationIds:
     """product_application 夹具的已提交种子标识(身份 + 商品域 + 组装能力)。
 
-    组装能力标识由 ``build_product_application`` 落库后经 ``replace`` 补全;
+    组装能力标识由发布快照经 ``replace`` 补全;
     清理时跳过仍为 ``None`` 的项。
     """
 
@@ -234,14 +257,18 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM sessions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM model_config_versions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM model_connections WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM product_operations.inventory_levels WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.price_locks WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.listings WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM product_operations.fulfillment_locations WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.products WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.stores WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_permissions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_resource_scopes WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_resource_scope_modes WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM workspace_memberships WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM business_policy_versions WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM business_policies WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM users WHERE id = :user", "user"),
     ("DELETE FROM workspaces WHERE id = :ws", "ws"),
 )
@@ -303,18 +330,20 @@ async def product_application(
     """组装完整 Runtime 的商品改价闭环夹具(真库 + 确定性脚本模型)。"""
     ids = await _seed_committed_environment(engine)
     backend = ScriptedAgentBackend()
+    capabilities = await ProductOperationsProvisioner(
+        lambda: AsyncSession(engine, expire_on_commit=False)
+    ).provision(
+        workspace_id=ids.workspace_id,
+        model=_PRODUCT_MODEL_SPEC,
+        pricing_policy=PRODUCT_PRICE_POLICY,
+    )
     application = await build_product_application(
         engine,
+        capabilities=capabilities,
         backend=backend,
         workspace_id=ids.workspace_id,
         actor_id=ids.user_id,
         membership_id=ids.membership_id,
-        price_config=PricePolicyConfig(
-            policy_version="price-policy-v1",
-            currency="CNY",
-            min_allowed_price=Decimal("50.00"),
-            max_price_change=Decimal("100.00"),
-        ),
         worker_id=f"product-worker-{uuid.uuid4()}",
         commerce_adapter=commerce_adapter_for_application,
         adapter_key=(
@@ -348,19 +377,26 @@ def rebuild_product_application(
 ):
     """按同一组合能力重建 ProductApplication(模拟进程重启后的新实例)。
 
-    复用 ``product_application`` 已提交的种子标识与价格配置;调用方负责
-    ``aclose`` 新建实例。
+    复用 ``product_application`` 已提交的种子标识;价格规则来自同一份已发布策略
+    (重新发布是幂等的),调用方负责 ``aclose`` 新建实例。
     """
     ids = product_application.seed_ids
 
     async def _rebuild() -> ProductApplication:
+        capabilities = await ProductOperationsProvisioner(
+            lambda: AsyncSession(engine, expire_on_commit=False)
+        ).provision(
+            workspace_id=ids.workspace_id,
+            model=_PRODUCT_MODEL_SPEC,
+            pricing_policy=PRODUCT_PRICE_POLICY,
+        )
         return await build_product_application(
             engine,
+            capabilities=capabilities,
             backend=ScriptedAgentBackend(),
             workspace_id=ids.workspace_id,
             actor_id=ids.user_id,
             membership_id=ids.membership_id,
-            price_config=product_application.price_config,
             worker_id=f"product-worker-{uuid.uuid4()}",
             commerce_adapter=commerce_adapter_for_application,
             adapter_key=(

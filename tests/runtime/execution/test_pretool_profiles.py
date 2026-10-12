@@ -198,21 +198,21 @@ def _actor() -> ActorContext:
 def _registry_with_unregistered_binding() -> ToolRegistry:
     registry = ToolRegistry()
     definition = _definition("listing.search", ToolEffect.READ)
-    registry.register(
-        ToolVersionRecord(
-            stable_key=definition.stable_key,
-            version_id=uuid4(),
-            version=definition.version,
-            source_kind="LOCAL",
-            effect=definition.effect,
-            input_schema=definition.input_json_schema,
-            output_schema=definition.output_json_schema,
-            schema_hash=definition.schema_hash,
-            required_permissions=definition.required_permissions,
-        )
+    record = ToolVersionRecord(
+        stable_key=definition.stable_key,
+        version_id=uuid4(),
+        version=definition.version,
+        source_kind="LOCAL",
+        effect=definition.effect,
+        input_schema=definition.input_json_schema,
+        output_schema=definition.output_json_schema,
+        schema_hash=definition.schema_hash,
+        required_permissions=definition.required_permissions,
     )
+    registry.register(record, make_current=True)
     # 模拟历史/异常绑定:绕过必填字段校验,不注册任何 PreToolProfile。
     registry.bind(
+        record.version_id,
         ToolBinding.model_construct(
             definition=definition,
             handler=object(),

@@ -241,7 +241,11 @@ async def uncertain_write(
 def reconciliation_service(
     db_session: AsyncSession, seeded_workspace, uncertain_write: UncertainWrite
 ) -> ReconciliationService:
-    """绑定 uncertain_write 的 ReconciliationService(回查预算 3,容纳两次预算内 UNKNOWN)。"""
+    """绑定 uncertain_write 的 ReconciliationService(回查预算 3、写入重试预算 1)。
+
+    回查预算 3 容纳两次预算内 UNKNOWN;写入重试预算 1 表示该 Operation 只允许
+    一次 EXECUTE,达到后 NOT_APPLIED 不再重排。
+    """
     return ReconciliationService(
         db_session,
         workspace_id=seeded_workspace.workspace.id,
@@ -251,6 +255,7 @@ def reconciliation_service(
         lease_token=uncertain_write.lease_token,
         expected_state_version=uncertain_write.state_version,
         reconcile_budget=3,
+        write_retry_budget=1,
     )
 
 
