@@ -340,3 +340,34 @@ async def product_application(
     finally:
         await application.aclose()
         await _cleanup_committed_environment(engine, ids)
+
+
+@pytest.fixture()
+def rebuild_product_application(
+    engine: AsyncEngine, product_application, commerce_adapter_for_application
+):
+    """按同一组合能力重建 ProductApplication(模拟进程重启后的新实例)。
+
+    复用 ``product_application`` 已提交的种子标识与价格配置;调用方负责
+    ``aclose`` 新建实例。
+    """
+    ids = product_application.seed_ids
+
+    async def _rebuild() -> ProductApplication:
+        return await build_product_application(
+            engine,
+            backend=ScriptedAgentBackend(),
+            workspace_id=ids.workspace_id,
+            actor_id=ids.user_id,
+            membership_id=ids.membership_id,
+            price_config=product_application.price_config,
+            worker_id=f"product-worker-{uuid.uuid4()}",
+            commerce_adapter=commerce_adapter_for_application,
+            adapter_key=(
+                "rest-commerce"
+                if commerce_adapter_for_application is not None
+                else "mock-commerce"
+            ),
+        )
+
+    return _rebuild

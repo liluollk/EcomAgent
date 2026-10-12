@@ -21,6 +21,10 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from agents.product_operations.persistence.models import Listing
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
 
@@ -226,6 +230,63 @@ async def test_duplicate_submit_with_same_operation_id_is_idempotent(
         await product_application.authoritative_price(store_id, "SKU-001")
         == Decimal("99.00")
     )
+
+
+async def test_listing_version_conflict_after_restart(
+    product_application,
+    rebuild_product_application,
+    engine: AsyncEngine,
+) -> None:
+    """重启后确认:持久化的资源版本与当前 Listing.version 不一致 → 执行前拒绝。
+
+    旧的进程内版本字典在重启后为空,无法发现这类冲突;本用例锁定"资源版本
+    随确认请求持久化、重启后仍可比对"的行为。
+    """
+    ids = product_application.seed_ids
+    store_id = str(ids.store_id)
+    product_application.scripted_backend.set_rounds(
+        [_update_price_round(store_id, "SKU-001", 99)]
+    )
+
+    run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
+    assert run.status == RunStatus.WAITING_CONFIRMATION
+    confirmation_id = run.pending_confirmation_id
+    assert confirmation_id is not None
+
+    # 模拟进程重启:关闭旧组合根;确认等待期间 Listing 被其他路径修改。
+    await product_application.aclose()
+    await _bump_listing_version(engine, ids.listing_id)
+
+    rebuilt = await rebuild_product_application()
+    try:
+        run = await rebuilt.confirm(confirmation_id)
+        snapshot = await rebuilt.tool_call_snapshot(run.run_id)
+    finally:
+        await rebuilt.aclose()
+
+    assert run.status == RunStatus.COMPLETED
+    assert snapshot is not None
+    assert snapshot.status == "DENIED"
+    assert snapshot.failure_code == "LISTING_VERSION_CONFLICT"
+    # 拒绝发生在外部写入前:权威价格仍是种子值。
+    assert (
+        await product_application.authoritative_price(store_id, "SKU-001")
+        == Decimal("128.00")
+    )
+
+
+async def _bump_listing_version(engine: AsyncEngine, listing_id: uuid.UUID) -> None:
+    """模拟外部修改:直接在已提交事务中推进 Listing 版本号。"""
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        async with session.begin():
+            await session.execute(
+                sa.update(Listing)
+                .where(Listing.id == listing_id)
+                .values(version=Listing.version + 1)
+            )
+    finally:
+        await session.close()
 
 
 def _update_price_round(store_id: str | None, sku: str, price: int) -> list:
