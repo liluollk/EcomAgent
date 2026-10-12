@@ -1,6 +1,6 @@
 """商品读 Tool 的独立执行端点(计划 04 Task 6;架构文档 §4.1)。
 
-每个读 Tool 一个 Handler:只接受自己 Tool 的参数,不再按 ``stable_key`` 做
+每个读 Tool 一个 Handler:只接受自己 Tool 的参数,不做跨 Tool 的运行时
 if/elif 分发。三者共享 ``session_factory`` 与请求级 Actor 构造方式,但不共享
 dispatcher——新增读 Tool 只需新增一个 Handler,不改动既有分支。
 """
