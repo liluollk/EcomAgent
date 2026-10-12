@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
-**Goal:** 在不增加新业务场景的前提下，把 PreToolUse 扩展和写执行元数据从商品级/Runtime 级全局配置收敛到单个 ToolBinding，并保持既有改价、确认与恢复行为。
+**Goal:** 在不增加新业务场景的前提下，把 PreToolUse 扩展和写执行元数据收敛到单个 ToolBinding，接通 Agent 版本配置，并保持既有改价、确认与恢复行为。
 
-**Architecture:** 固定 PreToolUse 阶段顺序仍由 Runtime 管理，每个 ToolBinding 提供自己的 PreToolProfile。写执行元数据先静态绑定到具体写 Tool，Runtime 和 AgentLoop 不再持有全局 adapter_key；P1/P2 再在这一接缝上增加库存、上下架和按店铺动态路由。
+**Architecture:** 固定 PreToolUse 阶段顺序仍由 Runtime 管理，每个 ToolBinding 提供自己的 PreToolProfile。写执行元数据先静态绑定到具体写 Tool，Runtime 和 AgentLoop 不再持有全局 adapter_key；ArgumentTrustLevel 由 Runtime 统一定义，业务只负责证据判定；P1/P2 再增加库存、上下架和按店铺动态路由。Provisioning 与 Composition 的分离由兄弟 P0 计划独立实施。
 
 **Tech Stack:** Python 3.12、Pydantic、SQLAlchemy Async、PostgreSQL、pytest、pytest-asyncio、Ruff、mypy
 
@@ -19,7 +19,11 @@
 - 不修改 ADR-001 已接受但尚未实施的 Skill 模型；
 - 不修改真实模型评测结果和简历正文；
 - 不删除现有持久化 stable_key；
+- 不开放或重排 PreToolUse 固定安全阶段；
+- 不扩张 ToolEffect 的 READ/WRITE 语义；
 - 每个提交必须保持现有数据库迁移测试和改价闭环可运行。
+
+能力发布与应用装配分离属于独立子项目，见 docs/superpowers/plans/2026-10-12-product-operations-provisioning-p0.md；两个 P0 计划均完成后，ADR-002 才能标记 P0 已实施。
 
 ## 文件结构
 
@@ -27,10 +31,12 @@
 
 - runtime/execution/pretool/profiles.py：PreToolProfile、显式空实现和启动校验。
 - runtime/execution/bindings.py：ToolExecutionProfile 写执行值对象。
+- runtime/execution/pretool/provenance.py：ArgumentTrustLevel 唯一类型来源。
 - agents/product_operations/input/profiles.py：商品各 Tool 的 PreToolProfile 工厂。
 - agents/product_operations/tools/handlers.py：独立读 Tool Handler。
 - agents/product_operations/policy/price_pretool.py：改价 PreToolUse 业务策略。
 - tests/runtime/execution/test_pretool_profiles.py：Runtime 层 Profile 校验测试。
+- tests/runtime/execution/test_argument_provenance.py：通用可信等级和 fail-closed 测试。
 - tests/agents/product_operations/test_tool_profiles.py：商品 Tool 参数、资源和策略绑定测试。
 
 **修改：**
@@ -42,6 +48,10 @@
 - composition/product_operations.py：显式注册每个 Tool 的 Handler/Profile，移除读 Tool 分发和全局 Adapter 配置。
 - agents/product_operations/input/normalizer.py：从固定价格字段白名单改成实例化字段集合。
 - agents/product_operations/input/requirements.py：ProductPreToolNormalizer 接收当前 Tool 的字段集合。
+- agents/product_operations/input/provenance.py：复用 Runtime ArgumentTrustLevel，保留商品证据判定。
+- agents/product_operations/agent.py：声明 loop_limits 的唯一配置值。
+- runtime/memory/service.py：清理 price_rule 商品领域名称。
+- tests/runtime/memory/test_memory_policy.py：通用执行关键事实和旧名称拒绝测试。
 - tests/runtime/orchestration/test_agent_loop.py：按 ToolPin 注入写执行 Profile。
 - tests/runtime/integration/test_crash_recovery.py：按 ToolPin 注入写执行 Profile。
 - tests/agents/product_operations/test_read_tools.py：通过真实 Runtime 路径验证 query/store_ids 未丢失。
@@ -181,7 +191,8 @@ class PreToolProfileFactory(Protocol):
     async def create(
         self,
         context: PreToolProfileContext,
-    ) -> PreToolProfile: ...
+    ) -> PreToolProfile:
+        raise NotImplementedError
 ```
 
 - [ ] **Step 4: 扩展 ToolBinding**
@@ -369,7 +380,8 @@ _ScopedProductPipeline 只构造 Runtime 依赖与本次 actor/context。商品 
 
 ```python
 class PreToolProfileFactory(Protocol):
-    async def create(self, context: PreToolProfileContext) -> PreToolProfile: ...
+    async def create(self, context: PreToolProfileContext) -> PreToolProfile:
+        raise NotImplementedError
 ```
 
 启动期校验只读取 PreToolProfileRegistration.policy_mode 和 resource_mode；运行期 factory 才能读取请求级 Session、Actor 和 ToolCall。不得在 ToolBinding 中保存长生命周期数据库 Session。
@@ -462,13 +474,16 @@ _handle_require_confirmation 创建 PREPARED Operation 和 _execute_write 创建
 
 - [ ] **Step 6: ToolExecutor 接收 Profile 值对象**
 
+在现有 ToolExecutor.__init__ 参数列表中删除 adapter_key、supports_native_idempotency、supports_reconciliation，加入：
+
 ```python
-def __init__(
-    self,
-    ...,
-    execution_profile: ToolExecutionProfile,
-) -> None:
-    self._execution_profile = execution_profile
+execution_profile: ToolExecutionProfile
+```
+
+构造函数内部保存：
+
+```python
+self._execution_profile = execution_profile
 ```
 
 OperationService.begin 使用 Profile 中的字段。
@@ -502,9 +517,21 @@ git commit -m "refactor: scope write execution profile to tool"
 
 ```python
 handlers = (
-    SearchProductsHandler(...),
-    GetProductSnapshotHandler(...),
-    CompareListingPricesHandler(...),
+    SearchProductsHandler(
+        session_factory=session_factory,
+        workspace_id=ids.workspace_id,
+        actor_id=ids.actor_id,
+    ),
+    GetProductSnapshotHandler(
+        session_factory=session_factory,
+        workspace_id=ids.workspace_id,
+        actor_id=ids.actor_id,
+    ),
+    CompareListingPricesHandler(
+        session_factory=session_factory,
+        workspace_id=ids.workspace_id,
+        actor_id=ids.actor_id,
+    ),
 )
 
 for handler in handlers:
@@ -523,15 +550,42 @@ for handler in handlers:
 
 它们共享 SessionFactory 和 ActorContextFactory，但不共享 if/elif dispatcher。
 
+三个 Handler 的构造签名统一为：
+
+```python
+def __init__(
+    self,
+    *,
+    session_factory: Callable[[], AsyncSession],
+    workspace_id: UUID,
+    actor_id: UUID,
+) -> None:
+    self._session_factory = session_factory
+    self._workspace_id = workspace_id
+    self._actor_id = actor_id
+```
+
 - [ ] **Step 3: 从组合根删除 _ProductReadToolHandler 和 _store_ids_of**
 
 注册表改为显式映射：
 
 ```python
 handlers = {
-    SEARCH_PRODUCTS_DEFINITION.stable_key: SearchProductsHandler(...),
-    GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key: GetProductSnapshotHandler(...),
-    COMPARE_LISTING_PRICES_DEFINITION.stable_key: CompareListingPricesHandler(...),
+    SEARCH_PRODUCTS_DEFINITION.stable_key: SearchProductsHandler(
+        session_factory=session_factory,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+    ),
+    GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key: GetProductSnapshotHandler(
+        session_factory=session_factory,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+    ),
+    COMPARE_LISTING_PRICES_DEFINITION.stable_key: CompareListingPricesHandler(
+        session_factory=session_factory,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+    ),
     UPDATE_PRICE_DEFINITION.stable_key: write_handler,
 }
 ```
@@ -617,7 +671,221 @@ git add agents/product_operations/policy/price_pretool.py composition/product_op
 git commit -m "fix: persist confirmed listing version"
 ```
 
-### Task 8: 架构回归与 P0 收口
+### Task 8: 收敛 ArgumentTrustLevel 的唯一类型来源
+
+**Files:**
+
+- Create: runtime/execution/pretool/provenance.py
+- Modify: runtime/execution/pretool/decisions.py
+- Modify: runtime/execution/pretool/pipeline.py
+- Modify: agents/product_operations/input/provenance.py
+- Modify: composition/product_operations.py
+- Create: tests/runtime/execution/test_argument_provenance.py
+- Modify: tests/agents/product_operations/test_argument_provenance.py
+
+- [ ] **Step 1: 编写类型唯一性与 fail-closed 失败测试**
+
+覆盖：
+
+1. Runtime 的 ArgumentProvenance.field_sources 只接受 ArgumentTrustLevel；
+2. 商品 resolver 返回 Runtime 枚举，不再返回业务模块自定义枚举；
+3. 写操作关键字段未声明来源时按 UNTRUSTED 处理；
+4. 字符串拼写错误不能绕过来源守卫。
+
+```python
+def test_unknown_trust_level_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ArgumentProvenance(
+            field_sources={"store_id": "TRUSTED_BY_MODEL"}
+        )
+```
+
+- [ ] **Step 2: 运行测试并确认失败**
+
+Run:
+
+```powershell
+pytest tests/runtime/execution/test_argument_provenance.py tests/agents/product_operations/test_argument_provenance.py -q
+```
+
+Expected: FAIL，因为 Runtime 仍接受任意字符串，商品模块仍定义同名枚举。
+
+- [ ] **Step 3: 定义 Runtime 唯一枚举**
+
+```python
+class ArgumentTrustLevel(str, Enum):
+    USER_EXPLICIT = "USER_EXPLICIT"
+    USER_CONFIRMED = "USER_CONFIRMED"
+    SYSTEM_RESOLVED = "SYSTEM_RESOLVED"
+    DETERMINISTIC_DERIVED = "DETERMINISTIC_DERIVED"
+    UNTRUSTED = "UNTRUSTED"
+```
+
+ArgumentProvenance.field_sources 改成 Mapping[str, ArgumentTrustLevel]。删除 agents/product_operations/input/provenance.py 中重复的 ArgumentProvenance 枚举，只保留商品字段证据解析。
+
+- [ ] **Step 4: 用枚举替代字符串守卫**
+
+composition 中的 _UNTRUSTED_SOURCE 字符串常量删除，所有判断使用：
+
+```python
+source is ArgumentTrustLevel.UNTRUSTED
+```
+
+未出现在 field_sources 中的写操作关键字段必须按 UNTRUSTED 处理。
+
+- [ ] **Step 5: 运行测试**
+
+Run:
+
+```powershell
+pytest tests/runtime/execution/test_argument_provenance.py tests/agents/product_operations/test_argument_provenance.py tests/agents/product_operations/test_safety_matrix.py -q
+```
+
+Expected: PASS。
+
+- [ ] **Step 6: 提交**
+
+```powershell
+git add runtime/execution/pretool/provenance.py runtime/execution/pretool/decisions.py runtime/execution/pretool/pipeline.py agents/product_operations/input/provenance.py composition/product_operations.py tests/runtime/execution/test_argument_provenance.py tests/agents/product_operations/test_argument_provenance.py
+git commit -m "refactor: centralize argument trust levels"
+```
+
+### Task 9: 接通 AgentDefinition.loop_limits
+
+**Files:**
+
+- Modify: agents/product_operations/agent.py
+- Modify: composition/product_operations.py
+- Modify: tests/agents/product_operations/test_agent_assembly.py
+- Modify: tests/runtime/orchestration/test_limits.py
+
+- [ ] **Step 1: 编写装配路径失败测试**
+
+测试修改 PRODUCT_AGENT_DEFINITION.loop_limits 后，ProductApplication 使用的 max_model_rounds、max_tool_calls 和 reconcile_budget 随定义变化，而不是继续使用模块级 _LIMITS。
+
+```python
+assert application.run_limits == RunLimits.from_definition(
+    PRODUCT_AGENT_DEFINITION.loop_limits
+)
+```
+
+- [ ] **Step 2: 运行测试并确认失败**
+
+Run:
+
+```powershell
+pytest tests/agents/product_operations/test_agent_assembly.py tests/runtime/orchestration/test_limits.py -q
+```
+
+Expected: FAIL，因为组合根仍直接使用 _LIMITS。
+
+- [ ] **Step 3: 把当前限制写入 AgentDefinition**
+
+为保持行为不变，先把当前值迁入版本化定义：
+
+```python
+loop_limits={
+    "max_model_rounds": 8,
+    "max_tool_calls": 8,
+    "tool_timeout_seconds": 60,
+    "run_deadline_seconds": 3600,
+    "backend_retries": 1,
+    "reconcile_budget": 3,
+}
+```
+
+每个值必须附注释说明它是当前参考 Agent 的保守运行上限，不是 Runtime 全局默认值。
+
+- [ ] **Step 4: 组合根从定义构造 RunLimits**
+
+```python
+run_limits = RunLimits.from_definition(
+    PRODUCT_AGENT_DEFINITION.loop_limits
+)
+```
+
+ProductApplication 保存 self._run_limits，Runtime 构造和 reconciliation budget 都使用同一实例，删除 _LIMITS。
+
+- [ ] **Step 5: 运行测试**
+
+Run:
+
+```powershell
+pytest tests/agents/product_operations/test_agent_assembly.py tests/runtime/orchestration/test_limits.py tests/agents/product_operations/test_price_flow.py -q
+```
+
+Expected: PASS，既有运行限制行为不变。
+
+- [ ] **Step 6: 提交**
+
+```powershell
+git add agents/product_operations/agent.py composition/product_operations.py tests/agents/product_operations/test_agent_assembly.py tests/runtime/orchestration/test_limits.py
+git commit -m "fix: wire agent loop limits into composition"
+```
+
+### Task 10: 清理 Runtime Memory 的商品领域名称
+
+**Files:**
+
+- Modify: runtime/memory/service.py
+- Modify: tests/runtime/memory/conftest.py
+- Modify: tests/runtime/memory/test_memory_policy.py
+
+- [ ] **Step 1: 编写通用名称和旧名称拒绝测试**
+
+```python
+@pytest.mark.parametrize(
+    "kind",
+    ("permission", "resource_scope", "business_rule", "credential"),
+)
+def test_execution_critical_kinds_are_rejected(kind: str) -> None:
+    assert memory_service.accept(memory_candidate(kind=kind)) is False
+
+
+def test_legacy_price_rule_is_still_rejected_as_unknown() -> None:
+    assert memory_service.accept(
+        memory_candidate(kind="price_rule")
+    ) is False
+```
+
+- [ ] **Step 2: 运行测试并确认失败**
+
+Run:
+
+```powershell
+pytest tests/runtime/memory/test_memory_policy.py -q
+```
+
+Expected: 新的 business_rule 分类断言 FAIL。
+
+- [ ] **Step 3: 替换 Runtime 常量**
+
+```python
+EXECUTION_CRITICAL_MEMORY_KINDS = frozenset(
+    {"permission", "resource_scope", "business_rule", "credential"}
+)
+```
+
+price_rule 不再出现在 Runtime 源码；由于未知 kind 本来也拒绝，旧输入 price_rule 仍然 fail-closed，不需要兼容放行。
+
+- [ ] **Step 4: 运行测试**
+
+Run:
+
+```powershell
+pytest tests/runtime/memory/test_memory_policy.py -q
+```
+
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```powershell
+git add runtime/memory/service.py tests/runtime/memory/conftest.py tests/runtime/memory/test_memory_policy.py
+git commit -m "refactor: generalize execution critical memory kinds"
+```
+
+### Task 11: 架构回归与 Runtime P0 收口
 
 **Files:**
 
@@ -665,11 +933,19 @@ pytest -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 更新 ADR 状态**
+- [ ] **Step 5: 检查新增边界**
 
-仅当 Task 1-8 全部通过后，把 ADR-002 的状态从“已接受，尚未实施”更新为“P0 已实施，P1/P2 待实施”，并在文档记录实际提交号和验证命令。
+确认：
 
-- [ ] **Step 6: 提交**
+- rg -n "price_rule" runtime 无命中；
+- rg -n "_LIMITS" composition/product_operations.py 无命中；
+- ArgumentTrustLevel 只在 Runtime 定义一次；
+
+- [ ] **Step 6: 更新 ADR 状态**
+
+仅当 Task 1-11 与兄弟 Provisioning P0 计划全部通过后，把 ADR-002 的状态从“已接受，尚未实施”更新为“P0 已实施，P1/P2 待实施”，并在文档记录实际提交号和验证命令。
+
+- [ ] **Step 7: 提交**
 
 ```powershell
 git add tests/architecture/test_dependency_boundaries.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md
@@ -682,6 +958,7 @@ P0 验收通过后再分别制定：
 
 1. ProductOperations 命名与 catalog/pricing/inventory/listing 模块迁移计划；
 2. PricingGateway、InventoryGateway、ListingGateway 与 CapabilityRouter 计划；
-3. 库存、上下架业务闭环和新的真实模型评测计划。
+3. 库存、上下架业务闭环和新的真实模型评测计划；
+4. Eval 版本从发布定义读取、PricePolicyConfig 正式配置化计划。
 
 旧评测数字不能直接证明新业务模块或新平台路由有效；P1/P2 完成后必须重新执行对应评测。
