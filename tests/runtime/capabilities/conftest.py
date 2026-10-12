@@ -36,8 +36,21 @@ from runtime.capabilities.registry import (
 from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.capabilities.write_service import WriteAuthorizationService
+from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.pretool.profiles import (
+    PreToolProfileRegistration,
+    no_op_profile,
+)
 from runtime.interfaces.tools import ToolDefinition, ToolEffect
 from runtime.persistence.base import MembershipRole, ModelBackendType
+
+
+class _StaticProfileFactory:
+    """测试替身 Profile 工厂:固定返回空 Profile。"""
+
+    async def create(self, context: object) -> object:
+        del context
+        return no_op_profile()
 from runtime.persistence.models.configuration import (
     Agent,
     AgentVersion,
@@ -260,6 +273,12 @@ async def capability_catalog(db_session: AsyncSession) -> CapabilityCatalog:
                 schema_hash=SCHEMA_HASH,
             ),
             handler=object(),
+            pretool_registration=PreToolProfileRegistration(
+                factory=_StaticProfileFactory(),
+                policy_mode="BUSINESS",
+                resource_mode="RESOURCE",
+            ),
+            execution_profile=ToolExecutionProfile(adapter_key="test-adapter"),
             write_adapter_capabilities=frozenset({"operation", "reconciliation"}),
         )
     )

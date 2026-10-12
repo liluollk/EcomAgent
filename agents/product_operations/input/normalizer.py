@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
@@ -60,19 +61,33 @@ def normalize_amount(value: Any) -> Decimal | None:
     return quantized
 
 
-def normalize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    """按字段白名单归一化模型 ToolCall 参数:白名单、``trim``、金额 Decimal 化。
+def normalize_arguments(
+    arguments: Mapping[str, Any],
+    *,
+    fields: Sequence[str] = KEY_ARGUMENT_FIELDS,
+) -> dict[str, Any]:
+    """按**当前 Tool 的字段集合**归一化模型 ToolCall 参数。
 
-    返回的新 dict 只含白名单字段;``target_price`` 合法时变为两位小数
-    ``Decimal``,非法时保留 trim 后的原值等待校验判定。
+    ``fields`` 由每个 Tool 的 PreToolProfile 显式给出(Task 3),不再使用
+    全局写字段白名单——否则只读 Tool 的 ``query`` / ``store_ids`` 会被整体
+    丢弃。归一化本身仍是确定性变换:
+
+    - 白名单外的字段(模型自报 ``source``/``confidence`` 等)直接丢弃;
+    - 字符串值 ``trim``;字符串列表逐项 ``trim``;
+    - ``target_price`` 合法时变为两位小数 ``Decimal``,非法时保留 trim 后的
+      原值等待上层判定。
     """
     normalized: dict[str, Any] = {}
-    for key in KEY_ARGUMENT_FIELDS:
+    for key in fields:
         if key not in arguments:
             continue
         value = arguments[key]
         if isinstance(value, str):
             value = value.strip()
+        elif isinstance(value, (list, tuple)):
+            value = [
+                item.strip() if isinstance(item, str) else item for item in value
+            ]
         if key == "target_price":
             amount = normalize_amount(value)
             if amount is not None:

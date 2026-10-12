@@ -27,7 +27,11 @@ from runtime.access.authorization import (
     RESOURCE_SCOPE_DENIED,
     Authorizer,
 )
-from runtime.capabilities.registry import ToolRegistry, ToolVersionRecord
+from runtime.capabilities.registry import (
+    ToolBinding,
+    ToolRegistry,
+    ToolVersionRecord,
+)
 from runtime.execution.pretool.decisions import (
     CONFIRMATION_REQUIRED,
     INVALID_MODEL_OUTPUT,
@@ -45,11 +49,21 @@ from runtime.execution.pretool.pipeline import (
     ToolCallRequest,
     default_stages,
 )
+from runtime.execution.pretool.profiles import (
+    EmptyProvenanceResolver,
+    NoAuthorizationResources,
+    NoBusinessPolicy,
+    PassThroughInputNormalizer,
+    PreToolProfile,
+    PreToolProfileContext,
+    PreToolProfileRegistration,
+    UnresolvableInputRequirement,
+)
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.tool_registry import RuntimeToolRegistry
 from runtime.interfaces.identifiers import ResourceScope, ToolCallId
 from runtime.interfaces.requests import ConfirmationSpec, InputRequirement
-from runtime.interfaces.tools import ToolEffect
+from runtime.interfaces.tools import ToolDefinition, ToolEffect
 from runtime.persistence.base import MembershipRole
 
 
@@ -96,7 +110,79 @@ def make_tool_record(
     )
 
 
-def make_registry() -> ToolRegistry:
+def _tool_definition(*, stable_key: str, effect: ToolEffect, schema: dict[str, Any],
+                     permissions: frozenset[str]) -> ToolDefinition:
+    return ToolDefinition(
+        stable_key=stable_key,
+        version=1,
+        description=stable_key,
+        input_json_schema=schema,
+        output_json_schema={"type": "object"},
+        effect=effect,
+        required_permissions=permissions,
+        source_kind="LOCAL",
+        schema_hash=f"hash-{stable_key}",
+    )
+
+
+class StaticProfileFactory:
+    """测试替身 Profile 工厂:无视请求级上下文,固定返回给定 Profile。"""
+
+    def __init__(self, profile: PreToolProfile) -> None:
+        self._profile = profile
+
+    async def create(self, context: Any) -> PreToolProfile:
+        del context
+        return self._profile
+
+
+def make_profile(**collaborators: Any) -> PreToolProfile:
+    """用测试替身组装 Profile;未给出的协作对象使用显式空实现。"""
+    return PreToolProfile(
+        input_normalizer=collaborators.get(
+            "input_normalizer", PassThroughInputNormalizer()
+        ),
+        argument_provenance_resolver=collaborators.get(
+            "argument_provenance_resolver", EmptyProvenanceResolver()
+        ),
+        input_requirement_resolver=collaborators.get(
+            "input_requirement_resolver", UnresolvableInputRequirement()
+        ),
+        authorization_resource_resolver=collaborators.get(
+            "authorization_resource_resolver", NoAuthorizationResources()
+        ),
+        business_policy=collaborators.get("business_policy", NoBusinessPolicy()),
+        provenance_guard_fields=tuple(collaborators.get("provenance_guard_fields", ())),
+    )
+
+
+def _bind(
+    registry: ToolRegistry,
+    *,
+    stable_key: str,
+    effect: ToolEffect,
+    schema: dict[str, Any],
+    permissions: frozenset[str],
+    profile: PreToolProfile,
+) -> None:
+    is_write = effect is ToolEffect.WRITE
+    registry.bind(
+        ToolBinding(
+            definition=_tool_definition(
+                stable_key=stable_key, effect=effect, schema=schema,
+                permissions=permissions,
+            ),
+            handler=object(),
+            pretool_registration=PreToolProfileRegistration(
+                factory=StaticProfileFactory(profile),
+                policy_mode="BUSINESS" if is_write else "NONE",
+                resource_mode="RESOURCE" if is_write else "WORKSPACE",
+            ),
+        )
+    )
+
+
+def make_registry(profile: PreToolProfile) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(
         make_tool_record(
@@ -113,6 +199,22 @@ def make_registry() -> ToolRegistry:
             schema=PUBLISH_SCHEMA,
             permissions=frozenset({"listing:write"}),
         )
+    )
+    _bind(
+        registry,
+        stable_key="listing.search",
+        effect=ToolEffect.READ,
+        schema=SEARCH_SCHEMA,
+        permissions=frozenset({"listing:read"}),
+        profile=profile,
+    )
+    _bind(
+        registry,
+        stable_key="listing.publish",
+        effect=ToolEffect.WRITE,
+        schema=PUBLISH_SCHEMA,
+        permissions=frozenset({"listing:write"}),
+        profile=profile,
     )
     return registry
 
@@ -223,19 +325,29 @@ class StaticConfirmationLookup:
         return self.accepted
 
 
-def build_deps(**collaborators: Any) -> PreToolDependencies:
+def build_deps(profile: PreToolProfile, **collaborators: Any) -> PreToolDependencies:
+    """构造 Runtime 统一依赖;业务协作对象由 ToolBinding 的 Profile 提供。
+
+    ``StaticProfileFactory`` 无视请求级上下文,因此这里给它一个占位上下文,
+    只用于通过 Runtime 的"缺上下文即 fail closed"装配校验。
+    """
     return PreToolDependencies(
-        tool_registry=RuntimeToolRegistry(make_registry()),
+        tool_registry=RuntimeToolRegistry(make_registry(profile)),
         schema_validator=RuntimeSchemaValidator(),
         authorizer=Authorizer(),
-        **collaborators,
+        execution_mode_resolver=collaborators.get("execution_mode_resolver"),
+        accepted_confirmation_lookup=collaborators.get("accepted_confirmation_lookup"),
+        profile_context=PreToolProfileContext(
+            session=None, actor=make_actor(), request=tool_call()
+        ),
     )
 
 
 def make_pipeline(*, actor: ActorContext | None = None, **overrides: Any) -> PreToolUsePipeline:
+    profile = make_profile(**overrides)
     return PreToolUsePipeline(
         actor=actor or make_actor(),
-        stages=default_stages(build_deps(**overrides)),
+        stages=default_stages(build_deps(profile, **overrides)),
     )
 
 
@@ -259,7 +371,7 @@ def pipeline() -> PreToolUsePipeline:
 def recording_pipeline() -> RecordingPipeline:
     calls: list[str] = []
     stages: list[NamedStage] = []
-    for stage in default_stages(build_deps()):
+    for stage in default_stages(build_deps(make_profile())):
         async def handler(
             context: PreToolContext,
             _inner: Any = stage.handler,
@@ -480,7 +592,7 @@ async def test_decision_is_frozen_value_with_core_fields(
 
 
 async def test_pipeline_rejects_reordered_or_incomplete_stages() -> None:
-    stages = list(default_stages(build_deps()))
+    stages = list(default_stages(build_deps(make_profile())))
     stages[0], stages[1] = stages[1], stages[0]
     with pytest.raises(Exception, match="重排"):
         PreToolUsePipeline(actor=make_actor(), stages=stages)

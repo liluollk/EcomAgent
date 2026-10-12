@@ -35,12 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.product_operations.input.normalizer import normalize_arguments
 from agents.product_operations.persistence.models import Listing, Product, Store
-from runtime.capabilities.registry import ToolBinding
-from runtime.capabilities.validation import (
-    OPERATION_CAPABILITY,
-    RECONCILIATION_CAPABILITY,
-    compute_schema_hash,
-)
+from runtime.capabilities.validation import compute_schema_hash
 from runtime.execution.tool_result_processor import ToolExecutionReceipt
 from runtime.interfaces.tools import ToolDefinition, ToolEffect
 
@@ -51,10 +46,6 @@ PRODUCT_PRICE_WRITE_PERMISSION: Final = "product.price.write"
 
 LISTING_NOT_FOUND: Final = "LISTING_NOT_FOUND"
 INVALID_ARGUMENTS: Final = "INVALID_ARGUMENTS"
-
-_WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset(
-    {OPERATION_CAPABILITY, RECONCILIATION_CAPABILITY}
-)
 
 
 class _FrozenModel(BaseModel):
@@ -305,11 +296,10 @@ def _format_price(price: Decimal | None) -> str | None:
     return str(price) if price is not None else None
 
 
-UPDATE_PRICE_BINDING: Final = ToolBinding(
-    definition=UPDATE_PRICE_DEFINITION,
-    handler=None,  # 组合根注入绑定 workspace 与平台的 UpdatePriceToolHandler 实例。
-    write_adapter_capabilities=_WRITE_ADAPTER_CAPABILITIES,
-)
+# 说明:写 Tool 的 ToolBinding(含 execution_profile 与改价业务策略)只由 Worker
+# 组合根构造——它需要 workspace 级价格配置与平台 Adapter,不能在此静态给出。
+# 架构文档 §3.3 要求写 Tool 的策略/资源/执行 Profile 显式声明,因此不再提供
+# 缺省绑定的模块级常量,避免出现"已注册但策略缺失"的隐性危险绑定。
 
 
 __all__ = [
@@ -318,7 +308,6 @@ __all__ = [
     "PRODUCT_PRICE_WRITE_PERMISSION",
     "STABLE_KEY_UPDATE_PRICE",
     "TOOL_VERSION",
-    "UPDATE_PRICE_BINDING",
     "UPDATE_PRICE_DEFINITION",
     "UpdatePriceGateway",
     "UpdatePriceInput",

@@ -21,6 +21,8 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
+from runtime.execution.pretool.decisions import TOOL_PRETOOL_PROFILE_MISSING
+
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查需要
     from runtime.backend.protocol import AgentBackend
@@ -51,6 +53,12 @@ MISSING_TOOL_BINDING: Final = "MISSING_TOOL_BINDING"
 DUPLICATE_TOOL_BINDING: Final = "DUPLICATE_TOOL_BINDING"
 UNKNOWN_TOOL_BINDING: Final = "UNKNOWN_TOOL_BINDING"
 WRITE_TOOL_CAPABILITY_MISSING: Final = "WRITE_TOOL_CAPABILITY_MISSING"
+
+# ---- PreToolProfile / 执行 Profile 校验原因码(架构文档 §3.3、§9)----
+WRITE_TOOL_POLICY_MISSING: Final = "WRITE_TOOL_POLICY_MISSING"
+WRITE_TOOL_RESOURCE_RESOLVER_MISSING: Final = "WRITE_TOOL_RESOURCE_RESOLVER_MISSING"
+WRITE_TOOL_EXECUTION_PROFILE_MISSING: Final = "WRITE_TOOL_EXECUTION_PROFILE_MISSING"
+READ_TOOL_EXECUTION_PROFILE_FORBIDDEN: Final = "READ_TOOL_EXECUTION_PROFILE_FORBIDDEN"
 
 # 写 Adapter 能力声明(架构文档 §3.3)。
 OPERATION_CAPABILITY: Final = "operation"
@@ -192,6 +200,48 @@ def _validate_tool_bindings(tools: ToolRegistry) -> None:
                 " 应恰好一个",
             )
         _validate_write_capabilities(record, bindings[0])
+        validate_tool_binding(bindings[0])
+
+
+def validate_tool_binding(binding: ToolBinding) -> None:
+    """校验单个 ToolBinding 的 PreToolProfile 与执行 Profile(启动期 fail-closed)。
+
+    规则(架构文档 §3.3、§9):
+
+    - 每个 Tool 必须显式注册 PreToolProfile(不得依赖 Pipeline 的隐式默认);
+    - 写 Tool 必须有业务策略(``BUSINESS``)、资源解析器(``RESOURCE``)与
+      执行 Profile;缺失分别以稳定错误码拒绝;
+    - 只读 Tool 不得绑定执行 Profile(写执行元数据只属于写 Tool)。
+    """
+    key = binding.definition.stable_key
+    registration = binding.pretool_registration
+    if registration is None:  # 防御:字段必填,正常路径不会是 None
+        raise AssemblyError(
+            TOOL_PRETOOL_PROFILE_MISSING,
+            f"Tool {key} 未注册 PreToolProfile",
+        )
+    is_write = binding.definition.effect == "WRITE"
+    if is_write:
+        if registration.policy_mode != "BUSINESS":
+            raise AssemblyError(
+                WRITE_TOOL_POLICY_MISSING,
+                f"写 Tool {key} 缺少 business_policy(BUSINESS 模式)",
+            )
+        if registration.resource_mode != "RESOURCE":
+            raise AssemblyError(
+                WRITE_TOOL_RESOURCE_RESOLVER_MISSING,
+                f"写 Tool {key} 缺少 resource_resolver(RESOURCE 模式)",
+            )
+        if binding.execution_profile is None:
+            raise AssemblyError(
+                WRITE_TOOL_EXECUTION_PROFILE_MISSING,
+                f"写 Tool {key} 缺少 execution_profile",
+            )
+    elif binding.execution_profile is not None:
+        raise AssemblyError(
+            READ_TOOL_EXECUTION_PROFILE_FORBIDDEN,
+            f"只读 Tool {key} 不允许绑定 execution_profile",
+        )
 
 
 def _validate_write_capabilities(
@@ -226,14 +276,20 @@ __all__ = [
     "MCP_TOOL_UNCLASSIFIED",
     "MISSING_TOOL_BINDING",
     "OPERATION_CAPABILITY",
+    "READ_TOOL_EXECUTION_PROFILE_FORBIDDEN",
     "RECONCILIATION_CAPABILITY",
     "RECONCILIATION_UNSUPPORTED",
     "REGISTRY_DUPLICATE_KEY",
     "REGISTRY_VERSION_CONFLICT",
     "SCHEMA_HASH_MISMATCH",
+    "TOOL_PRETOOL_PROFILE_MISSING",
     "UNKNOWN_TOOL_BINDING",
     "WRITE_TOOL_CAPABILITY_MISSING",
+    "WRITE_TOOL_EXECUTION_PROFILE_MISSING",
+    "WRITE_TOOL_POLICY_MISSING",
+    "WRITE_TOOL_RESOURCE_RESOLVER_MISSING",
     "AssemblyError",
     "compute_schema_hash",
     "validate_assembly",
+    "validate_tool_binding",
 ]

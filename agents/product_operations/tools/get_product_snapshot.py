@@ -14,7 +14,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.product_operations.input.profiles import (
+    TOOL_ARGUMENT_FIELDS,
+    product_registration,
+)
 from agents.product_operations.persistence.models import Listing, Product
+from agents.product_operations.policy.resources import StoreResourceResolver
 from agents.product_operations.tools.access import authorize_store
 from agents.product_operations.tools.definitions import GET_PRODUCT_SNAPSHOT_DEFINITION
 from agents.product_operations.tools.errors import (
@@ -94,6 +99,12 @@ def _as_store_uuid(store_id: str) -> UUID:
 GET_PRODUCT_SNAPSHOT_BINDING: Final = ToolBinding(
     definition=GET_PRODUCT_SNAPSHOT_DEFINITION,
     handler=get_product_snapshot,
+    pretool_registration=product_registration(
+        fields=TOOL_ARGUMENT_FIELDS["get_product_snapshot"],
+        policy_mode="NONE",
+        resource_mode="RESOURCE",
+        resource_resolver=StoreResourceResolver(),
+    ),
 )
 
 

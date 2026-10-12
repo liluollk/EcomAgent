@@ -16,7 +16,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.product_operations.input.profiles import (
+    TOOL_ARGUMENT_FIELDS,
+    product_registration,
+)
 from agents.product_operations.persistence.models import Listing, Product
+from agents.product_operations.policy.resources import StoreIdsResourceResolver
 from agents.product_operations.tools.access import (
     authorize_product_read,
     authorized_store_ids,
@@ -96,6 +101,12 @@ async def compare_listing_prices(
 COMPARE_LISTING_PRICES_BINDING: Final = ToolBinding(
     definition=COMPARE_LISTING_PRICES_DEFINITION,
     handler=compare_listing_prices,
+    pretool_registration=product_registration(
+        fields=TOOL_ARGUMENT_FIELDS["compare_listing_prices"],
+        policy_mode="NONE",
+        resource_mode="RESOURCE",
+        resource_resolver=StoreIdsResourceResolver(),
+    ),
 )
 
 

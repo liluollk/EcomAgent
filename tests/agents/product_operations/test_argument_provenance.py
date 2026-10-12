@@ -445,6 +445,7 @@ async def test_pretool_adapters_conform_to_injection_protocol(
 
     normalized = await ProductPreToolNormalizer(
         input_resolver,
+        fields=("store_id", "sku", "target_price"),
         user_message="把淘宝旗舰店的 SKU-001 改成 99 元",
         actor=actor,
     ).normalize(

@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Sequence
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from runtime.backend.scripted import ScriptedBackend
 from runtime.capabilities.assembly import RuntimeAssembly
@@ -27,14 +27,30 @@ from runtime.capabilities.registry import (
     ToolRegistry,
     ToolVersionRecord,
 )
+from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.validation import AssemblyError, compute_schema_hash
 from runtime.capabilities.write_service import ToolCallRequest
+from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.pretool.profiles import (
+    PreToolProfileRegistration,
+    no_op_profile,
+)
 from runtime.interfaces.tools import ToolDefinition, ToolEffect
+from runtime.persistence.base import ConfigVersionStatus
+from runtime.persistence.models.configuration import (
+    BusinessPolicy,
+    BusinessPolicyVersion,
+)
 from runtime.persistence.models.execution import (
     Run,
+    RunPolicySnapshot,
     RunSkillVersion,
     RunSourceVersion,
     RunToolVersion,
+)
+from runtime.persistence.repositories.run_snapshots import (
+    PolicySnapshotPin,
+    RunSnapshotRepository,
 )
 
 
@@ -59,12 +75,14 @@ def local_tool(
     effect: ToolEffect = ToolEffect.READ,
     required_permissions: frozenset[str] = frozenset(),
     schema_hash: str | None = None,
+    version: int = 1,
+    version_id: uuid.UUID | None = None,
 ) -> ToolVersionRecord:
     """构造 LOCAL Tool 版本记录;schema_hash 默认与 Schema 一致。"""
     return ToolVersionRecord(
         stable_key=key,
-        version_id=uuid.uuid4(),
-        version=1,
+        version_id=version_id or uuid.uuid4(),
+        version=version,
         workspace_id=None,
         source_kind="LOCAL",
         effect=effect,
@@ -139,6 +157,22 @@ def source_record(
     )
 
 
+class _StaticProfileFactory:
+    """测试替身 Profile 工厂:固定返回空 Profile,不使用请求级上下文。"""
+
+    async def create(self, context: object) -> object:
+        del context
+        return no_op_profile()
+
+
+def _registration(*, policy_mode: str, resource_mode: str) -> PreToolProfileRegistration:
+    return PreToolProfileRegistration(
+        factory=_StaticProfileFactory(),
+        policy_mode=policy_mode,  # type: ignore[arg-type]
+        resource_mode=resource_mode,  # type: ignore[arg-type]
+    )
+
+
 def binding_for(
     key: str,
     *,
@@ -146,6 +180,7 @@ def binding_for(
     required_permissions: frozenset[str] = frozenset(),
     write_adapter_capabilities: frozenset[str] = frozenset({"operation", "reconciliation"}),
 ) -> ToolBinding:
+    is_write = effect is ToolEffect.WRITE
     return ToolBinding(
         definition=ToolDefinition(
             stable_key=key,
@@ -159,6 +194,13 @@ def binding_for(
             schema_hash=SCHEMA_HASH,
         ),
         handler=object(),
+        pretool_registration=_registration(
+            policy_mode="BUSINESS" if is_write else "NONE",
+            resource_mode="RESOURCE" if is_write else "WORKSPACE",
+        ),
+        execution_profile=(
+            ToolExecutionProfile(adapter_key="test-adapter") if is_write else None
+        ),
         write_adapter_capabilities=write_adapter_capabilities,
     )
 
@@ -187,7 +229,9 @@ def make_assembly(
     for record in tool_definitions:
         tool_registry.register(record)
     for binding in bindings:
-        tool_registry.bind(binding)
+        bound = tool_registry.find_by_key(binding.definition.stable_key)
+        assert bound is not None
+        tool_registry.bind(bound.version_id, binding)
     source_registry = SourceRegistry()
     for record in sources:
         source_registry.register(record)
@@ -278,6 +322,86 @@ async def test_write_uses_current_authorization_after_run_creation(
     result = await write_service.execute(run.id, make_price_tool_call())
     assert result.allowed is False
     assert result.denial_code == "PERMISSION_REVOKED"
+
+
+# ---- Task 10:Run 钉住已发布的业务策略版本(PolicySnapshot) ----
+
+
+async def test_run_pins_published_policy_versions(
+    db_session, capability_catalog
+) -> None:
+    """Run 创建时把调用方给的 policy pin 落库,且重复 replace 不增行、互不串 Run。
+
+    Runtime 只搬运 ``PolicySnapshotPin``(key/版本行/hash),不理解商品或价格字段;
+    这里用一条真实的 ``BusinessPolicyVersion`` 行验证外键与幂等语义,而不是伪造
+    值对象——否则"落库"这条路径根本没被证明。
+    """
+    workspace_id = capability_catalog.workspace.id
+    policy = BusinessPolicy(
+        id=uuid.uuid4(), workspace_id=workspace_id, stable_key="some-policy", name="业务策略"
+    )
+    db_session.add(policy)
+    await db_session.flush()
+    version_row = BusinessPolicyVersion(
+        id=uuid.uuid4(),
+        workspace_id=workspace_id,
+        business_policy_id=policy.id,
+        version=3,
+        config_json={"any": "payload"},
+        config_hash="f" * 64,
+        status=ConfigVersionStatus.PUBLISHED,
+    )
+    db_session.add(version_row)
+    await db_session.flush()
+    pin = PolicySnapshotPin(
+        policy_key="some-policy", version_id=version_row.id, config_hash="f" * 64
+    )
+
+    factory = RunFactory(
+        session=db_session,
+        assembly=capability_catalog.assembly,
+        workspace_id=workspace_id,
+        actor_id=capability_catalog.user.id,
+        membership_id=capability_catalog.membership.id,
+        model_config_version_id=capability_catalog.model_config_version.id,
+        policy_pins=(pin,),
+    )
+    first = await factory.create(agent_key=AGENT_KEY)
+    second = await factory.create(agent_key=AGENT_KEY)
+    assert first.policy_pins == (pin,)
+
+    # 每个 Run 各钉一行;第二个 Run 不会复用或覆盖第一个 Run 的快照。
+    first_rows = await db_session.scalars(
+        select(RunPolicySnapshot.proposed_version_id).where(
+            RunPolicySnapshot.run_id == first.id
+        )
+    )
+    assert list(first_rows) == [version_row.id]
+    second_rows = await db_session.scalars(
+        select(RunPolicySnapshot.proposed_version_id).where(
+            RunPolicySnapshot.run_id == second.id
+        )
+    )
+    assert list(second_rows) == [version_row.id]
+    total = await db_session.scalar(
+        select(func.count()).select_from(RunPolicySnapshot).where(
+            RunPolicySnapshot.workspace_id == workspace_id
+        )
+    )
+    assert total == 2
+
+    # 重复 replace 同一 Run:仍是恰好一行,且读回等价 pin。
+    repository = RunSnapshotRepository(db_session)
+    await repository.replace(
+        run_id=first.id, workspace_id=workspace_id, policy_pins=(pin,)
+    )
+    assert await repository.policy_pins(first.id) == [pin]
+    deduped = await db_session.scalar(
+        select(func.count()).select_from(RunPolicySnapshot).where(
+            RunPolicySnapshot.run_id == first.id
+        )
+    )
+    assert deduped == 1
 
 
 # ---- 启动校验补充测试 ----
@@ -385,12 +509,39 @@ def test_classified_mcp_tool_is_enabled() -> None:
     assembly.validate()
 
 
-def test_registry_rejects_duplicate_stable_key() -> None:
-    registry = AgentRegistry()
-    record = agent_record()
+def test_registry_keeps_current_and_compatible_versions() -> None:
+    """同一 stable key 的多个版本可并存;当前版本由显式注册决定。"""
+    registry = ToolRegistry()
+    v1 = local_tool("set_listing_price", version=1)
+    v2 = local_tool("set_listing_price", version=2)
+
+    registry.register(v1, make_current=False)
+    registry.register(v2, make_current=True)
+
+    assert registry.find_by_key("set_listing_price") == v2
+    assert registry.find_by_version_id(v1.version_id) == v1
+    assert registry.find_by_version_id(v2.version_id) == v2
+    assert registry.find_by_key_version("set_listing_price", 1) == v1
+    assert registry.records() == (v2,)
+    assert registry.all_records() == (v1, v2)
+
+
+def test_registry_rejects_same_key_and_version_with_different_ids() -> None:
+    """同一 (stable key, version) 指向不同 Version ID 时启动失败。"""
+    registry = ToolRegistry()
+    registry.register(local_tool("search_products", version=3))
+    with pytest.raises(AssemblyError, match="REGISTRY_VERSION_CONFLICT"):
+        registry.register(local_tool("search_products", version=3))
+
+
+def test_tool_registry_rejects_duplicate_version_id_binding() -> None:
+    """同一 ToolVersion ID 只允许一个 ToolBinding。"""
+    registry = ToolRegistry()
+    record = local_tool("lookup")
     registry.register(record)
+    registry.bind(record.version_id, binding_for("lookup"))
     with pytest.raises(AssemblyError, match="REGISTRY_DUPLICATE_KEY"):
-        registry.register(agent_record(agent_key=record.stable_key))
+        registry.bind(record.version_id, binding_for("lookup"))
 
 
 def test_registry_rejects_version_conflict() -> None:

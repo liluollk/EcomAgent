@@ -99,15 +99,20 @@ class ProductInputRequirementResolver:
         actor: ActorContext | None = None,
         answered: Mapping[str, str] | None = None,
         history: Sequence[str] = (),
+        fields: Sequence[str] = KEY_ARGUMENT_FIELDS,
     ) -> ProductInputResolution:
         """判定关键字段来源;缺失/歧义/不可信 → Input,金额非法 → 诊断。
+
+        ``fields`` 是当前 Tool 的字段集合(由 PreToolProfile 给出),决定归一化
+        白名单与"关键字段"判定范围;只读 Tool 的字段不在写字段集合内,因此
+        不产生 Input Requirement。
 
         证据匹配候选为当前 Workspace 全部 ACTIVE 店铺(架构文档 §5 的
         "Workspace 别名表");授权范围只缩窄 Input Request 候选项,不缩窄
         证据匹配——越权店铺的用户显式证据产生 USER_EXPLICIT 后由 Access
         Control 以资源范围拒绝,而不是退回"无证据"。
         """
-        normalized = normalize_arguments(dict(arguments))
+        normalized = normalize_arguments(dict(arguments), fields=fields)
         stores: tuple[StoreCandidate, ...] = ()
         if actor is not None:
             stores = await self._load_workspace_store_candidates(actor)
@@ -132,10 +137,11 @@ class ProductInputRequirementResolver:
 
         requirement: InputRequirement | None = None
         if not diagnostics:
+            key_fields = tuple(field for field in fields if field in KEY_ARGUMENT_FIELDS)
             untrusted = tuple(
                 field
-                for field in KEY_ARGUMENT_FIELDS
-                if outcome.field_sources[field] not in TRUSTED_PROVENANCE
+                for field in key_fields
+                if outcome.field_sources.get(field) not in TRUSTED_PROVENANCE
             )
             if untrusted:
                 requirement = await self._build_requirement(untrusted, actor=actor)
@@ -254,17 +260,19 @@ class ProductInputRequirementResolver:
 
 
 class ProductPreToolNormalizer:
-    """``InputNormalizer`` 适配:按当前用户证据把店铺别名归一为内部 ID。"""
+    """``InputNormalizer`` 适配:按当前 Tool 字段集合归一化(含店铺别名→ID)。"""
 
     def __init__(
         self,
         resolver: ProductInputRequirementResolver,
         *,
+        fields: Sequence[str],
         user_message: str,
         actor: ActorContext,
         answered: Mapping[str, str] | None = None,
     ) -> None:
         self._resolver = resolver
+        self._fields = tuple(fields)
         self._user_message = user_message
         self._actor = actor
         self._answered = answered
@@ -275,6 +283,7 @@ class ProductPreToolNormalizer:
             arguments=arguments,
             actor=self._actor,
             answered=self._answered,
+            fields=self._fields,
         )
         return resolution.normalized_arguments
 
@@ -294,12 +303,14 @@ class ProductPreToolProvenanceResolver:
         actor: ActorContext | None = None,
         answered: Mapping[str, str] | None = None,
         history: Sequence[str] = (),
+        fields: Sequence[str] = KEY_ARGUMENT_FIELDS,
     ) -> None:
         self._resolver = resolver
         self._user_message = user_message
         self._actor = actor
         self._answered = answered
         self._history = history
+        self._fields = tuple(fields)
 
     async def resolve(self, *, arguments: Mapping[str, Any]) -> RuntimeArgumentProvenance:
         resolution = await self._resolver.resolve(
@@ -308,6 +319,7 @@ class ProductPreToolProvenanceResolver:
             actor=self._actor,
             answered=self._answered,
             history=self._history,
+            fields=self._fields,
         )
         return RuntimeArgumentProvenance(
             field_sources={
@@ -323,14 +335,16 @@ class ProductPreToolInputRequirementResolver:
         self,
         resolver: ProductInputRequirementResolver,
         *,
+        fields: Sequence[str] = KEY_ARGUMENT_FIELDS,
         actor: ActorContext | None = None,
     ) -> None:
         self._resolver = resolver
+        self._fields = tuple(fields)
         self._actor = actor
 
     async def resolve(self, *, diagnostic: SchemaDiagnostic) -> InputRequirement | None:
         field_paths = tuple(
-            field for field in KEY_ARGUMENT_FIELDS if field in diagnostic.field_paths
+            field for field in self._fields if field in diagnostic.field_paths
         )
         if not field_paths:
             return None

@@ -53,26 +53,17 @@ from agents.product_operations.agent import (
     AGENT_VERSION,
     PRODUCT_AGENT_DEFINITION,
 )
-from agents.product_operations.input.requirements import (
-    ProductInputRequirementResolver,
-    ProductPreToolInputRequirementResolver,
-    ProductPreToolNormalizer,
-    ProductPreToolProvenanceResolver,
+from agents.product_operations.input.profiles import (
+    TOOL_ARGUMENT_FIELDS,
+    product_registration,
 )
 from agents.product_operations.persistence.models import Listing, Product, Store
-from agents.product_operations.policy.models import (
-    PricePolicyConfig,
-    PricePolicyDecision,
-    PriceWriteRequest,
+from agents.product_operations.policy.models import PricePolicyConfig
+from agents.product_operations.policy.price_pretool import PricePreToolPolicy
+from agents.product_operations.policy.resources import (
+    StoreIdsResourceResolver,
+    StoreResourceResolver,
 )
-from agents.product_operations.policy.price_policy import (
-    LISTING_NOT_FOUND as POLICY_LISTING_NOT_FOUND,
-)
-from agents.product_operations.policy.price_policy import (
-    LISTING_VERSION_CONFLICT as POLICY_LISTING_VERSION_CONFLICT,
-)
-from agents.product_operations.policy.price_policy import PricePolicy
-from agents.product_operations.policy.resources import StoreResourceResolver
 from agents.product_operations.prompt import PRODUCT_AGENT_PROMPT
 from agents.product_operations.skill import (
     PRODUCT_MAINTENANCE_SKILL,
@@ -127,20 +118,21 @@ from runtime.capabilities.skill_activation import (
 )
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.commands.session import SessionCommandService
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.pretool.decisions import (
-    STAGE_ARGUMENT_PROVENANCE,
     ExecutionModeDecision,
-    PolicyDecision,
     PreToolDecision,
-    SchemaDiagnostic,
 )
 from runtime.execution.pretool.pipeline import (
-    NamedStage,
-    PreToolContext,
     PreToolDependencies,
     PreToolUsePipeline,
     ToolCallRequest,
     default_stages,
+)
+from runtime.execution.pretool.profiles import (
+    PreToolProfileContext,
+    PreToolProfileRegistration,
+    runtime_control_registration,
 )
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.reconciliation import ReconciliationService
@@ -483,10 +475,10 @@ class _NoopSummaryBackend:
 class _ProductPipelineFactory:
     """每次 advance 构造绑定当前 Run Actor 的 PreToolUse 管线。
 
-    ``_version_bindings`` 记录 update_price ToolCall 首次通过 Business Policy
-    时的 Listing 版本(架构文档 §6 第 7 条"确认后 Listing Version 未失效")。
-    确认后恢复推进时重评:版本已变化即 LISTING_VERSION_CONFLICT。绑定表为
-    组合根进程内状态,与 Worker 进程按 Run 亲和的内存视图同一生命周期。
+    PreToolUse 业务扩展不再由本工厂按 ``stable_key`` 全局注入:每个 Tool 的
+    ``ToolBinding.pretool_registration`` 自带工厂,在 tool_resolution 之后用
+    本次请求级上下文(Session / Actor / ToolCall / Run)延迟创建 Profile。
+    本工厂只负责构造 Runtime 统一依赖与本次推进的上下文。
     """
 
     def __init__(
@@ -494,27 +486,26 @@ class _ProductPipelineFactory:
         *,
         engine: AsyncEngine,
         tool_registry: ToolRegistry,
-        price_config: PricePolicyConfig,
         scope: _ScopeHolder,
     ) -> None:
         self._engine = engine
         self._tool_registry = tool_registry
-        self._price_config = price_config
         self._scope = scope
-        self._version_bindings: dict[uuid.UUID, int] = {}
 
     def __call__(self) -> ToolCallEvaluator:
         return _ScopedProductPipeline(
             engine=self._engine,
             context=self._scope.require(),
             tool_registry=self._tool_registry,
-            price_config=self._price_config,
-            version_bindings=self._version_bindings,
         )
 
 
 class _ScopedProductPipeline:
-    """单次推进的 PreToolUse 管线;评估结束后关闭自有读取 Session。"""
+    """单次推进的 PreToolUse 管线;评估结束后关闭自有读取 Session。
+
+    只构造 Runtime 统一依赖与本次 actor/context;商品业务 Profile 由各
+    ToolBinding 在注册时携带的工厂延迟创建,应用启动时不持有请求级 Session。
+    """
 
     def __init__(
         self,
@@ -522,14 +513,10 @@ class _ScopedProductPipeline:
         engine: AsyncEngine,
         context: _ScopeContext,
         tool_registry: ToolRegistry,
-        price_config: PricePolicyConfig,
-        version_bindings: dict[uuid.UUID, int],
     ) -> None:
         self._engine = engine
         self._context = context
         self._tool_registry = tool_registry
-        self._price_config = price_config
-        self._version_bindings: dict[uuid.UUID, int] = version_bindings
 
     async def evaluate(self, tool_call: ToolCallRequest) -> PreToolDecision:
         session = AsyncSession(self._engine, expire_on_commit=False)
@@ -539,10 +526,6 @@ class _ScopedProductPipeline:
                 workspace_id=self._context.workspace_id,
                 request_id=f"pretool-{tool_call.tool_call_id}",
             )
-            user_message = await _current_user_message(
-                session, self._context.workspace_id, self._context.run_id
-            )
-            requirement_resolver = ProductInputRequirementResolver(session)
 
             async def resolve_execution_mode(*, effect: ToolEffectKind) -> ExecutionModeDecision:
                 workspace = await session.get(WorkspaceRow, self._context.workspace_id)
@@ -560,240 +543,25 @@ class _ScopedProductPipeline:
                 tool_registry=RuntimeToolRegistry(self._tool_registry),
                 schema_validator=RuntimeSchemaValidator(),
                 authorizer=Authorizer(),
-                input_normalizer=ProductPreToolNormalizer(
-                    requirement_resolver,
-                    user_message=user_message,
-                    actor=actor,
-                    answered=self._context.answered,
-                ),
-                argument_provenance_resolver=ProductPreToolProvenanceResolver(
-                    requirement_resolver,
-                    user_message=user_message,
-                    actor=actor,
-                    answered=self._context.answered,
-                ),
-                input_requirement_resolver=ProductPreToolInputRequirementResolver(
-                    requirement_resolver, actor=actor
-                ),
-                authorization_resource_resolver=StoreResourceResolver(),
-                business_policy=_PriceBusinessPolicy(
-                    session=session,
-                    config=self._price_config,
-                    actor=actor,
-                    tool_call_id=tool_call.tool_call_id,
-                    version_bindings=self._version_bindings,
-                ),
                 execution_mode_resolver=resolve_execution_mode,
                 accepted_confirmation_lookup=_AcceptedConfirmationLookup(
                     session=session, workspace_id=self._context.workspace_id
                 ),
+                profile_context=PreToolProfileContext(
+                    session=session,
+                    actor=actor,
+                    request=tool_call,
+                    run_id=self._context.run_id,
+                    answered=dict(self._context.answered),
+                ),
             )
             pipeline = PreToolUsePipeline(
                 actor=actor,
-                stages=_pretool_stages_for(tool_call.stable_key, dependencies),
+                stages=default_stages(dependencies),
             )
             return await pipeline.evaluate(tool_call)
         finally:
             await session.close()
-
-
-_UNTRUSTED_SOURCE: Final = "UNTRUSTED"
-_PROVENANCE_GUARD_FIELDS: Final[tuple[str, ...]] = ("store_id", "sku")
-_GUARD_DIAGNOSTIC_MESSAGE: Final = "key arguments lack trusted user or authoritative evidence"
-
-
-def _pretool_stages_for(
-    stable_key: str,
-    dependencies: PreToolDependencies,
-) -> tuple[NamedStage, ...]:
-    """Runtime 内置 Tool 只走通用校验；业务 Tool 才注入商品域扩展。"""
-    if stable_key != LOAD_SKILL_KEY:
-        return _product_stages(dependencies)
-    runtime_dependencies = PreToolDependencies(
-        tool_registry=dependencies.tool_registry,
-        schema_validator=dependencies.schema_validator,
-        authorizer=dependencies.authorizer,
-    )
-    return default_stages(runtime_dependencies)
-
-
-def _product_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
-    """默认 10 阶段管线 + 证据守卫(阶段顺序不变)。
-
-    架构文档 §5:"任一关键参数缺失、歧义或来源不可信时,返回
-    InputRequirement,不进入 Access Control 之后的写执行阶段。"缺失字段由
-    Schema 校验诊断覆盖;守卫补充覆盖"模型提供了值但无可信证据"的猜测
-    参数(store_id/sku),把它们并入 SchemaDiagnostic,交由既有
-    input_requirement 阶段转成可回答的 Input Request。target_price 不在
-    守卫范围:合法金额总是 DETERMINISTIC_DERIVED,非法金额属校验诊断
-    (架构文档 §5),不产生 Input Request。
-    """
-    stages = list(default_stages(dependencies))
-    return tuple(
-        _provenance_guard_stage(stage)
-        if stage.name == STAGE_ARGUMENT_PROVENANCE
-        else stage
-        for stage in stages
-    )
-
-
-def _provenance_guard_stage(wrapped: NamedStage) -> NamedStage:
-    """argument_provenance 阶段守卫:不可信的已提供关键参数 → 校验诊断。"""
-    original = wrapped.handler
-
-    async def handler(context: PreToolContext) -> PreToolDecision | None:
-        decision = await original(context)
-        if decision is not None:
-            return decision
-        provenance = context.provenance
-        if provenance is None:
-            return None
-        arguments = context.normalized_arguments or {}
-        untrusted = tuple(
-            field
-            for field in _PROVENANCE_GUARD_FIELDS
-            if field in arguments
-            and provenance.field_sources.get(field) == _UNTRUSTED_SOURCE
-        )
-        if not untrusted:
-            return None
-        diagnostic = context.schema_diagnostic
-        merged_paths = tuple(
-            dict.fromkeys(
-                (*(diagnostic.field_paths if diagnostic is not None else ()), *untrusted)
-            )
-        )
-        context.schema_diagnostic = SchemaDiagnostic(
-            field_paths=merged_paths,
-            message=_GUARD_DIAGNOSTIC_MESSAGE,
-        )
-        return None
-
-    return NamedStage(name=wrapped.name, handler=handler)
-
-
-class _PriceBusinessPolicy:
-    """BusinessPolicy 注入适配:update_price 走价格 Policy,其余 Tool 放行。
-
-    确认前后一致性:首次评估(进入确认前)把当前 Listing 版本绑定到
-    ToolCall;确认后恢复推进的重评先比对绑定版本,已变化即以
-    ``LISTING_VERSION_CONFLICT`` 拒绝(架构文档 §6 第 7 条;PricePolicy
-    自身的乐观并发校验仍照常执行)。
-    """
-
-    def __init__(
-        self,
-        *,
-        session: AsyncSession,
-        config: PricePolicyConfig,
-        actor: ActorContext,
-        tool_call_id: uuid.UUID,
-        version_bindings: dict[uuid.UUID, int],
-    ) -> None:
-        self._session = session
-        self._config = config
-        self._actor = actor
-        self._tool_call_id = tool_call_id
-        self._version_bindings = version_bindings
-
-    async def evaluate(
-        self,
-        *,
-        stable_key: str,
-        arguments: Mapping[str, Any],
-        resources: frozenset[tuple[str, str]],
-    ) -> PolicyDecision:
-        del resources  # 资源范围已在 Access Control 阶段校验。
-        if stable_key != STABLE_KEY_UPDATE_PRICE:
-            return PolicyDecision(allowed=True)
-        decision_or_none = self._parse(arguments)
-        if decision_or_none is not None:
-            return decision_or_none
-        store_id, sku, price = self._arguments_of(arguments)
-        listing = await _resolve_listing(self._session, self._actor.workspace_id, store_id, sku)
-        if listing is None:
-            return self._deny(
-                POLICY_LISTING_NOT_FOUND,
-                "listing does not exist in this workspace",
-                expected_new_price=price,
-            )
-        stale = self._check_confirmation_version(listing.version)
-        if stale is not None:
-            return self._deny(
-                POLICY_LISTING_VERSION_CONFLICT,
-                "listing version has changed since confirmation",
-                expected_new_price=price,
-            )
-        request = PriceWriteRequest(
-            workspace_id=self._actor.workspace_id,
-            store_id=store_id,
-            target_price=price,
-            expected_version=listing.version,
-            actor=self._actor,
-            sku=sku,
-        )
-        return await PricePolicy(self._session, self._config).evaluate(request)
-
-    def _check_confirmation_version(self, current_version: int) -> int | None:
-        """绑定/比对确认时 Listing 版本;返回 None 表示可继续,否则返回当前版本。
-
-        首次评估(尚无绑定)记录当前版本并放行;已有绑定且与当前版本不一致
-        表示确认后 Listing 已被并发修改。
-        """
-        bound = self._version_bindings.get(self._tool_call_id)
-        if bound is None:
-            self._version_bindings[self._tool_call_id] = current_version
-            return None
-        return current_version if bound != current_version else None
-
-    def _arguments_of(
-        self, arguments: Mapping[str, Any]
-    ) -> tuple[uuid.UUID, str, Decimal]:
-        """前置条件:``_parse`` 已保证参数形状合法。"""
-        return (
-            uuid.UUID(str(arguments["store_id"])),
-            str(arguments["sku"]),
-            cast_decimal(arguments["target_price"]),
-        )
-
-    def _parse(self, arguments: Mapping[str, Any]) -> PolicyDecision | None:
-        """参数形状校验;非法返回确定性拒绝,合法返回 None。"""
-        store_id = arguments.get("store_id")
-        sku = arguments.get("sku")
-        price = arguments.get("target_price")
-        valid_shape = (
-            isinstance(store_id, str)
-            and isinstance(sku, str)
-            and isinstance(price, Decimal)
-        )
-        if valid_shape:
-            try:
-                uuid.UUID(store_id)
-            except ValueError:
-                valid_shape = False
-        if valid_shape:
-            return None
-        return self._deny(
-            POLICY_LISTING_NOT_FOUND,
-            "price update target cannot be resolved from validated arguments",
-            expected_new_price=None,
-        )
-
-    def _deny(
-        self,
-        reason_code: str,
-        safe_message: str,
-        *,
-        expected_new_price: Decimal | None,
-    ) -> PricePolicyDecision:
-        return PricePolicyDecision(
-            allowed=False,
-            reason_code=reason_code,
-            safe_message=safe_message,
-            policy_version=self._config.policy_version,
-            listing_version=None,
-            expected_new_price=expected_new_price,
-        )
 
 
 class _AcceptedConfirmationLookup:
@@ -1037,7 +805,6 @@ class ProductApplication:
             pipeline_factory=_ProductPipelineFactory(
                 engine=engine,
                 tool_registry=tool_registry,
-                price_config=price_config,
                 scope=self._scope,
             ),
             adapter_key=adapter_key,
@@ -1490,6 +1257,52 @@ async def build_product_application(
         policy_version=price_config.policy_version,
     )
 
+    def price_policy_factory(context: PreToolProfileContext) -> PricePreToolPolicy:
+        """写 Tool 的业务策略工厂:绑定本次请求的 Session/Actor/ToolCall。"""
+        return PricePreToolPolicy(
+            session=context.session,
+            config=price_config,
+            actor=context.actor,
+            tool_call_id=context.request.tool_call_id,
+        )
+
+    def registration_for(key: str) -> PreToolProfileRegistration:
+        """每个 Tool 的启动期 Profile 注册描述(策略/资源模式显式声明)。"""
+        if key == STABLE_KEY_UPDATE_PRICE:
+            return product_registration(
+                fields=TOOL_ARGUMENT_FIELDS["update_price"],
+                policy_mode="BUSINESS",
+                resource_mode="RESOURCE",
+                business_policy_factory=price_policy_factory,
+                resource_resolver=StoreResourceResolver(),
+            )
+        if key == LOAD_SKILL_KEY:
+            return runtime_control_registration()
+        if key == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
+            return product_registration(
+                fields=TOOL_ARGUMENT_FIELDS["get_product_snapshot"],
+                policy_mode="NONE",
+                resource_mode="RESOURCE",
+                resource_resolver=StoreResourceResolver(),
+            )
+        if key == COMPARE_LISTING_PRICES_DEFINITION.stable_key:
+            return product_registration(
+                fields=TOOL_ARGUMENT_FIELDS["compare_listing_prices"],
+                policy_mode="NONE",
+                resource_mode="RESOURCE",
+                resource_resolver=StoreIdsResourceResolver(),
+            )
+        return product_registration(
+            fields=TOOL_ARGUMENT_FIELDS[SEARCH_PRODUCTS_DEFINITION.stable_key],
+            policy_mode="NONE",
+            resource_mode="WORKSPACE",
+        )
+
+    write_execution_profile = ToolExecutionProfile(
+        adapter_key=adapter_key,
+        supports_reconciliation=True,
+    )
+
     tool_registry = ToolRegistry()
     for key, definition in _tool_definitions():
         handler: Any
@@ -1504,6 +1317,7 @@ async def build_product_application(
                 workspace_id=workspace_id,
                 actor_id=actor_id,
             )
+        is_write = definition.effect is ToolEffectKind.WRITE
         tool_registry.register(
             ToolVersionRecord(
                 stable_key=key,
@@ -1524,10 +1338,10 @@ async def build_product_application(
             ToolBinding(
                 definition=definition,
                 handler=handler,
+                pretool_registration=registration_for(key),
+                execution_profile=write_execution_profile if is_write else None,
                 write_adapter_capabilities=(
-                    _WRITE_ADAPTER_CAPABILITIES
-                    if definition.effect is ToolEffectKind.WRITE
-                    else frozenset()
+                    _WRITE_ADAPTER_CAPABILITIES if is_write else frozenset()
                 ),
             )
         )
@@ -1570,7 +1384,12 @@ async def build_product_application(
 async def _resolve_listing(
     session: AsyncSession, workspace_id: uuid.UUID, store_id: uuid.UUID, sku: str
 ) -> Listing | None:
-    """按 (workspace, store, sku) 读取 Listing(供 Policy 与权威回读)。"""
+    """按 (workspace, store, sku) 读取 Listing(权威回读,强制刷新 ORM 状态)。
+
+    与 ``agents.product_operations.policy.price_pretool.resolve_listing`` 的
+    差别是这里带 ``populate_existing``:用于 Adapter 写入后的权威价格回读,
+    必须丢弃会话缓存。Policy 侧读取无此需求。
+    """
     stmt = (
         select(Listing)
         .join(Product, Listing.product_id == Product.id)
@@ -1584,40 +1403,12 @@ async def _resolve_listing(
     return (await session.scalars(stmt)).one_or_none()
 
 
-async def _current_user_message(
-    session: AsyncSession, workspace_id: uuid.UUID, run_id: uuid.UUID
-) -> str:
-    """当前用户消息:该 Run 会话内最后一条 USER 消息(Provenance 证据来源)。"""
-    run = await RunRepository(session).get(workspace_id, run_id)
-    if run is None:
-        return ""
-    row = (
-        await session.scalars(
-            select(Message)
-            .where(
-                Message.workspace_id == workspace_id,
-                Message.session_id == run.session_id,
-                Message.role == MessageRole.USER,
-            )
-            .order_by(Message.sequence_no.desc())
-            .limit(1)
-        )
-    ).one_or_none()
-    return row.content if row is not None else ""
-
-
 async def _next_message_sequence(session: AsyncSession, session_id: uuid.UUID) -> int:
     """会话内消息序号:max+1(uq_messages_session_sequence)。"""
     current = await session.scalar(
         select(func.max(Message.sequence_no)).where(Message.session_id == session_id)
     )
     return 1 if current is None else int(current) + 1
-
-
-def cast_decimal(value: Any) -> Decimal:
-    """前置条件:调用方已确认 ``isinstance(value, Decimal)``。"""
-    result: Decimal = value
-    return result
 
 
 def _price_of(tool_call: ToolCall) -> Decimal:
