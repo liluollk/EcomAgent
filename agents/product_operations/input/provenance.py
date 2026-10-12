@@ -1,4 +1,4 @@
-"""参数来源(ArgumentProvenance)的确定性证据规则(计划 03 Task 3;架构文档 §5)。
+"""参数来源(ArgumentTrustLevel)的确定性证据规则(计划 03 Task 3;架构文档 §5)。
 
 Provenance 只由四类白名单证据产生,其余一律 ``UNTRUSTED``:
 
@@ -8,6 +8,9 @@ Provenance 只由四类白名单证据产生,其余一律 ``UNTRUSTED``:
 - ``SYSTEM_RESOLVED``:当前 Workspace 权威数据的唯一匹配(SKU 全工作区唯一);
 - ``DETERMINISTIC_DERIVED``:由明确规则确定性计算(合法金额的规范化)。
 
+可信等级类型由 Runtime 唯一定义(:mod:`runtime.execution.pretool.provenance`),
+本模块只做商品字段的证据判定,不再自带同名枚举。
+
 明确不受信:旧对话内容(传入 ``history`` 即被忽略)、模型自报的
 ``source``/``confidence``(归一化白名单丢弃)、"只有一家授权店"、歧义别名、
 无匹配的 SKU 与非法金额。
@@ -15,35 +18,18 @@ Provenance 只由四类白名单证据产生,其余一律 ``UNTRUSTED``:
 
 from __future__ import annotations
 
-import enum
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any
 
 from agents.product_operations.input.normalizer import (
     normalize_amount,
     normalize_label,
 )
-
-
-class ArgumentProvenance(str, enum.Enum):
-    """架构文档 §5 的五种参数来源;只由确定性规则判定,不接受模型自报。"""
-
-    USER_EXPLICIT = "USER_EXPLICIT"
-    USER_CONFIRMED = "USER_CONFIRMED"
-    SYSTEM_RESOLVED = "SYSTEM_RESOLVED"
-    DETERMINISTIC_DERIVED = "DETERMINISTIC_DERIVED"
-    UNTRUSTED = "UNTRUSTED"
-
-
-TRUSTED_PROVENANCE: Final[frozenset[ArgumentProvenance]] = frozenset(
-    {
-        ArgumentProvenance.USER_EXPLICIT,
-        ArgumentProvenance.USER_CONFIRMED,
-        ArgumentProvenance.SYSTEM_RESOLVED,
-        ArgumentProvenance.DETERMINISTIC_DERIVED,
-    }
+from runtime.execution.pretool.provenance import (
+    TRUSTED_TRUST_LEVELS,
+    ArgumentTrustLevel,
 )
 
 
@@ -97,7 +83,7 @@ class ProvenanceOutcome:
       金额 → 两位小数 ``Decimal``);不可信字段为 ``None``。
     """
 
-    field_sources: Mapping[str, ArgumentProvenance]
+    field_sources: Mapping[str, ArgumentTrustLevel]
     canonical_values: Mapping[str, Any]
 
 
@@ -124,7 +110,7 @@ class EvidenceResolver:
         del history
         normalized_message = normalize_label(user_message)
         answers = answered or {}
-        field_sources: dict[str, ArgumentProvenance] = {}
+        field_sources: dict[str, ArgumentTrustLevel] = {}
         canonical_values: dict[str, Any] = {}
 
         store_source, store_value = self._resolve_store(
@@ -162,7 +148,7 @@ class EvidenceResolver:
         arguments: Mapping[str, Any],
         stores: Sequence[StoreCandidate],
         answers: Mapping[str, str],
-    ) -> tuple[ArgumentProvenance, str | None]:
+    ) -> tuple[ArgumentTrustLevel, str | None]:
         """``store_id`` 只接受 USER_EXPLICIT / USER_CONFIRMED。"""
         value = _trimmed_str(arguments.get("store_id"))
         answered_store = _trimmed_str(answers.get("store_id"))
@@ -171,17 +157,17 @@ class EvidenceResolver:
                 normalized_message, value, stores
             )
             if evidence is not None and evidence.matches_value(value):
-                return ArgumentProvenance.USER_EXPLICIT, evidence.store_id
+                return ArgumentTrustLevel.USER_EXPLICIT, evidence.store_id
             if (
                 answered_store is not None
                 and value == answered_store
                 and _in_candidates(answered_store, stores)
             ):
-                return ArgumentProvenance.USER_CONFIRMED, answered_store
-            return ArgumentProvenance.UNTRUSTED, None
+                return ArgumentTrustLevel.USER_CONFIRMED, answered_store
+            return ArgumentTrustLevel.UNTRUSTED, None
         if answered_store is not None and _in_candidates(answered_store, stores):
-            return ArgumentProvenance.USER_CONFIRMED, answered_store
-        return ArgumentProvenance.UNTRUSTED, None
+            return ArgumentTrustLevel.USER_CONFIRMED, answered_store
+        return ArgumentTrustLevel.UNTRUSTED, None
 
     def _resolve_sku(
         self,
@@ -190,39 +176,39 @@ class EvidenceResolver:
         arguments: Mapping[str, Any],
         answers: Mapping[str, str],
         sku_unique_in_workspace: bool | None,
-    ) -> tuple[ArgumentProvenance, str | None]:
+    ) -> tuple[ArgumentTrustLevel, str | None]:
         """``sku``:消息精确证据 > 结构化回答 > Workspace 唯一匹配。"""
         value = _trimmed_str(arguments.get("sku"))
         answered_sku = _trimmed_str(answers.get("sku"))
         if value is not None:
             normalized_value = normalize_label(value)
             if normalized_value and normalized_value in normalized_message:
-                return ArgumentProvenance.USER_EXPLICIT, value
+                return ArgumentTrustLevel.USER_EXPLICIT, value
             if answered_sku is not None and value == answered_sku:
-                return ArgumentProvenance.USER_CONFIRMED, value
+                return ArgumentTrustLevel.USER_CONFIRMED, value
             if sku_unique_in_workspace is True:
-                return ArgumentProvenance.SYSTEM_RESOLVED, value
-            return ArgumentProvenance.UNTRUSTED, None
+                return ArgumentTrustLevel.SYSTEM_RESOLVED, value
+            return ArgumentTrustLevel.UNTRUSTED, None
         if answered_sku is not None:
-            return ArgumentProvenance.USER_CONFIRMED, answered_sku
-        return ArgumentProvenance.UNTRUSTED, None
+            return ArgumentTrustLevel.USER_CONFIRMED, answered_sku
+        return ArgumentTrustLevel.UNTRUSTED, None
 
     def _resolve_target_price(
         self, *, arguments: Mapping[str, Any], answers: Mapping[str, str]
-    ) -> tuple[ArgumentProvenance, Decimal | None]:
+    ) -> tuple[ArgumentTrustLevel, Decimal | None]:
         """``target_price``:合法金额是确定性规范化结果;非法金额不可信。"""
         raw = arguments.get("target_price")
         if raw is not None and (not isinstance(raw, str) or raw.strip()):
             amount = normalize_amount(raw)
             if amount is not None:
-                return ArgumentProvenance.DETERMINISTIC_DERIVED, amount
-            return ArgumentProvenance.UNTRUSTED, None
+                return ArgumentTrustLevel.DETERMINISTIC_DERIVED, amount
+            return ArgumentTrustLevel.UNTRUSTED, None
         answered_price = _trimmed_str(answers.get("target_price"))
         if answered_price is not None:
             amount = normalize_amount(answered_price)
             if amount is not None:
-                return ArgumentProvenance.USER_CONFIRMED, amount
-        return ArgumentProvenance.UNTRUSTED, None
+                return ArgumentTrustLevel.USER_CONFIRMED, amount
+        return ArgumentTrustLevel.UNTRUSTED, None
 
     @staticmethod
     def _explicit_store_evidence(
@@ -259,8 +245,8 @@ def _in_candidates(store_id: str, stores: Sequence[StoreCandidate]) -> bool:
 
 
 __all__ = [
-    "TRUSTED_PROVENANCE",
-    "ArgumentProvenance",
+    "TRUSTED_TRUST_LEVELS",
+    "ArgumentTrustLevel",
     "EvidenceResolver",
     "ProvenanceOutcome",
     "StoreCandidate",

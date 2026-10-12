@@ -34,8 +34,8 @@ from agents.product_operations.input.normalizer import (
     normalize_arguments,
 )
 from agents.product_operations.input.provenance import (
-    TRUSTED_PROVENANCE,
-    ArgumentProvenance,
+    TRUSTED_TRUST_LEVELS,
+    ArgumentTrustLevel,
     EvidenceResolver,
     StoreCandidate,
 )
@@ -73,7 +73,7 @@ class ProductInputResolution(_FrozenModel):
     """``resolve`` 的返回值:Provenance 映射 + 可选 Input Request + 校验诊断。"""
 
     requirement: InputRequirement | None = None
-    provenance: Mapping[str, ArgumentProvenance]
+    provenance: Mapping[str, ArgumentTrustLevel]
     normalized_arguments: Mapping[str, Any]
     diagnostics: tuple[SchemaDiagnostic, ...] = ()
 
@@ -141,7 +141,7 @@ class ProductInputRequirementResolver:
             untrusted = tuple(
                 field
                 for field in key_fields
-                if outcome.field_sources.get(field) not in TRUSTED_PROVENANCE
+                if outcome.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
             )
             if untrusted:
                 requirement = await self._build_requirement(untrusted, actor=actor)
@@ -292,7 +292,8 @@ class ProductPreToolProvenanceResolver:
     """``ArgumentProvenanceResolver`` 协议适配。
 
     runtime 协议只注入 ``arguments``,当前用户消息/结构化回答在构造时绑定;
-    返回 runtime 的 ``ArgumentProvenance`` 值对象(field_sources 为来源字符串)。
+    返回 runtime 的 ``ArgumentProvenance`` 值对象(field_sources 直接携带
+    Runtime 的 :class:`ArgumentTrustLevel`,不再回退到字符串)。
     """
 
     def __init__(
@@ -322,9 +323,7 @@ class ProductPreToolProvenanceResolver:
             fields=self._fields,
         )
         return RuntimeArgumentProvenance(
-            field_sources={
-                field: level.value for field, level in resolution.provenance.items()
-            }
+            field_sources=dict(resolution.provenance)
         )
 
 

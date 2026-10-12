@@ -12,6 +12,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from runtime.execution.pretool.provenance import ArgumentTrustLevel
 from runtime.interfaces.requests import ConfirmationSpec, InputRequirement
 
 
@@ -84,11 +85,15 @@ class PolicyDecision(BaseModel):
 
 
 class ArgumentProvenance(BaseModel):
-    """参数来源判定结果;只来自确定性规则,不接受模型自报来源。"""
+    """参数来源判定结果;只来自确定性规则,不接受模型自报来源。
+
+    ``field_sources`` 的值是 Runtime 唯一类型 :class:`ArgumentTrustLevel`:
+    未知等级在此处即被拒绝,而不是靠业务模块各自的字符串约定。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    field_sources: Mapping[str, str] = {}
+    field_sources: Mapping[str, ArgumentTrustLevel] = {}
 
 
 class ExecutionModeDecision(BaseModel):

@@ -1,4 +1,4 @@
-"""参数归一化与 ArgumentProvenance 测试(计划 03 Task 3;架构文档 §5)。
+"""参数归一化与 ArgumentTrustLevel 测试(计划 03 Task 3;架构文档 §5)。
 
 覆盖:
 - 计划原文用例:模型编造店铺必须转 Input;店铺候选项限制在授权范围;
@@ -31,7 +31,7 @@ from agents.product_operations.input.normalizer import (
     normalize_amount,
     normalize_arguments,
 )
-from agents.product_operations.input.provenance import ArgumentProvenance
+from agents.product_operations.input.provenance import ArgumentTrustLevel
 from agents.product_operations.input.requirements import (
     ProductInputRequirementResolver,
     ProductPreToolInputRequirementResolver,
@@ -162,7 +162,7 @@ async def test_model_supplied_store_without_evidence_requires_input(
     )
     assert result.requirement is not None
     assert result.requirement.field_paths == ("store_id",)
-    assert result.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
 
 
 async def test_store_options_are_limited_to_actor_scope(
@@ -189,9 +189,9 @@ async def test_store_alias_in_current_message_is_user_explicit(
         },
         actor=actor_with_taobao_only(input_catalog),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.USER_EXPLICIT
-    assert result.provenance["sku"] == ArgumentProvenance.USER_EXPLICIT
-    assert result.provenance["target_price"] == ArgumentProvenance.DETERMINISTIC_DERIVED
+    assert result.provenance["store_id"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.provenance["sku"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.provenance["target_price"] == ArgumentTrustLevel.DETERMINISTIC_DERIVED
     assert result.requirement is None
     assert result.diagnostics == ()
 
@@ -206,7 +206,7 @@ async def test_store_alias_argument_is_canonicalized_via_alias_table(
         arguments={"store_id": " 淘宝旗舰店 ", "sku": "SKU-001", "target_price": "99.00"},
         actor=actor_with_taobao_only(input_catalog),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.USER_EXPLICIT
+    assert result.provenance["store_id"] == ArgumentTrustLevel.USER_EXPLICIT
     assert result.normalized_arguments["store_id"] == str(input_catalog.taobao.id)
     assert result.requirement is None
 
@@ -228,7 +228,7 @@ async def test_each_explicit_store_in_multi_store_message_is_trusted(
         },
         actor=actor_with_all_stores(input_catalog),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.USER_EXPLICIT
+    assert result.provenance["store_id"] == ArgumentTrustLevel.USER_EXPLICIT
     assert result.normalized_arguments["store_id"] == str(selected.id)
     assert result.requirement is None
 
@@ -256,7 +256,7 @@ async def test_ambiguous_alias_evidence_is_not_trusted(
         },
         actor=actor_with_all_stores(input_catalog),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     assert result.requirement is not None
     assert "store_id" in result.requirement.field_paths
 
@@ -275,7 +275,7 @@ async def test_sku_unique_workspace_match_is_system_resolved(
         },
         actor=actor_with_taobao_only(input_catalog),
     )
-    assert result.provenance["sku"] == ArgumentProvenance.SYSTEM_RESOLVED
+    assert result.provenance["sku"] == ArgumentTrustLevel.SYSTEM_RESOLVED
     assert result.requirement is None
 
 
@@ -292,7 +292,7 @@ async def test_sku_without_workspace_match_is_untrusted(
         },
         actor=actor_with_taobao_only(input_catalog),
     )
-    assert result.provenance["sku"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["sku"] == ArgumentTrustLevel.UNTRUSTED
     assert result.requirement is not None
     assert "sku" in result.requirement.field_paths
 
@@ -315,13 +315,13 @@ async def test_answered_request_store_is_user_confirmed(
     confirmed = await input_resolver.resolve(
         **base, answered={"store_id": str(input_catalog.taobao.id)}
     )
-    assert confirmed.provenance["store_id"] == ArgumentProvenance.USER_CONFIRMED
+    assert confirmed.provenance["store_id"] == ArgumentTrustLevel.USER_CONFIRMED
     assert confirmed.requirement is None
 
     out_of_scope = await input_resolver.resolve(
         **base, answered={"store_id": str(input_catalog.douyin.id)}
     )
-    assert out_of_scope.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert out_of_scope.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     assert out_of_scope.requirement is not None
     assert "store_id" in out_of_scope.requirement.field_paths
 
@@ -344,7 +344,7 @@ async def test_history_messages_are_not_evidence(
         actor=actor_with_taobao_only(input_catalog),
         history=("上一轮:请把淘宝旗舰店的 SKU-001 改成 99 元。",),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     assert result.requirement is not None
     assert "store_id" in result.requirement.field_paths
 
@@ -366,7 +366,7 @@ async def test_model_reported_source_and_confidence_are_ignored(
         user_message="把 SKU-001 改成 99 元", arguments=padded
     )
     assert plain.provenance == padded_result.provenance
-    assert padded_result.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert padded_result.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     # 白名单之外的字段被归一化直接丢弃。
     assert set(padded_result.normalized_arguments) == set(base)
 
@@ -385,7 +385,7 @@ async def test_single_authorized_store_is_not_evidence(
         },
         actor=actor_with_taobao_only(input_catalog),
     )
-    assert result.provenance["store_id"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     assert result.requirement is not None
     assert result.requirement.field_paths == ("store_id",)
 
@@ -410,7 +410,7 @@ async def test_invalid_price_fails_validation_instead_of_input(
     )
     assert result.requirement is None
     assert result.diagnostics[0].field_paths == ("target_price",)
-    assert result.provenance["target_price"] == ArgumentProvenance.UNTRUSTED
+    assert result.provenance["target_price"] == ArgumentTrustLevel.UNTRUSTED
 
 
 def test_normalize_arguments_trims_fields_and_converts_amounts() -> None:

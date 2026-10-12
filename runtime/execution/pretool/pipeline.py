@@ -77,6 +77,7 @@ from runtime.execution.pretool.profiles import (
     PreToolProfile,
     PreToolProfileContext,
 )
+from runtime.execution.pretool.provenance import TRUSTED_TRUST_LEVELS
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.tool_registry import (
     TOOL_RESOLVED as TOOL_STATUS_RESOLVED,
@@ -111,9 +112,6 @@ class ToolCallRequest(BaseModel):
     version: int
     raw_arguments: str
 
-
-ARGUMENT_UNTRUSTED: Final = "UNTRUSTED"
-"""来源守卫判定的不可信来源标识(与 ArgumentTrustLevel.UNTRUSTED 同值)。"""
 
 PROVENANCE_GUARD_MESSAGE: Final = (
     "key arguments lack trusted user or authoritative evidence"
@@ -341,6 +339,8 @@ def _apply_provenance_guard(
 
     关键字段由 Tool 自己的 Profile 声明;守卫把命中字段并入 SchemaDiagnostic,
     交由 input_requirement 阶段转成可回答的 Input Request,不进入写执行阶段。
+    **未在 field_sources 中声明的字段按 UNTRUSTED 处理**(fail closed):只有
+    出现在可信白名单里的来源才放行。
     """
     guard_fields = profile.provenance_guard_fields
     if not guard_fields:
@@ -349,7 +349,7 @@ def _apply_provenance_guard(
         field
         for field in guard_fields
         if field in arguments
-        and provenance.field_sources.get(field) == ARGUMENT_UNTRUSTED
+        and provenance.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
     )
     if not untrusted:
         return

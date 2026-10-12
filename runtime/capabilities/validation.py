@@ -97,9 +97,13 @@ def validate_assembly(
     backends: BackendRegistry,
     backend_key: str | None = None,
 ) -> None:
-    """执行全部启动校验;任一失败即抛出携带 reason_code 的 AssemblyError。"""
+    """执行全部启动校验;任一失败即抛出携带 reason_code 的 AssemblyError。
+
+    Agent 需求只校验当前版本(新 Run 只解析当前版本);Tool 版本与 ToolBinding
+    校验遍历全部已装载版本,确保仅供恢复的兼容版本同样能解析到可执行实现。
+    """
     _validate_agent_requirements(agents, skills, tools, sources, backends, backend_key)
-    _validate_tool_versions(tools.records())
+    _validate_tool_versions(tools.all_records())
     _validate_tool_bindings(tools)
 
 
@@ -178,29 +182,27 @@ def _validate_tool_versions(records: tuple[ToolVersionRecord, ...]) -> None:
 
 
 def _validate_tool_bindings(tools: ToolRegistry) -> None:
-    for binding in tools.bindings():
-        if tools.find_by_key(binding.definition.stable_key) is None:
-            raise AssemblyError(
-                UNKNOWN_TOOL_BINDING,
-                f"ToolBinding 引用了未注册的 Tool {binding.definition.stable_key}",
-            )
-    for record in tools.records():
-        if record.source_kind != "LOCAL":
-            continue
-        bindings = tools.bindings_for(record.stable_key)
-        if not bindings:
+    local_records = [record for record in tools.all_records() if record.source_kind == "LOCAL"]
+    for record in local_records:
+        binding = tools.binding_for_version(record.version_id)
+        if binding is None:
             raise AssemblyError(
                 MISSING_TOOL_BINDING,
                 f"Local Tool {record.stable_key} v{record.version} 没有 ToolBinding",
             )
-        if len(bindings) > 1:
+        if binding.definition.stable_key != record.stable_key:
             raise AssemblyError(
-                DUPLICATE_TOOL_BINDING,
-                f"Local Tool {record.stable_key} 绑定了 {len(bindings)} 个 ToolBinding,"
-                " 应恰好一个",
+                UNKNOWN_TOOL_BINDING,
+                f"ToolBinding 引用了未注册的 Tool {binding.definition.stable_key}",
             )
-        _validate_write_capabilities(record, bindings[0])
-        validate_tool_binding(bindings[0])
+        _validate_write_capabilities(record, binding)
+        validate_tool_binding(binding)
+    # Binding 以 Version ID 为键,数量与 LOCAL 版本数不等即存在悬空绑定。
+    if len(tools.bindings()) != len(local_records):
+        raise AssemblyError(
+            UNKNOWN_TOOL_BINDING,
+            "存在未关联任何已注册 LOCAL Tool 版本的 ToolBinding",
+        )
 
 
 def validate_tool_binding(binding: ToolBinding) -> None:
@@ -272,7 +274,6 @@ __all__ = [
     "AGENT_TOOL_VERSION_MISSING",
     "AGENT_VERSION_NOT_FOUND",
     "BACKEND_CAPABILITY_INSUFFICIENT",
-    "DUPLICATE_TOOL_BINDING",
     "MCP_TOOL_UNCLASSIFIED",
     "MISSING_TOOL_BINDING",
     "OPERATION_CAPABILITY",
