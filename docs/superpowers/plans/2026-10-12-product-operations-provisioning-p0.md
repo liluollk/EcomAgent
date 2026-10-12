@@ -305,4 +305,3 @@ Expected: PASS。
 git add tests/architecture/test_dependency_boundaries.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md
 git commit -m "docs: close product provisioning p0"
 ```
-
