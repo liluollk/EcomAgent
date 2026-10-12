@@ -65,7 +65,7 @@
 - Modify: tests/agents/product_operations/test_read_tools.py
 - Create: tests/agents/product_operations/test_tool_profiles.py
 
-- [ ] **Step 1: 增加 search_products 的 Runtime 路径测试**
+- [x] **Step 1: 增加 search_products 的 Runtime 路径测试**
 
 测试必须通过 ProductApplication 启动 Run，而不是直接调用 search_products 函数。脚本 Backend 生成：
 
@@ -88,7 +88,7 @@ assert snapshot.normalized_arguments == {
 }
 ```
 
-- [ ] **Step 2: 增加 compare_listing_prices 的多店铺参数测试**
+- [x] **Step 2: 增加 compare_listing_prices 的多店铺参数测试**
 
 ```python
 assert snapshot.normalized_arguments == {
@@ -97,7 +97,7 @@ assert snapshot.normalized_arguments == {
 }
 ```
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run:
 
@@ -107,7 +107,7 @@ pytest tests/agents/product_operations/test_read_tools.py tests/agents/product_o
 
 Expected: 新增测试失败，失败证据显示 query 或 store_ids 在 ProductPreToolNormalizer 后丢失；已有测试保持原状态。
 
-- [ ] **Step 4: 提交测试**
+- [x] **Step 4: 提交测试**
 
 ```powershell
 git add tests/agents/product_operations/test_read_tools.py tests/agents/product_operations/test_tool_profiles.py
@@ -124,7 +124,7 @@ git commit -m "test: expose per-tool normalization gap"
 - Modify: runtime/capabilities/registry.py
 - Modify: runtime/capabilities/validation.py
 
-- [ ] **Step 1: 为 Profile 校验编写失败测试**
+- [x] **Step 1: 为 Profile 校验编写失败测试**
 
 覆盖：
 
@@ -140,7 +140,7 @@ def test_write_binding_requires_business_policy() -> None:
         validate_tool_binding(write_binding_without_policy)
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -150,7 +150,7 @@ pytest tests/runtime/execution/test_pretool_profiles.py -q
 
 Expected: FAIL，因为 profiles.py 和校验函数尚不存在。
 
-- [ ] **Step 3: 实现最小 Profile 类型**
+- [x] **Step 3: 实现最小 Profile 类型**
 
 profiles.py 定义：
 
@@ -195,7 +195,7 @@ class PreToolProfileFactory(Protocol):
         raise NotImplementedError
 ```
 
-- [ ] **Step 4: 扩展 ToolBinding**
+- [x] **Step 4: 扩展 ToolBinding**
 
 ```python
 class ToolBinding(BaseModel):
@@ -228,7 +228,7 @@ class ToolExecutionProfile(BaseModel):
     supports_reconciliation: bool = False
 ```
 
-- [ ] **Step 5: 增加启动校验**
+- [x] **Step 5: 增加启动校验**
 
 校验错误使用稳定错误码：
 
@@ -238,7 +238,7 @@ class ToolExecutionProfile(BaseModel):
 - WRITE_TOOL_EXECUTION_PROFILE_MISSING
 - READ_TOOL_EXECUTION_PROFILE_FORBIDDEN
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run:
 
@@ -248,7 +248,7 @@ pytest tests/runtime/execution/test_pretool_profiles.py tests/runtime/capabiliti
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```powershell
 git add runtime/execution/pretool/profiles.py runtime/execution/bindings.py runtime/capabilities/registry.py runtime/capabilities/validation.py tests/runtime/execution/test_pretool_profiles.py
@@ -265,7 +265,7 @@ git commit -m "refactor: bind pretool policy to each tool"
 - Create: agents/product_operations/policy/price_pretool.py
 - Modify: tests/agents/product_operations/test_tool_profiles.py
 
-- [ ] **Step 1: 将 ProductPreToolNormalizer 改为显式字段集合**
+- [x] **Step 1: 将 ProductPreToolNormalizer 改为显式字段集合**
 
 ```python
 class ProductPreToolNormalizer:
@@ -285,7 +285,7 @@ normalize 只遍历 self._fields，不再读取全局 KEY_ARGUMENT_FIELDS。
 
 字段值的 Decimal、UUID 和列表规范化继续复用 normalizer.py 中的纯函数；requirements.py 不再从全局 KEY_ARGUMENT_FIELDS 推导所有 Tool 的允许字段。
 
-- [ ] **Step 2: 为现有 Tool 声明字段**
+- [x] **Step 2: 为现有 Tool 声明字段**
 
 ```python
 TOOL_ARGUMENT_FIELDS = {
@@ -296,7 +296,7 @@ TOOL_ARGUMENT_FIELDS = {
 }
 ```
 
-- [ ] **Step 3: 为 Tool 绑定独立资源解析器与策略**
+- [x] **Step 3: 为 Tool 绑定独立资源解析器与策略**
 
 规则：
 
@@ -308,11 +308,11 @@ TOOL_ARGUMENT_FIELDS = {
 
 把 composition/product_operations.py 中的 _PriceBusinessPolicy 移到 agents/product_operations/policy/price_pretool.py，并重命名为 PricePreToolPolicy。它仍然通过请求级 Session 和 Actor 调用现有 PricePolicy，不把 Repository 移入 Runtime。
 
-- [ ] **Step 4: 测试新增写 Tool 漏配策略时确定性失败**
+- [x] **Step 4: 测试新增写 Tool 漏配策略时确定性失败**
 
 构造一个测试 WRITE Tool，故意复用 READ Profile，断言 assembly.validate() 返回 WRITE_TOOL_POLICY_MISSING。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -322,7 +322,7 @@ pytest tests/agents/product_operations/test_tool_profiles.py tests/agents/produc
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add agents/product_operations/input/normalizer.py agents/product_operations/input/requirements.py agents/product_operations/input/profiles.py agents/product_operations/policy/price_pretool.py composition/product_operations.py tests/agents/product_operations/test_tool_profiles.py
@@ -338,7 +338,7 @@ git commit -m "refactor: define product pretool profiles per tool"
 - Modify: composition/product_operations.py
 - Modify: tests/runtime/execution/test_pretool_pipeline.py
 
-- [ ] **Step 1: 增加 Profile 解析测试**
+- [x] **Step 1: 增加 Profile 解析测试**
 
 断言同一个 RuntimeToolRegistry 中：
 
@@ -346,7 +346,7 @@ git commit -m "refactor: define product pretool profiles per tool"
 - update_price 使用 UpdatePriceProfile；
 - 未绑定 Profile 的 Tool 在 tool_resolution 后确定性 DENY。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -356,7 +356,7 @@ pytest tests/runtime/execution/test_pretool_pipeline.py -q
 
 Expected: 新测试 FAIL。
 
-- [ ] **Step 3: 调整 Pipeline 依赖**
+- [x] **Step 3: 调整 Pipeline 依赖**
 
 PreToolDependencies 只保留 Runtime 统一依赖：
 
@@ -372,7 +372,7 @@ class PreToolDependencies:
 
 tool_resolution 成功后，从 ToolResolution.binding.pretool_registration 取得注册描述，再用本次评估上下文创建业务协作对象。固定十阶段顺序不改变。
 
-- [ ] **Step 4: 删除 _ScopedProductPipeline 的全局商品扩展注入**
+- [x] **Step 4: 删除 _ScopedProductPipeline 的全局商品扩展注入**
 
 _ScopedProductPipeline 只构造 Runtime 依赖与本次 actor/context。商品 Profile 在 ToolBinding 注册时创建，涉及当前 Session/Actor 的协作对象通过工厂延迟创建，不在应用启动时持有请求级 Session。
 
@@ -388,7 +388,7 @@ class PreToolProfileFactory(Protocol):
 
 PreToolDependencies 增加 profile_context 字段；Pipeline 在 tool_resolution 后只创建一次 Profile，并缓存在本次 PreToolContext 中，后续阶段复用同一实例。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -398,7 +398,7 @@ pytest tests/runtime/execution/test_pretool_pipeline.py tests/agents/product_ope
 
 Expected: PASS；Task 1 暴露的 query/store_ids 丢失问题已修复。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add runtime/execution/pretool/pipeline.py runtime/execution/tool_registry.py composition/product_operations.py tests/runtime/execution/test_pretool_pipeline.py tests/agents/product_operations/test_read_tools.py
@@ -416,7 +416,7 @@ git commit -m "refactor: resolve pretool behavior from tool binding"
 - Modify: tests/runtime/orchestration/test_agent_loop.py
 - Modify: tests/runtime/integration/test_crash_recovery.py
 
-- [ ] **Step 1: 增加两个写 Tool 使用不同 Adapter Profile 的失败测试**
+- [x] **Step 1: 增加两个写 Tool 使用不同 Adapter Profile 的失败测试**
 
 同一个 AgentLoop 注册两个 WRITE Tool：
 
@@ -436,7 +436,7 @@ ToolExecutionProfile(
 
 分别执行后断言 Operation.adapter_key 和能力字段来自各自 ToolPin，不来自 Runtime。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -446,7 +446,7 @@ pytest tests/runtime/orchestration/test_agent_loop.py -q
 
 Expected: FAIL，因为 AgentLoop 仍使用全局 Adapter 字段。
 
-- [ ] **Step 3: 扩展 ToolPin**
+- [x] **Step 3: 扩展 ToolPin**
 
 ```python
 @dataclass(frozen=True)
@@ -460,7 +460,7 @@ class ToolPin:
     execution_profile: ToolExecutionProfile | None = None
 ```
 
-- [ ] **Step 4: 删除 Runtime 和 AgentLoop 的全局字段**
+- [x] **Step 4: 删除 Runtime 和 AgentLoop 的全局字段**
 
 从 Runtime.__init__、Runtime._build_loop 和 AgentLoop.__init__ 删除：
 
@@ -468,11 +468,11 @@ class ToolPin:
 - supports_native_idempotency
 - supports_reconciliation
 
-- [ ] **Step 5: 写操作只读取 pin.execution_profile**
+- [x] **Step 5: 写操作只读取 pin.execution_profile**
 
 _handle_require_confirmation 创建 PREPARED Operation 和 _execute_write 创建 ToolExecutor 时，都使用同一 pin.execution_profile。缺失 Profile 返回稳定失败码 WRITE_EXECUTION_PROFILE_MISSING。
 
-- [ ] **Step 6: ToolExecutor 接收 Profile 值对象**
+- [x] **Step 6: ToolExecutor 接收 Profile 值对象**
 
 在现有 ToolExecutor.__init__ 参数列表中删除 adapter_key、supports_native_idempotency、supports_reconciliation，加入：
 
@@ -488,7 +488,7 @@ self._execution_profile = execution_profile
 
 OperationService.begin 使用 Profile 中的字段。
 
-- [ ] **Step 7: 运行 Runtime 测试**
+- [x] **Step 7: 运行 Runtime 测试**
 
 Run:
 
@@ -498,7 +498,7 @@ pytest tests/runtime/orchestration/test_agent_loop.py tests/runtime/integration/
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```powershell
 git add runtime/orchestration/agent_loop.py runtime/orchestration/runtime.py runtime/execution/tool_executor.py composition/product_operations.py tests/runtime/orchestration/test_agent_loop.py tests/runtime/integration/test_crash_recovery.py
@@ -513,7 +513,7 @@ git commit -m "refactor: scope write execution profile to tool"
 - Modify: composition/product_operations.py
 - Modify: tests/agents/product_operations/test_read_tools.py
 
-- [ ] **Step 1: 为三个独立 Handler 编写契约测试**
+- [x] **Step 1: 为三个独立 Handler 编写契约测试**
 
 ```python
 handlers = (
@@ -540,7 +540,7 @@ for handler in handlers:
 
 每个 Handler 只接受自己 Tool 的参数，不读取 stable_key 做分发。
 
-- [ ] **Step 2: 实现独立 Handler**
+- [x] **Step 2: 实现独立 Handler**
 
 建立：
 
@@ -565,7 +565,7 @@ def __init__(
     self._actor_id = actor_id
 ```
 
-- [ ] **Step 3: 从组合根删除 _ProductReadToolHandler 和 _store_ids_of**
+- [x] **Step 3: 从组合根删除 _ProductReadToolHandler 和 _store_ids_of**
 
 注册表改为显式映射：
 
@@ -590,7 +590,7 @@ handlers = {
 }
 ```
 
-- [ ] **Step 4: 运行商品 Agent 测试**
+- [x] **Step 4: 运行商品 Agent 测试**
 
 Run:
 
@@ -600,7 +600,7 @@ pytest tests/agents/product_operations -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add agents/product_operations/tools/handlers.py composition/product_operations.py tests/agents/product_operations/test_read_tools.py
@@ -617,7 +617,7 @@ git commit -m "refactor: split product read tool handlers"
 - Modify: tests/agents/product_operations/test_price_flow.py
 - Modify: tests/runtime/interaction/test_confirmation_requests.py
 
-- [ ] **Step 1: 增加进程重启后的版本冲突测试**
+- [x] **Step 1: 增加进程重启后的版本冲突测试**
 
 测试流程：
 
@@ -628,7 +628,7 @@ git commit -m "refactor: split product read tool handlers"
 5. 接受确认并恢复 Run；
 6. 断言写操作在外部调用前以 LISTING_VERSION_CONFLICT 拒绝。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -638,7 +638,7 @@ pytest tests/agents/product_operations/test_price_flow.py -k version_conflict_af
 
 Expected: FAIL，因为当前版本绑定保存在进程内 dict。
 
-- [ ] **Step 3: 由 PriceBusinessPolicy 返回资源版本**
+- [x] **Step 3: 由 PriceBusinessPolicy 返回资源版本**
 
 资源版本进入 ConfirmationSpec.resource_versions：
 
@@ -650,11 +650,11 @@ Expected: FAIL，因为当前版本绑定保存在进程内 dict。
 
 恢复重评时从已接受 ConfirmationRequest 读取原始版本并与当前 Listing.version 比较。
 
-- [ ] **Step 4: 删除 _version_bindings**
+- [x] **Step 4: 删除 _version_bindings**
 
 从 _ProductPipelineFactory、_ScopedProductPipeline 和 _PriceBusinessPolicy 删除进程内字典。
 
-- [ ] **Step 5: 运行确认与价格流程测试**
+- [x] **Step 5: 运行确认与价格流程测试**
 
 Run:
 
@@ -664,7 +664,7 @@ pytest tests/runtime/interaction/test_confirmation_requests.py tests/agents/prod
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add agents/product_operations/policy/price_pretool.py composition/product_operations.py runtime/interaction/confirmation_service.py tests/agents/product_operations/test_price_flow.py tests/runtime/interaction/test_confirmation_requests.py
@@ -683,7 +683,7 @@ git commit -m "fix: persist confirmed listing version"
 - Create: tests/runtime/execution/test_argument_provenance.py
 - Modify: tests/agents/product_operations/test_argument_provenance.py
 
-- [ ] **Step 1: 编写类型唯一性与 fail-closed 失败测试**
+- [x] **Step 1: 编写类型唯一性与 fail-closed 失败测试**
 
 覆盖：
 
@@ -700,7 +700,7 @@ def test_unknown_trust_level_is_rejected() -> None:
         )
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -710,7 +710,7 @@ pytest tests/runtime/execution/test_argument_provenance.py tests/agents/product_
 
 Expected: FAIL，因为 Runtime 仍接受任意字符串，商品模块仍定义同名枚举。
 
-- [ ] **Step 3: 定义 Runtime 唯一枚举**
+- [x] **Step 3: 定义 Runtime 唯一枚举**
 
 ```python
 class ArgumentTrustLevel(str, Enum):
@@ -723,7 +723,7 @@ class ArgumentTrustLevel(str, Enum):
 
 ArgumentProvenance.field_sources 改成 Mapping[str, ArgumentTrustLevel]。删除 agents/product_operations/input/provenance.py 中重复的 ArgumentProvenance 枚举，只保留商品字段证据解析。
 
-- [ ] **Step 4: 用枚举替代字符串守卫**
+- [x] **Step 4: 用枚举替代字符串守卫**
 
 composition 中的 _UNTRUSTED_SOURCE 字符串常量删除，所有判断使用：
 
@@ -733,7 +733,7 @@ source is ArgumentTrustLevel.UNTRUSTED
 
 未出现在 field_sources 中的写操作关键字段必须按 UNTRUSTED 处理。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -743,7 +743,7 @@ pytest tests/runtime/execution/test_argument_provenance.py tests/agents/product_
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add runtime/execution/pretool/provenance.py runtime/execution/pretool/decisions.py runtime/execution/pretool/pipeline.py agents/product_operations/input/provenance.py composition/product_operations.py tests/runtime/execution/test_argument_provenance.py tests/agents/product_operations/test_argument_provenance.py
@@ -759,7 +759,7 @@ git commit -m "refactor: centralize argument trust levels"
 - Modify: tests/agents/product_operations/test_agent_assembly.py
 - Modify: tests/runtime/orchestration/test_limits.py
 
-- [ ] **Step 1: 编写装配路径失败测试**
+- [x] **Step 1: 编写装配路径失败测试**
 
 测试修改 PRODUCT_AGENT_DEFINITION.loop_limits 后，ProductApplication 使用的 max_model_rounds、max_tool_calls 和 reconcile_budget 随定义变化，而不是继续使用模块级 _LIMITS。
 
@@ -769,7 +769,7 @@ assert application.run_limits == RunLimits.from_definition(
 )
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -779,7 +779,7 @@ pytest tests/agents/product_operations/test_agent_assembly.py tests/runtime/orch
 
 Expected: FAIL，因为组合根仍直接使用 _LIMITS。
 
-- [ ] **Step 3: 把当前限制写入 AgentDefinition**
+- [x] **Step 3: 把当前限制写入 AgentDefinition**
 
 为保持行为不变，先把当前值迁入版本化定义：
 
@@ -796,7 +796,7 @@ loop_limits={
 
 每个值必须附注释说明它是当前参考 Agent 的保守运行上限，不是 Runtime 全局默认值。
 
-- [ ] **Step 4: 组合根从定义构造 RunLimits**
+- [x] **Step 4: 组合根从定义构造 RunLimits**
 
 ```python
 run_limits = RunLimits.from_definition(
@@ -806,7 +806,7 @@ run_limits = RunLimits.from_definition(
 
 ProductApplication 保存 self._run_limits，Runtime 构造和 reconciliation budget 都使用同一实例，删除 _LIMITS。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -816,7 +816,7 @@ pytest tests/agents/product_operations/test_agent_assembly.py tests/runtime/orch
 
 Expected: PASS，既有运行限制行为不变。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add agents/product_operations/agent.py composition/product_operations.py tests/agents/product_operations/test_agent_assembly.py tests/runtime/orchestration/test_limits.py
@@ -831,7 +831,7 @@ git commit -m "fix: wire agent loop limits into composition"
 - Modify: tests/runtime/memory/conftest.py
 - Modify: tests/runtime/memory/test_memory_policy.py
 
-- [ ] **Step 1: 编写通用名称和旧名称拒绝测试**
+- [x] **Step 1: 编写通用名称和旧名称拒绝测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -848,7 +848,7 @@ def test_legacy_price_rule_is_still_rejected_as_unknown() -> None:
     ) is False
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -858,7 +858,7 @@ pytest tests/runtime/memory/test_memory_policy.py -q
 
 Expected: 新的 business_rule 分类断言 FAIL。
 
-- [ ] **Step 3: 替换 Runtime 常量**
+- [x] **Step 3: 替换 Runtime 常量**
 
 ```python
 EXECUTION_CRITICAL_MEMORY_KINDS = frozenset(
@@ -868,7 +868,7 @@ EXECUTION_CRITICAL_MEMORY_KINDS = frozenset(
 
 price_rule 不再出现在 Runtime 源码；由于未知 kind 本来也拒绝，旧输入 price_rule 仍然 fail-closed，不需要兼容放行。
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
 Run:
 
@@ -878,7 +878,7 @@ pytest tests/runtime/memory/test_memory_policy.py -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add runtime/memory/service.py tests/runtime/memory/conftest.py tests/runtime/memory/test_memory_policy.py
@@ -892,7 +892,7 @@ git commit -m "refactor: generalize execution critical memory kinds"
 - Modify: tests/architecture/test_dependency_boundaries.py
 - Modify: docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md
 
-- [ ] **Step 1: 增加依赖边界断言**
+- [x] **Step 1: 增加依赖边界断言**
 
 断言：
 
@@ -902,7 +902,7 @@ git commit -m "refactor: generalize execution critical memory kinds"
 - business policy 不导入 composition；
 - read handler 不按 stable_key 分发。
 
-- [ ] **Step 2: 运行分层测试**
+- [x] **Step 2: 运行分层测试**
 
 Run:
 
@@ -912,7 +912,7 @@ pytest tests/architecture tests/runtime tests/agents/product_operations tests/ad
 
 Expected: PASS。
 
-- [ ] **Step 3: 运行静态检查**
+- [x] **Step 3: 运行静态检查**
 
 Run:
 
@@ -923,7 +923,7 @@ mypy runtime agents adapters composition
 
 Expected: 两条命令均退出 0；若仓库已有基线问题，只允许记录与本次文件无关的既有错误，不得用全局 ignore 掩盖。
 
-- [ ] **Step 4: 运行全量测试**
+- [x] **Step 4: 运行全量测试**
 
 Run:
 
@@ -933,7 +933,7 @@ pytest -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 检查新增边界**
+- [x] **Step 5: 检查新增边界**
 
 确认：
 
@@ -945,7 +945,7 @@ Expected: PASS。
 
 仅当 Task 1-11 与兄弟 Provisioning P0 计划全部通过后，把 ADR-002 的状态从“已接受，尚未实施”更新为“P0 已实施，P1/P2 待实施”，并在文档记录实际提交号和验证命令。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```powershell
 git add tests/architecture/test_dependency_boundaries.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md
