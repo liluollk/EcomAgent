@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Final
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
@@ -37,6 +37,11 @@ from agents.product_operations.tools.errors import ProductNotFoundError, ToolAcc
 from agents.product_operations.tools.get_product_snapshot import (
     GET_PRODUCT_SNAPSHOT_BINDING,
     get_product_snapshot,
+)
+from agents.product_operations.tools.handlers import (
+    CompareListingPricesHandler,
+    GetProductSnapshotHandler,
+    SearchProductsHandler,
 )
 from agents.product_operations.tools.search_products import (
     SEARCH_PRODUCTS_BINDING,
@@ -204,7 +209,7 @@ async def test_compare_prices_returns_only_authorized_stores(
     row = result.items[0]
     assert row.current_price == Decimal("128.00")
     assert row.currency == "CNY"
-    assert row.status == "ACTIVE"
+    assert row.status == "PUBLISHED"
     assert row.listing_version == 1
 
 
@@ -289,7 +294,7 @@ async def test_get_product_snapshot_returns_whitelisted_fields(
     assert snapshot.title == "轻量保温杯 500ml"
     assert snapshot.current_price == Decimal("128.00")
     assert snapshot.currency == "CNY"
-    assert snapshot.status == "ACTIVE"
+    assert snapshot.status == "PUBLISHED"
     assert snapshot.listing_version == 1
     # cost_price 数值不输出,只以脱敏摘要出现(摘要本身引用字段名是预期行为)。
     assert snapshot.redacted_fields == ("cost_price",)
@@ -480,3 +485,37 @@ async def test_search_products_normalization_preserves_query_and_store_ids(
         "query": "保温杯",
         "store_ids": [store_id],
     }
+
+
+# ---- 读 Tool Handler:一 Tool 一 Handler,不按 stable_key 分发 ----
+
+
+def test_read_tool_handlers_are_independent_endpoints(engine: AsyncEngine) -> None:
+    """三个读 Tool 各有独立 Handler,只暴露自身 ``read`` 端点。"""
+    session_factory = lambda: AsyncSession(engine, expire_on_commit=False)
+    handlers = (
+        SearchProductsHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+        GetProductSnapshotHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+        CompareListingPricesHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+    )
+
+    assert [type(handler) for handler in handlers] == [
+        SearchProductsHandler,
+        GetProductSnapshotHandler,
+        CompareListingPricesHandler,
+    ]
+    for handler in handlers:
+        assert callable(handler.read)
+
