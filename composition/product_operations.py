@@ -2,8 +2,10 @@
 
 ``build_product_application`` 是 ProductMaintenance Agent 的组装核心:
 
-- 启动期把 Agent/Skill/Tool/Model 版本写入数据库并注册进程内 Registry,
-  执行 :class:`~runtime.capabilities.assembly.RuntimeAssembly` 启动校验;
+- 只消费已发布能力快照(:class:`~composition.provisioning.product_operations.ProductOperationsCapabilities`),
+  校验其 Version ID 均已发布后注册进程内 Registry,执行
+  :class:`~runtime.capabilities.assembly.RuntimeAssembly` 启动校验;
+  本模块不写 Agent/Skill/Tool/Model 配置表(发布由 Provisioner 负责);
 - 组装 PreToolUse 管线工厂(注入商品域各阶段实现:输入归一化、参数
   Provenance、InputRequirement、店铺资源解析、价格 Policy、执行模式与
   确认校验)、:class:`~runtime.orchestration.context.ContextAssembler`、
@@ -27,12 +29,9 @@ adapters 已依赖 agents(:mod:`adapters.commerce.mock_adapter` 先例),故
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
@@ -83,10 +82,14 @@ from agents.product_operations.tools.handlers import (
 )
 from agents.product_operations.tools.update_price import (
     STABLE_KEY_UPDATE_PRICE,
-    UPDATE_PRICE_DEFINITION,
     UpdatePriceToolHandler,
     UpdatePriceWriteCommand,
     UpdatePriceWriteReceipt,
+)
+from composition.provisioning.product_operations import (
+    ProductOperationsCapabilities,
+    product_tool_definitions,
+    require_published_capabilities,
 )
 from runtime.access.actor import ActorContextBuilder
 from runtime.access.authorization import Authorizer
@@ -112,7 +115,6 @@ from runtime.capabilities.registry import (
 )
 from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.skill_activation import (
-    LOAD_SKILL_DEFINITION,
     LOAD_SKILL_HANDLER,
     LOAD_SKILL_KEY,
 )
@@ -149,29 +151,12 @@ from runtime.orchestration.runtime import Runtime
 from runtime.orchestration.summarization import ConversationSummarizer
 from runtime.orchestration.token_estimator import HeuristicTokenEstimator
 from runtime.persistence.base import (
-    ConfigScope,
-    ConfigVersionStatus,
     ConfirmationRequestStatus,
     ExecutionMode,
     InputRequestStatus,
-    ModelBackendType,
     OperationStatus,
     RunJobKind,
     ToolEffect,
-)
-from runtime.persistence.models.configuration import (
-    Agent,
-    AgentVersion,
-    ModelConfigVersion,
-    ModelConnection,
-    Skill,
-    SkillVersion,
-)
-from runtime.persistence.models.configuration import (
-    ToolDefinition as ToolDefinitionRow,
-)
-from runtime.persistence.models.configuration import (
-    ToolVersion as ToolVersionRow,
 )
 from runtime.persistence.models.execution import Operation, ToolCall
 from runtime.persistence.models.identity import Workspace as WorkspaceRow
@@ -186,213 +171,10 @@ from runtime.persistence.repositories.runs import RunRepository
 
 ADAPTER_KEY: Final = "mock-commerce"
 BACKEND_KEY: Final = "product-scripted"
-MODEL_CONNECTION_KEY: Final = "product-worker-model"
 
 _WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset({"operation", "reconciliation"})
 
 _MAX_RECONCILE_ROUNDS: Final = 5
-
-
-# ---------------------------------------------------------------------------
-# 启动期组装:能力版本落库 + 进程内 Registry
-# ---------------------------------------------------------------------------
-
-
-def _json_hash(payload: Mapping[str, Any]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _tool_definitions() -> tuple[tuple[str, Any], ...]:
-    """商品 Tool 与 Runtime 内置 Tool 的确定性注册序列。"""
-    return (
-        (LOAD_SKILL_KEY, LOAD_SKILL_DEFINITION),
-        (SEARCH_PRODUCTS_DEFINITION.stable_key, SEARCH_PRODUCTS_DEFINITION),
-        (GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key, GET_PRODUCT_SNAPSHOT_DEFINITION),
-        (COMPARE_LISTING_PRICES_DEFINITION.stable_key, COMPARE_LISTING_PRICES_DEFINITION),
-        (UPDATE_PRICE_DEFINITION.stable_key, UPDATE_PRICE_DEFINITION),
-    )
-
-
-async def _bootstrap_capabilities(
-    engine: AsyncEngine, workspace_id: uuid.UUID
-) -> dict[str, Any]:
-    """把 Agent/Skill/Tool/Model 版本写入数据库(幂等:已存在即复用)。
-
-    返回组合根注册所需的精确 Version ID;进程内 Registry 与数据库行共用
-    同一 Version ID,保证 Run 快照(run_tool_versions 等)可解析。
-    """
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            agent = (
-                await session.scalars(select(Agent).where(Agent.stable_key == AGENT_KEY))
-            ).one_or_none()
-            if agent is None:
-                agent = Agent(
-                    id=uuid.uuid4(), stable_key=AGENT_KEY, name="ProductMaintenanceAgent"
-                )
-                session.add(agent)
-                await session.flush()
-            agent_version = (
-                await session.scalars(
-                    select(AgentVersion).where(
-                        AgentVersion.agent_id == agent.id,
-                        AgentVersion.version == AGENT_VERSION,
-                    )
-                )
-            ).one_or_none()
-            if agent_version is None:
-                definition_json = PRODUCT_AGENT_DEFINITION.model_dump(mode="json")
-                agent_version = AgentVersion(
-                    id=uuid.uuid4(),
-                    agent_id=agent.id,
-                    version=AGENT_VERSION,
-                    status=ConfigVersionStatus.PUBLISHED,
-                    definition_json=definition_json,
-                    definition_hash=_json_hash(definition_json),
-                    published_at=datetime.now(UTC),
-                )
-                session.add(agent_version)
-                await session.flush()
-            elif agent_version.status == ConfigVersionStatus.DRAFT:
-                # Built-in reference Agent v1 is released by this bootstrap; do not
-                # leave legacy rows unbindable after the Workspace binding gate.
-                agent_version.status = ConfigVersionStatus.PUBLISHED
-                agent_version.published_at = datetime.now(UTC)
-
-            skill = (
-                await session.scalars(select(Skill).where(Skill.stable_key == SKILL_KEY))
-            ).one_or_none()
-            if skill is None:
-                skill = Skill(
-                    id=uuid.uuid4(),
-                    scope=ConfigScope.GLOBAL,
-                    workspace_id=None,
-                    stable_key=SKILL_KEY,
-                    name=PRODUCT_MAINTENANCE_SKILL.name or SKILL_KEY,
-                )
-                session.add(skill)
-                await session.flush()
-            skill_version = (
-                await session.scalars(
-                    select(SkillVersion).where(
-                        SkillVersion.skill_id == skill.id,
-                        SkillVersion.version == SKILL_VERSION,
-                    )
-                )
-            ).one_or_none()
-            if skill_version is None:
-                content_json = PRODUCT_MAINTENANCE_SKILL.model_dump(mode="json")
-                skill_version = SkillVersion(
-                    id=uuid.uuid4(),
-                    workspace_id=None,
-                    skill_id=skill.id,
-                    version=SKILL_VERSION,
-                    content_json=content_json,
-                    content_hash=_json_hash(content_json),
-                )
-                session.add(skill_version)
-                await session.flush()
-
-            tool_definition_ids: dict[str, uuid.UUID] = {}
-            tool_version_ids: dict[str, uuid.UUID] = {}
-            for key, definition in _tool_definitions():
-                definition_row = (
-                    await session.scalars(
-                        select(ToolDefinitionRow).where(
-                            ToolDefinitionRow.scope == ConfigScope.GLOBAL,
-                            ToolDefinitionRow.stable_key == key,
-                        )
-                    )
-                ).one_or_none()
-                if definition_row is None:
-                    definition_row = ToolDefinitionRow(
-                        id=uuid.uuid4(),
-                        scope=ConfigScope.GLOBAL,
-                        workspace_id=None,
-                        stable_key=key,
-                        name=key,
-                    )
-                    session.add(definition_row)
-                    await session.flush()
-                version_row = (
-                    await session.scalars(
-                        select(ToolVersionRow).where(
-                            ToolVersionRow.workspace_id.is_(None),
-                            ToolVersionRow.tool_id == definition_row.id,
-                            ToolVersionRow.version == definition.version,
-                        )
-                    )
-                ).one_or_none()
-                if version_row is None:
-                    version_row = ToolVersionRow(
-                        id=uuid.uuid4(),
-                        workspace_id=None,
-                        tool_id=definition_row.id,
-                        version=definition.version,
-                        effect=definition.effect,
-                        input_schema=definition.input_json_schema,
-                        output_schema=definition.output_json_schema,
-                        schema_hash=definition.schema_hash,
-                        implementation_key=key,
-                    )
-                    session.add(version_row)
-                    await session.flush()
-                tool_definition_ids[key] = definition_row.id
-                tool_version_ids[key] = version_row.id
-
-            connection = (
-                await session.scalars(
-                    select(ModelConnection).where(
-                        ModelConnection.workspace_id == workspace_id,
-                        ModelConnection.stable_key == MODEL_CONNECTION_KEY,
-                    )
-                )
-            ).one_or_none()
-            if connection is None:
-                connection = ModelConnection(
-                    id=uuid.uuid4(),
-                    workspace_id=workspace_id,
-                    stable_key=MODEL_CONNECTION_KEY,
-                    name="product scripted model",
-                )
-                session.add(connection)
-                await session.flush()
-            model_config_version = (
-                await session.scalars(
-                    select(ModelConfigVersion).where(
-                        ModelConfigVersion.model_connection_id == connection.id,
-                        ModelConfigVersion.version == 1,
-                    )
-                )
-            ).one_or_none()
-            if model_config_version is None:
-                model_config_version = ModelConfigVersion(
-                    id=uuid.uuid4(),
-                    workspace_id=workspace_id,
-                    model_connection_id=connection.id,
-                    version=1,
-                    backend_type=ModelBackendType.OPENAI,
-                    base_url="https://scripted.model.invalid/v1",
-                    model="product-scripted",
-                    non_secret_options={},
-                    config_hash=_json_hash({"model": "product-scripted"}),
-                )
-                session.add(model_config_version)
-                await session.flush()
-
-            return {
-                "agent_id": agent.id,
-                "agent_version_id": agent_version.id,
-                "skill_id": skill.id,
-                "skill_version_id": skill_version.id,
-                "tool_definition_ids": tool_definition_ids,
-                "tool_version_ids": tool_version_ids,
-                "model_config_version_id": model_config_version.id,
-            }
-    finally:
-        await session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +455,7 @@ class ProductApplication:
         workspace_id: uuid.UUID,
         actor_id: uuid.UUID,
         membership_id: uuid.UUID,
-        capability: Mapping[str, Any],
+        capabilities: ProductOperationsCapabilities,
         worker_id: str,
     ) -> None:
         self._engine = engine
@@ -687,7 +469,7 @@ class ProductApplication:
         self._workspace_id = workspace_id
         self._actor_id = actor_id
         self._membership_id = membership_id
-        self._capability = dict(capability)
+        self._capabilities = capabilities
         self._answered: dict[str, str] = {}
         self._scope = _ScopeHolder()
         # 运行限制是 AgentVersion 定义的一部分:同一份定义同时驱动 Runtime
@@ -718,7 +500,7 @@ class ProductApplication:
                 for record in assembly.skills.records()
             ),
             tool_definitions=tuple(
-                definition for _, definition in _tool_definitions()
+                definition for _, definition in product_tool_definitions()
             ),
         )
         self._runtime = Runtime(
@@ -779,7 +561,7 @@ class ProductApplication:
     @property
     def capability_ids(self) -> Mapping[str, Any]:
         """组装写入数据库的能力标识(测试断言与清理用)。"""
-        return self._capability
+        return self._capabilities.as_ids()
 
     # -- 驱动入口 ---------------------------------------------------------
 
@@ -795,7 +577,7 @@ class ProductApplication:
                     workspace_id=self._workspace_id,
                     actor_id=self._actor_id,
                     membership_id=self._membership_id,
-                    model_config_version_id=self._capability["model_config_version_id"],
+                    model_config_version_id=self._capabilities.model_config_version_id,
                 ).create(agent_key=AGENT_KEY)
                 run_id = pinned.id
                 store = MessageStore(session=session, workspace_id=self._workspace_id)
@@ -1136,6 +918,7 @@ class ProductApplication:
 async def build_product_application(
     engine: AsyncEngine,
     *,
+    capabilities: ProductOperationsCapabilities,
     backend: AgentBackend,
     workspace_id: uuid.UUID,
     actor_id: uuid.UUID,
@@ -1145,16 +928,20 @@ async def build_product_application(
     commerce_adapter: CommerceAdapter | None = None,
     adapter_key: str = ADAPTER_KEY,
 ) -> ProductApplication:
-    """组装 ProductMaintenance Agent;默认 Mock,可注入专用 CommerceAdapter。"""
-    capability = await _bootstrap_capabilities(engine, workspace_id)
+    """组装 ProductMaintenance Agent;默认 Mock,可注入专用 CommerceAdapter。
+
+    ``capabilities`` 必须来自已发布快照(:class:`ProductOperationsProvisioner`);
+    本函数只校验并消费,不写任何配置表。
+    """
+    await require_published_capabilities(engine, capabilities)
 
     agent_registry = AgentRegistry()
     agent_registry.register(
         AgentVersionRecord(
             stable_key=AGENT_KEY,
-            version_id=capability["agent_version_id"],
+            version_id=capabilities.agent_version_id,
             version=AGENT_VERSION,
-            agent_id=capability["agent_id"],
+            agent_id=capabilities.agent_id,
             definition=PRODUCT_AGENT_DEFINITION,
         )
     )
@@ -1162,7 +949,7 @@ async def build_product_application(
     skill_registry.register(
         SkillVersionRecord(
             stable_key=SKILL_KEY,
-            version_id=capability["skill_version_id"],
+            version_id=capabilities.skill_version_id,
             version=SKILL_VERSION,
             workspace_id=None,
             content=PRODUCT_MAINTENANCE_SKILL,
@@ -1250,13 +1037,13 @@ async def build_product_application(
     }
 
     tool_registry = ToolRegistry()
-    for key, definition in _tool_definitions():
+    for key, definition in product_tool_definitions():
         handler = handlers[key]
         is_write = definition.effect is ToolEffectKind.WRITE
         tool_registry.register(
             ToolVersionRecord(
                 stable_key=key,
-                version_id=capability["tool_version_ids"][key],
+                version_id=capabilities.tool_version_ids[key],
                 version=definition.version,
                 workspace_id=None,
                 source_kind="LOCAL",
@@ -1305,7 +1092,7 @@ async def build_product_application(
         workspace_id=workspace_id,
         actor_id=actor_id,
         membership_id=membership_id,
-        capability=capability,
+        capabilities=capabilities,
         worker_id=worker_id,
     )
 
@@ -1361,14 +1148,9 @@ def _price_of(tool_call: ToolCall) -> Decimal:
         ) from error
 
 
-bootstrap_product_capabilities = _bootstrap_capabilities
-"""启动期能力版本落库的公开名称(供 Eval 组合根等外部驱动方导入)。"""
-
-
 __all__ = [
     "ProductApplication",
     "RunView",
     "ToolCallSnapshot",
-    "bootstrap_product_capabilities",
     "build_product_application",
 ]
