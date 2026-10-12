@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Final
 from uuid import UUID
 
@@ -162,9 +162,9 @@ def fields_for(stable_key: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "TOOL_ARGUMENT_FIELDS",
     "BusinessPolicyFactory",
     "ProductPreToolProfileFactory",
-    "TOOL_ARGUMENT_FIELDS",
     "current_user_message",
     "fields_for",
     "product_registration",

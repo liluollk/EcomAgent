@@ -898,7 +898,7 @@ class AgentLoop:
     ) -> _Stop | None:
         """写 Tool:begin → 外部调用 → PostToolUse → 结果事务(含 fencing)。"""
         handler = pin.handler
-        if handler is None or not callable(getattr(handler, "execute_prepared", None)):
+        if handler is None or not callable(getattr(handler, "execute", None)):
             return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
         execution_profile = pin.execution_profile
         if execution_profile is None:
