@@ -48,8 +48,8 @@ EXECUTION_CRITICAL_MEMORY_KINDS: Final[frozenset[str]] = frozenset(
 """执行关键事实:禁止作为长期记忆入库(计划 04 Task 7)。
 
 分类名称保持领域无关:Runtime 不认识价格、库存等具体业务规则,业务规则
-统一归入 ``business_rule``。未知 kind 本来就拒绝入库,因此历史输入
-(如旧的 ``price_rule``)继续 fail-closed,不需要兼容放行。
+统一归入 ``business_rule``。未知 kind 本来就拒绝入库,因此商品专属的历史
+名称继续 fail-closed,不需要兼容放行。
 """
 
 _SECRET_CONTENT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
