@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Final
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
@@ -38,12 +38,18 @@ from agents.product_operations.tools.get_product_snapshot import (
     GET_PRODUCT_SNAPSHOT_BINDING,
     get_product_snapshot,
 )
+from agents.product_operations.tools.handlers import (
+    CompareListingPricesHandler,
+    GetProductSnapshotHandler,
+    SearchProductsHandler,
+)
 from agents.product_operations.tools.search_products import (
     SEARCH_PRODUCTS_BINDING,
     search_products,
 )
 from runtime.access.actor import ActorContext
 from runtime.access.authorization import PERMISSION_DENIED, RESOURCE_SCOPE_DENIED
+from runtime.backend.protocol import BackendCompleted, TextDelta, ToolCallCompleted
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.interfaces.identifiers import ResourceScope
 from runtime.interfaces.tools import ToolEffect
@@ -203,7 +209,7 @@ async def test_compare_prices_returns_only_authorized_stores(
     row = result.items[0]
     assert row.current_price == Decimal("128.00")
     assert row.currency == "CNY"
-    assert row.status == "ACTIVE"
+    assert row.status == "PUBLISHED"
     assert row.listing_version == 1
 
 
@@ -288,7 +294,7 @@ async def test_get_product_snapshot_returns_whitelisted_fields(
     assert snapshot.title == "轻量保温杯 500ml"
     assert snapshot.current_price == Decimal("128.00")
     assert snapshot.currency == "CNY"
-    assert snapshot.status == "ACTIVE"
+    assert snapshot.status == "PUBLISHED"
     assert snapshot.listing_version == 1
     # cost_price 数值不输出,只以脱敏摘要出现(摘要本身引用字段名是预期行为)。
     assert snapshot.redacted_fields == ("cost_price",)
@@ -439,3 +445,77 @@ def test_tool_bindings_connect_definitions_to_handlers() -> None:
         COMPARE_LISTING_PRICES_BINDING,
     ):
         assert binding.write_adapter_capabilities == frozenset()
+
+
+# ---- Runtime 路径:归一化不得丢弃只读 Tool 的多店铺/查询参数 ----
+
+
+async def test_search_products_normalization_preserves_query_and_store_ids(
+    product_application,
+) -> None:
+    """经真实 Runtime 路径:search_products 的 query/store_ids 不丢失。
+
+    回归证据:旧 ProductPreToolNormalizer 用固定写字段白名单归一化所有
+    Tool,``query``/``store_ids`` 被整体丢弃,只读 Tool 因此拿不到查询条件。
+    """
+    backend = product_application.scripted_backend
+    store_id = str(product_application.seed_ids.store_id)
+    backend.set_rounds(
+        [
+            [
+                ToolCallCompleted(
+                    call_id="search-1",
+                    name=SEARCH_PRODUCTS_DEFINITION.stable_key,
+                    arguments={"query": "保温杯", "store_ids": [store_id]},
+                ),
+                BackendCompleted(finish_reason="tool_calls"),
+            ],
+            [
+                TextDelta(text_delta="已完成检索。"),
+                BackendCompleted(finish_reason="stop"),
+            ],
+        ]
+    )
+
+    view = await product_application.start("搜索授权店铺内的保温杯。")
+    snapshot = await product_application.tool_call_snapshot(view.run_id)
+
+    assert snapshot is not None
+    assert snapshot.normalized_arguments == {
+        "query": "保温杯",
+        "store_ids": [store_id],
+    }
+
+
+# ---- 读 Tool Handler:一 Tool 一 Handler,不按 stable_key 分发 ----
+
+
+def test_read_tool_handlers_are_independent_endpoints(engine: AsyncEngine) -> None:
+    """三个读 Tool 各有独立 Handler,只暴露自身 ``read`` 端点。"""
+    session_factory = lambda: AsyncSession(engine, expire_on_commit=False)
+    handlers = (
+        SearchProductsHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+        GetProductSnapshotHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+        CompareListingPricesHandler(
+            session_factory=session_factory,
+            workspace_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+        ),
+    )
+
+    assert [type(handler) for handler in handlers] == [
+        SearchProductsHandler,
+        GetProductSnapshotHandler,
+        CompareListingPricesHandler,
+    ]
+    for handler in handlers:
+        assert callable(handler.read)
+

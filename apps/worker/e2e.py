@@ -47,6 +47,10 @@ from apps.worker.assembly import (
     ProductApplication,
     build_product_application,
 )
+from composition.provisioning.product_operations import (
+    ModelConnectionProvisioningSpec,
+    ProductOperationsProvisioner,
+)
 from runtime.backend.protocol import (
     AgentBackendCapabilities,
     BackendCompleted,
@@ -57,7 +61,12 @@ from runtime.backend.protocol import (
     ToolCallCompleted,
 )
 from runtime.jobs.lease_service import Lease, LeaseOutcome
-from runtime.persistence.base import AccountStatus, InputRequestStatus, RunJobKind
+from runtime.persistence.base import (
+    AccountStatus,
+    InputRequestStatus,
+    ModelBackendType,
+    RunJobKind,
+)
 from runtime.persistence.models.execution import Run, RunJob, ToolCall
 from runtime.persistence.models.identity import WorkspaceMembership
 from runtime.persistence.models.interaction import InputRequest
@@ -72,6 +81,15 @@ E2E_PRICE_CONFIG: Final = PricePolicyConfig(
 """E2E 装配的价格策略:与商品域闭环测试一致(99 元对 128 元为合法变更)。"""
 
 UPDATE_PRICE_TOOL_KEY: Final = "update_price"
+
+E2E_MODEL_SPEC: Final = ModelConnectionProvisioningSpec(
+    stable_key="product-scripted",
+    backend_type=ModelBackendType.OPENAI,
+    base_url="https://scripted.model.invalid/v1",
+    model="product-scripted",
+    non_secret_options={},
+)
+"""E2E 发布的确定性脚本模型规范(仅本地/CI 端到端验证使用)。"""
 
 _PRICE_TASK_PATTERN: Final = re.compile(
     r"把\s*(?P<sku>[A-Za-z0-9][A-Za-z0-9_\-]*)\s*改成\s*"
@@ -162,12 +180,17 @@ async def build_e2e_application(
 ) -> ProductApplication:
     """E2E 组合根:ScriptedBackend + Mock Commerce Adapter 的完整商品应用环境。
 
-    复用既有 :func:`build_product_application`(启动校验、能力落库、PreToolUse
-    管线、MockCommerceAdapter 桥接),只把 Backend 换成
+    先经 :class:`ProductOperationsProvisioner` 显式发布 scripted 能力规范,再
+    复用既有 :func:`build_product_application`(启动校验、已发布快照消费、
+    PreToolUse 管线、MockCommerceAdapter 桥接),只把 Backend 换成
     :class:`E2EScriptedBackend`;不改 runtime/ 语义。
     """
+    capabilities = await ProductOperationsProvisioner(
+        lambda: AsyncSession(engine, expire_on_commit=False)
+    ).provision(workspace_id=workspace_id, model=E2E_MODEL_SPEC)
     return await build_product_application(
         engine,
+        capabilities=capabilities,
         backend=E2EScriptedBackend(),
         workspace_id=workspace_id,
         actor_id=actor_id,

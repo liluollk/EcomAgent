@@ -136,11 +136,11 @@ async def _pending_inputs(
     session_id: UUID,
     actor_id: UUID,
 ) -> list[PendingInputView]:
-    """PENDING Input Request 视图;店铺字段候选按当前 Actor 授权范围补齐。
+    """PENDING Input Request 视图;候选项优先取持久化结果。
 
-    AgentLoop 创建 Request 时未持久化候选项(agent_loop 不传 options),
-    ``store_id`` 的候选在快照侧按 Actor 授权店铺实时解析——不改变 runtime
-    语义,只把领域候选呈现给工作台。
+    AgentLoop 创建 Request 时已持久化服务端候选项(店铺、店铺引用、位置),
+    此处直接摊平 ``options_json``;仅当历史数据没有候选项、且缺少的正是
+    ``store_id`` 时,才按 Actor 授权店铺兜底实时解析。
     """
     rows = (
         await session.scalars(

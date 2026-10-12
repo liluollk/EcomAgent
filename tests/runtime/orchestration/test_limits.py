@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from runtime.capabilities.registry import AgentDefinition
 from runtime.orchestration.limits import LoopBudget, LoopLimitExceeded, RunLimits
 
 
@@ -104,6 +105,19 @@ def test_retry_and_reconcile_budgets_are_exposed() -> None:
     assert budget.reconcile_budget == 5
 
 
+def test_write_retry_budget_is_exposed() -> None:
+    """写入重试预算经 ``LoopBudget`` 暴露(计划 Task 6 前置)。"""
+    budget = LoopBudget(RunLimits(write_retry_budget=1))
+    assert budget.write_retry_budget == 1
+
+
+def test_write_retry_budget_falls_back_on_invalid_override() -> None:
+    """非法/非正覆盖回落保守默认(至少 1),fail closed。"""
+    limits = RunLimits.from_definition({"write_retry_budget": 0})
+    assert limits.write_retry_budget >= 1
+    assert RunLimits().write_retry_budget >= 1
+
+
 def test_initial_used_counts_are_respected() -> None:
     """恢复重入时沿用已消耗量:已用满的预算立即超限。"""
     budget = LoopBudget(RunLimits(max_model_rounds=1), model_rounds_used=1)
@@ -119,6 +133,28 @@ def test_from_definition_overrides_conservative_defaults() -> None:
     assert limits.max_model_rounds == 3
     assert limits.max_tool_calls == 7
     # 未覆盖字段保持保守默认。
+    assert limits.tool_timeout_seconds == RunLimits().tool_timeout_seconds
+
+
+def test_from_definition_consumes_agent_definition_loop_limits() -> None:
+    """``from_definition`` 直接消费 AgentDefinition 的 ``loop_limits`` 组装视图。"""
+    definition = AgentDefinition(
+        name="TestAgent",
+        required_backend_capabilities=frozenset(),
+        required_skill_keys=frozenset(),
+        required_tool_keys=frozenset(),
+        required_source_keys=frozenset(),
+        loop_limits={
+            "max_model_rounds": 3,
+            "max_tool_calls": 4,
+            "reconcile_budget": 1,
+        },
+    )
+    limits = RunLimits.from_definition(definition.loop_limits)
+    assert limits.max_model_rounds == 3
+    assert limits.max_tool_calls == 4
+    assert limits.reconcile_budget == 1
+    # 未覆盖字段仍回落保守默认,不被同一 Mapping 带偏。
     assert limits.tool_timeout_seconds == RunLimits().tool_timeout_seconds
 
 

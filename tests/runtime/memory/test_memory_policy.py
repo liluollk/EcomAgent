@@ -1,7 +1,9 @@
 """记忆入库策略测试(计划 04 Task 7 Step 1)。
 
-执行关键事实(权限、资源范围、价格规则、凭据)禁止进入长期记忆;
+执行关键事实(权限、资源范围、业务规则、凭据)禁止进入长期记忆;
 Runtime 只保存已确认的偏好/反馈/决策/经验,Secret/凭据形态的内容一律拒绝。
+执行关键事实的分类名称领域无关:业务规则统一归入 ``business_rule``,
+``price_rule`` 等历史商品名称按未知 kind 继续拒绝。
 """
 
 import uuid
@@ -13,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from runtime.persistence.models.integrations import MemoryRecord
 
 
-# 计划原文参数化:执行关键事实禁止入库。
-EXECUTION_CRITICAL_KINDS = ["permission", "resource_scope", "price_rule", "credential"]
+# 执行关键事实禁止入库(通用分类;商品专属名称不再出现在 Runtime 源码)。
+EXECUTION_CRITICAL_KINDS = ["permission", "resource_scope", "business_rule", "credential"]
 
 # Runtime 只保存已确认的记忆类型(架构文档 §7:过滤后的长期记忆)。
 ACCEPTED_KINDS = ["preference", "feedback", "decision", "experience"]
@@ -25,6 +27,11 @@ def test_execution_critical_facts_are_not_memories(
     memory_service, memory_candidate, kind: str
 ) -> None:
     assert memory_service.accept(memory_candidate(kind=kind)) is False
+
+
+def test_legacy_price_rule_is_still_rejected_as_unknown(memory_service, memory_candidate) -> None:
+    """旧商品名称不再是执行关键事实分类,但作为未知 kind 仍然 fail-closed。"""
+    assert memory_service.accept(memory_candidate(kind="price_rule")) is False
 
 
 @pytest.mark.parametrize("kind", ACCEPTED_KINDS)

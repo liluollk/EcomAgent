@@ -12,6 +12,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from runtime.execution.pretool.provenance import ArgumentTrustLevel
 from runtime.interfaces.requests import ConfirmationSpec, InputRequirement
 
 
@@ -47,6 +48,7 @@ INVALID_MODEL_OUTPUT: Final = "INVALID_MODEL_OUTPUT"
 UNKNOWN_TOOL: Final = "UNKNOWN_TOOL"
 TOOL_VERSION_MISMATCH: Final = "TOOL_VERSION_MISMATCH"
 TOOL_DISABLED: Final = "TOOL_DISABLED"
+TOOL_PRETOOL_PROFILE_MISSING: Final = "TOOL_PRETOOL_PROFILE_MISSING"
 ARGUMENTS_INCOMPLETE: Final = "ARGUMENTS_INCOMPLETE"
 POLICY_DENIED: Final = "POLICY_DENIED"
 CONFIRMATION_REQUIRED: Final = "CONFIRMATION_REQUIRED"
@@ -67,21 +69,31 @@ class SchemaDiagnostic(BaseModel):
 
 
 class PolicyDecision(BaseModel):
-    """Business Policy 阶段的结构化返回值;只是值对象,不持有 Repository。"""
+    """Business Policy 阶段的结构化返回值;只是值对象,不持有 Repository。
+
+    ``resource_versions`` 允许业务策略把授权资源的版本(如
+    ``{"<resource_type>:<id>": 3}``)交给 Runtime 写进 ConfirmationSpec,从而在
+    确认请求上持久化、跨进程重启依然可比对(架构文档 §6 第 7 条)。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     allowed: bool
     reason_code: str | None = None
     safe_message: str | None = None
+    resource_versions: Mapping[str, int] = {}
 
 
 class ArgumentProvenance(BaseModel):
-    """参数来源判定结果;只来自确定性规则,不接受模型自报来源。"""
+    """参数来源判定结果;只来自确定性规则,不接受模型自报来源。
+
+    ``field_sources`` 的值是 Runtime 唯一类型 :class:`ArgumentTrustLevel`:
+    未知等级在此处即被拒绝,而不是靠业务模块各自的字符串约定。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    field_sources: Mapping[str, str] = {}
+    field_sources: Mapping[str, ArgumentTrustLevel] = {}
 
 
 class ExecutionModeDecision(BaseModel):
@@ -183,6 +195,7 @@ __all__ = [
     "STAGE_SCHEMA_VALIDATION",
     "STAGE_TOOL_RESOLUTION",
     "TOOL_DISABLED",
+    "TOOL_PRETOOL_PROFILE_MISSING",
     "TOOL_VERSION_MISMATCH",
     "UNKNOWN_TOOL",
     "ArgumentProvenance",

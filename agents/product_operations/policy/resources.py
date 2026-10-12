@@ -35,4 +35,35 @@ class StoreResourceResolver:
         return frozenset({(STORE_RESOURCE_TYPE, str(store_id))})
 
 
-__all__ = ["STORE_RESOURCE_TYPE", "StoreResourceResolver"]
+__all__ = [
+    "STORE_RESOURCE_TYPE",
+    "StoreIdsResourceResolver",
+    "StoreResourceResolver",
+]
+
+
+class StoreIdsResourceResolver:
+    """从规范化参数提取多个 ``store`` 资源引用(``compare_listing_prices``)。
+
+    非法或缺失的 ``store_ids`` 项被跳过,不猜测、不补全;返回集合按资源 ID
+    去重,保证确定性。
+    """
+
+    async def resolve(
+        self, *, arguments: Mapping[str, Any]
+    ) -> frozenset[tuple[str, str]]:
+        raw = arguments.get("store_ids")
+        if isinstance(raw, str):
+            candidates: list[Any] = [raw]
+        elif isinstance(raw, (list, tuple, set, frozenset)):
+            candidates = list(raw)
+        else:
+            return frozenset()
+        resources: set[tuple[str, str]] = set()
+        for value in candidates:
+            try:
+                store_id = uuid.UUID(str(value).strip())
+            except (ValueError, TypeError):
+                continue
+            resources.add((STORE_RESOURCE_TYPE, str(store_id)))
+        return frozenset(resources)

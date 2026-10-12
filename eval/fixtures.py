@@ -41,8 +41,11 @@ from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.policy.models import PricePolicyConfig
 from composition.product_operations import (
     ProductApplication,
-    bootstrap_product_capabilities,
     build_product_application,
+)
+from composition.provisioning.product_operations import (
+    ModelConnectionProvisioningSpec,
+    ProductOperationsProvisioner,
 )
 from eval.results import FinalState
 from eval.schema import ListingState, Scenario
@@ -51,6 +54,7 @@ from runtime.persistence.base import (
     AccountStatus,
     ExecutionMode,
     MembershipRole,
+    ModelBackendType,
     ResourceScopeMode,
 )
 from runtime.persistence.models.identity import (
@@ -72,6 +76,15 @@ EVAL_PRICE_CONFIG: Final = PricePolicyConfig(
 """Eval 固定价格策略(协议的一部分:策略变更即协议漂移)。
 
 与商品域闭环测试一致的边界:99 元对 128 元为合法变更。"""
+
+EVAL_MODEL_SPEC: Final = ModelConnectionProvisioningSpec(
+    stable_key="product-scripted",
+    backend_type=ModelBackendType.OPENAI,
+    base_url="https://scripted.model.invalid/v1",
+    model="product-scripted",
+    non_secret_options={},
+)
+"""Eval 发布的确定性脚本模型规范(每个隔离环境显式发布,单 Run 不重复)。"""
 
 _DEFAULT_CURRENCY: Final = "CNY"
 # 敏感字段哨兵值：真实种子到数据库，但不进入任何模型可见 Tool 输出。
@@ -297,10 +310,13 @@ class IsolatedEnvironment:
         finally:
             await session.close()
 
-        # 能力版本幂等落库(全局按 stable_key 复用),再组装注入 Backend 的商品应用。
-        await bootstrap_product_capabilities(engine, workspace_id)
+        # 幂等发布能力版本(全局按 stable_key 复用);装配只消费已发布快照。
+        capabilities = await ProductOperationsProvisioner(
+            lambda: AsyncSession(engine, expire_on_commit=False)
+        ).provision(workspace_id=workspace_id, model=EVAL_MODEL_SPEC)
         application = await build_product_application(
             engine,
+            capabilities=capabilities,
             backend=backend,
             workspace_id=workspace_id,
             actor_id=actor_id,
@@ -432,6 +448,7 @@ class IsolatedEnvironment:
 
 
 __all__ = [
+    "EVAL_MODEL_SPEC",
     "EVAL_PRICE_CONFIG",
     "IsolatedEnvironment",
     "SeededListing",

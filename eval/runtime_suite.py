@@ -59,6 +59,7 @@ from runtime.backend.protocol import (
 )
 from runtime.backend.scripted import ScriptedBackend
 from runtime.events.writer import AgentEventWriter
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.operations import (
     BegunOperation,
     LeaseStaleError,
@@ -158,6 +159,9 @@ _TEST_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {"result": {"type": "string"}},
     "required": ["result"],
 }
+
+_EVAL_ADAPTER_KEY: Final = "eval-adapter"
+"""评测 harness 写 Tool 的执行 Profile Adapter Key(与历史 Operation 行一致)。"""
 
 _TEST_LIMITS: Final = RunLimits(
     max_model_rounds=4,
@@ -672,6 +676,10 @@ class _PinnedToolResolver:
             effect=ToolEffect.WRITE,
             handler=handler,
             output_schema=_TEST_OUTPUT_SCHEMA,
+            execution_profile=ToolExecutionProfile(
+                adapter_key=_EVAL_ADAPTER_KEY,
+                supports_reconciliation=True,
+            ),
         )
 
     def by_stable_key(self, stable_key: str) -> ToolPin | None:
@@ -748,8 +756,6 @@ class _RuntimeHarness:
                 self._tool.stable_key, self._tool.tool_version_id, self.write_handler
             ),
             pipeline_factory=lambda: _AlwaysAllowPipeline(),
-            adapter_key="eval-adapter",
-            supports_reconciliation=True,
             worker_id="eval-runtime-worker",
         )
 
@@ -1223,7 +1229,7 @@ async def _begin_operation(
             )
             return await service.begin(
                 tool_call_id,
-                adapter_key="eval-adapter",
+                adapter_key=_EVAL_ADAPTER_KEY,
                 supports_reconciliation=True,
             )
     finally:

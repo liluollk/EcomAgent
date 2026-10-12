@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -60,6 +60,7 @@ from runtime.execution.pretool.decisions import (
     STAGE_SCHEMA_VALIDATION,
     STAGE_TOOL_RESOLUTION,
     TOOL_DISABLED,
+    TOOL_PRETOOL_PROFILE_MISSING,
     TOOL_VERSION_MISMATCH,
     UNKNOWN_TOOL,
     ArgumentProvenance,
@@ -72,6 +73,11 @@ from runtime.execution.pretool.decisions import (
     require_confirmation,
     require_input,
 )
+from runtime.execution.pretool.profiles import (
+    PreToolProfile,
+    PreToolProfileContext,
+)
+from runtime.execution.pretool.provenance import TRUSTED_TRUST_LEVELS
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.tool_registry import (
     TOOL_RESOLVED as TOOL_STATUS_RESOLVED,
@@ -107,6 +113,12 @@ class ToolCallRequest(BaseModel):
     raw_arguments: str
 
 
+PROVENANCE_GUARD_MESSAGE: Final = (
+    "key arguments lack trusted user or authoritative evidence"
+)
+"""不可信关键字段并入 SchemaDiagnostic 时的诊断消息。"""
+
+
 @dataclass
 class PreToolContext:
     """管线内部逐阶段累积的上下文;DENY 短路后不再被触碰。"""
@@ -114,11 +126,13 @@ class PreToolContext:
     request: ToolCallRequest
     actor: ActorContext
     tool_resolution: ToolResolution | None = None
+    profile: PreToolProfile | None = None
     arguments: Mapping[str, Any] | None = None
     normalized_arguments: Mapping[str, Any] | None = None
     provenance: ArgumentProvenance | None = None
     schema_diagnostic: SchemaDiagnostic | None = None
     resources: frozenset[tuple[str, str]] = field(default_factory=frozenset)
+    resource_versions: Mapping[str, int] = field(default_factory=dict)
     execution_mode: ExecutionModeDecision | None = None
 
 
@@ -185,18 +199,19 @@ class AcceptedConfirmationLookup(Protocol):
 
 @dataclass(frozen=True)
 class PreToolDependencies:
-    """管线各阶段注入的协作对象;业务扩展点缺省时按确定性规则处理。"""
+    """管线只保留 Runtime 统一依赖;业务扩展改由每个 Tool 的 Profile 提供。
+
+    阶段协作对象(归一化、来源、缺失字段、资源、业务策略)不再从组合根全局
+    注入,而在 ``tool_resolution`` 成功后,由当前 ToolBinding 的
+    :class:`PreToolProfileRegistration` 用 ``profile_context`` 延迟创建。
+    """
 
     tool_registry: RuntimeToolRegistry
     schema_validator: RuntimeSchemaValidator
     authorizer: Authorizer
-    input_normalizer: InputNormalizer | None = None
-    argument_provenance_resolver: ArgumentProvenanceResolver | None = None
-    input_requirement_resolver: InputRequirementResolver | None = None
-    authorization_resource_resolver: AuthorizationResourceResolver | None = None
-    business_policy: BusinessPolicy | None = None
     execution_mode_resolver: ExecutionModeResolver | None = None
     accepted_confirmation_lookup: AcceptedConfirmationLookup | None = None
+    profile_context: PreToolProfileContext | None = None
 
 
 StageHandler = Callable[[PreToolContext], Awaitable[PreToolDecision | None]]
@@ -217,15 +232,13 @@ class PipelineConfigurationError(RuntimeError):
 # ---- 默认阶段实现 ----
 
 
-def _tool_resolution_stage(registry: RuntimeToolRegistry) -> StageHandler:
+def _tool_resolution_stage(dependencies: PreToolDependencies) -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
-        resolution = registry.resolve(
+        resolution = dependencies.tool_registry.resolve(
             stable_key=context.request.stable_key,
             version=context.request.version,
         )
         context.tool_resolution = resolution
-        if resolution.status == TOOL_STATUS_RESOLVED:
-            return None
         if resolution.status == TOOL_STATUS_UNKNOWN:
             return deny(UNKNOWN_TOOL, safe_message="tool is not pinned for this run")
         if resolution.status == TOOL_STATUS_VERSION_MISMATCH:
@@ -233,7 +246,27 @@ def _tool_resolution_stage(registry: RuntimeToolRegistry) -> StageHandler:
                 TOOL_VERSION_MISMATCH,
                 safe_message="tool version referenced by the tool call does not match the pinned version",
             )
-        return deny(TOOL_DISABLED, safe_message="tool version is disabled")
+        if resolution.status != TOOL_STATUS_RESOLVED:
+            return deny(TOOL_DISABLED, safe_message="tool version is disabled")
+        # 解析成功后,用当前 ToolBinding 的注册描述创建本次评估的 Profile;
+        # 其中绑定与上下文都只在该次 PreToolUse 内有效。
+        registration = (
+            resolution.binding.pretool_registration if resolution.binding else None
+        )
+        if registration is None:
+            return deny(
+                TOOL_PRETOOL_PROFILE_MISSING,
+                safe_message="resolved tool binding has no pretool profile registered",
+            )
+        profile_context = dependencies.profile_context
+        if profile_context is None:
+            # 缺请求级上下文无法延迟创建 Profile:装配错误,fail closed。
+            return deny(
+                PIPELINE_INVARIANT,
+                safe_message="pretool profile context is required to build a tool profile",
+            )
+        context.profile = await registration.factory.create(profile_context)
+        return None
 
     return handler
 
@@ -257,44 +290,94 @@ def _schema_validation_stage(validator: RuntimeSchemaValidator) -> StageHandler:
     return handler
 
 
-def _input_normalization_stage(dependencies: PreToolDependencies) -> StageHandler:
+def _require_profile(context: PreToolContext) -> PreToolProfile | None:
+    """返回本次评估的 Profile;缺失表示 tool_resolution 未被正确执行。"""
+    return context.profile
+
+
+def _input_normalization_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
+        profile = _require_profile(context)
+        if profile is None:
+            return deny(
+                PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
+            )
         arguments = context.arguments or {}
-        normalizer = dependencies.input_normalizer
-        if normalizer is None:
-            context.normalized_arguments = arguments
-            return None
-        context.normalized_arguments = await normalizer.normalize(arguments=arguments)
+        context.normalized_arguments = await profile.input_normalizer.normalize(
+            arguments=arguments
+        )
         return None
 
     return handler
 
 
-def _argument_provenance_stage(dependencies: PreToolDependencies) -> StageHandler:
+def _argument_provenance_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
+        profile = _require_profile(context)
+        if profile is None:
+            return deny(
+                PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
+            )
         arguments = context.normalized_arguments or {}
-        resolver = dependencies.argument_provenance_resolver
-        if resolver is None:
-            context.provenance = ArgumentProvenance()
-            return None
-        context.provenance = await resolver.resolve(arguments=arguments)
+        provenance = await profile.argument_provenance_resolver.resolve(
+            arguments=arguments
+        )
+        context.provenance = provenance
+        _apply_provenance_guard(context, profile, provenance, arguments)
         return None
 
     return handler
 
 
-def _input_requirement_stage(dependencies: PreToolDependencies) -> StageHandler:
+def _apply_provenance_guard(
+    context: PreToolContext,
+    profile: PreToolProfile,
+    provenance: ArgumentProvenance,
+    arguments: Mapping[str, Any],
+) -> None:
+    """来源守卫(架构文档 §5):已提供但不可信的关键字段 → 校验诊断。
+
+    关键字段由 Tool 自己的 Profile 声明;守卫把命中字段并入 SchemaDiagnostic,
+    交由 input_requirement 阶段转成可回答的 Input Request,不进入写执行阶段。
+    **未在 field_sources 中声明的字段按 UNTRUSTED 处理**(fail closed):只有
+    出现在可信白名单里的来源才放行。
+    """
+    guard_fields = profile.provenance_guard_fields
+    if not guard_fields:
+        return
+    untrusted = tuple(
+        field
+        for field in guard_fields
+        if field in arguments
+        and provenance.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
+    )
+    if not untrusted:
+        return
+    diagnostic = context.schema_diagnostic
+    merged_paths = tuple(
+        dict.fromkeys(
+            (*(diagnostic.field_paths if diagnostic is not None else ()), *untrusted)
+        )
+    )
+    context.schema_diagnostic = SchemaDiagnostic(
+        field_paths=merged_paths,
+        message=PROVENANCE_GUARD_MESSAGE,
+    )
+
+
+def _input_requirement_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
         diagnostic = context.schema_diagnostic
         if diagnostic is None:
             return None
-        resolver = dependencies.input_requirement_resolver
-        if resolver is None:
+        profile = _require_profile(context)
+        if profile is None:
             return deny(
-                ARGUMENTS_INCOMPLETE,
-                safe_message="required business fields are missing and no input requirement resolver is registered",
+                PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
             )
-        requirement = await resolver.resolve(diagnostic=diagnostic)
+        requirement = await profile.input_requirement_resolver.resolve(
+            diagnostic=diagnostic
+        )
         if requirement is None:
             return deny(
                 ARGUMENTS_INCOMPLETE,
@@ -305,12 +388,16 @@ def _input_requirement_stage(dependencies: PreToolDependencies) -> StageHandler:
     return handler
 
 
-def _authorization_resource_stage(dependencies: PreToolDependencies) -> StageHandler:
+def _authorization_resource_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
+        profile = _require_profile(context)
+        if profile is None:
+            return deny(
+                PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
+            )
         arguments = context.normalized_arguments or {}
-        resolver = dependencies.authorization_resource_resolver
-        context.resources = (
-            frozenset() if resolver is None else await resolver.resolve(arguments=arguments)
+        context.resources = await profile.authorization_resource_resolver.resolve(
+            arguments=arguments
         )
         return None
 
@@ -337,20 +424,23 @@ def _access_control_stage(dependencies: PreToolDependencies) -> StageHandler:
     return handler
 
 
-def _business_policy_stage(dependencies: PreToolDependencies) -> StageHandler:
+def _business_policy_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
-        policy = dependencies.business_policy
-        if policy is None:
-            return None
+        profile = _require_profile(context)
+        if profile is None:
+            return deny(
+                PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
+            )
         record = context.tool_resolution.record if context.tool_resolution else None
         if record is None:
             return deny(PIPELINE_INVARIANT, safe_message="tool resolution produced no record")
-        policy_decision = await policy.evaluate(
+        policy_decision = await profile.business_policy.evaluate(
             stable_key=record.stable_key,
             arguments=context.normalized_arguments or {},
             resources=context.resources,
         )
         if policy_decision.allowed:
+            context.resource_versions = dict(policy_decision.resource_versions)
             return None
         return deny(
             policy_decision.reason_code or POLICY_DENIED,
@@ -404,7 +494,11 @@ def _confirmation_verification_stage(dependencies: PreToolDependencies) -> Stage
         )
         if accepted:
             return None
-        return require_confirmation(confirmation_spec=ConfirmationSpec())
+        return require_confirmation(
+            confirmation_spec=ConfirmationSpec(
+                resource_versions=dict(context.resource_versions)
+            )
+        )
 
     return handler
 
@@ -414,7 +508,7 @@ def default_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
     return (
         NamedStage(
             name=STAGE_TOOL_RESOLUTION,
-            handler=_tool_resolution_stage(dependencies.tool_registry),
+            handler=_tool_resolution_stage(dependencies),
         ),
         NamedStage(
             name=STAGE_SCHEMA_VALIDATION,
@@ -422,19 +516,19 @@ def default_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
         ),
         NamedStage(
             name=STAGE_INPUT_NORMALIZATION,
-            handler=_input_normalization_stage(dependencies),
+            handler=_input_normalization_stage(),
         ),
         NamedStage(
             name=STAGE_ARGUMENT_PROVENANCE,
-            handler=_argument_provenance_stage(dependencies),
+            handler=_argument_provenance_stage(),
         ),
         NamedStage(
             name=STAGE_INPUT_REQUIREMENT,
-            handler=_input_requirement_stage(dependencies),
+            handler=_input_requirement_stage(),
         ),
         NamedStage(
             name=STAGE_AUTHORIZATION_RESOURCE,
-            handler=_authorization_resource_stage(dependencies),
+            handler=_authorization_resource_stage(),
         ),
         NamedStage(
             name=STAGE_ACCESS_CONTROL,
@@ -442,7 +536,7 @@ def default_stages(dependencies: PreToolDependencies) -> tuple[NamedStage, ...]:
         ),
         NamedStage(
             name=STAGE_BUSINESS_POLICY,
-            handler=_business_policy_stage(dependencies),
+            handler=_business_policy_stage(),
         ),
         NamedStage(
             name=STAGE_EXECUTION_MODE,

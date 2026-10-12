@@ -42,6 +42,24 @@ PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
         }
     ),
     required_source_keys=frozenset(),
+    # 参考 Agent 的保守运行上限,随 AgentVersion 一起版本化;
+    # 这不是 Runtime 的全局默认值(RuntimeDefaults 见 RunLimits 的保守基线)。
+    # Runtime 组合根通过 RunLimits.from_definition 消费同一份定义。
+    loop_limits={
+        # 单次改价任务最多 8 轮模型调用:读取/比较到写入的闭环足够,
+        # 又能在模型陷入无界重复时尽早失败。
+        "max_model_rounds": 8,
+        # 单次 Run 最多 8 次 ToolCall:覆盖查询、比较、加载 Skill 与一次写入。
+        "max_tool_calls": 8,
+        # 单个 Tool 超时 60 秒:平台读写回执应在秒级返回。
+        "tool_timeout_seconds": 60,
+        # Run 总时限 1 小时:留出人工确认挂起后恢复的时间。
+        "run_deadline_seconds": 3600,
+        # 模型调用重试 1 次:改价写路径宁可失败也不无限重试。
+        "backend_retries": 1,
+        # Reconciliation 预算 3 次:足以覆盖平台回查与补偿,不含无限重试。
+        "reconcile_budget": 3,
+    },
 )
 
 

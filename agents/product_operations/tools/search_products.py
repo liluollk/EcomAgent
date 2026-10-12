@@ -18,6 +18,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.product_operations.domain.models import ListingStatus, StoreStatus
+from agents.product_operations.input.profiles import (
+    TOOL_ARGUMENT_FIELDS,
+    product_registration,
+)
 from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.tools.access import (
     authorize_product_read,
@@ -110,6 +114,11 @@ async def search_products(
 SEARCH_PRODUCTS_BINDING: Final = ToolBinding(
     definition=SEARCH_PRODUCTS_DEFINITION,
     handler=search_products,
+    pretool_registration=product_registration(
+        fields=TOOL_ARGUMENT_FIELDS["search_products"],
+        policy_mode="NONE",
+        resource_mode="WORKSPACE",
+    ),
 )
 
 

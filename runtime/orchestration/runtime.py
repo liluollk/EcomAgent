@@ -74,9 +74,6 @@ class Runtime:
         limits: RunLimits,
         tool_pins: ToolPinResolver,
         pipeline_factory: Callable[[], ToolCallEvaluator],
-        adapter_key: str = "local",
-        supports_native_idempotency: bool = False,
-        supports_reconciliation: bool = False,
         worker_id: str = "runtime-worker",
         lease_duration: timedelta = DEFAULT_LEASE_DURATION,
     ) -> None:
@@ -86,9 +83,6 @@ class Runtime:
         self._limits = limits
         self._tool_pins = tool_pins
         self._pipeline_factory = pipeline_factory
-        self._adapter_key = adapter_key
-        self._supports_native_idempotency = supports_native_idempotency
-        self._supports_reconciliation = supports_reconciliation
         self._worker_id = worker_id
         self._lease_duration = lease_duration
         self._worker = RunJobWorker(
@@ -154,9 +148,6 @@ class Runtime:
             pipeline=self._pipeline_factory(),
             tool_pins=self._tool_pins,
             processor=ToolResultProcessor(),
-            adapter_key=self._adapter_key,
-            supports_native_idempotency=self._supports_native_idempotency,
-            supports_reconciliation=self._supports_reconciliation,
             checkpoint=lambda: self._checkpoint(session, lease),
         )
 

@@ -9,8 +9,7 @@ import pytest
 
 from agents.product_operations.agent import PRODUCT_AGENT_DEFINITION
 from agents.product_operations.skill import PRODUCT_MAINTENANCE_SKILL
-from composition import product_operations
-from composition.product_operations import _tool_definitions
+from composition.provisioning.product_operations import product_tool_definitions
 from runtime.access.actor import ActorContext
 from runtime.access.authorization import Authorizer
 from runtime.capabilities.registry import (
@@ -23,6 +22,12 @@ from runtime.execution.pretool.pipeline import (
     PreToolDependencies,
     PreToolUsePipeline,
     ToolCallRequest,
+    default_stages,
+)
+from runtime.execution.pretool.profiles import (
+    PassThroughInputNormalizer,
+    PreToolProfileContext,
+    runtime_control_registration,
 )
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.tool_registry import RuntimeToolRegistry
@@ -67,7 +72,7 @@ def test_product_agent_declares_loadable_skill_metadata() -> None:
 
 def test_product_composition_registers_the_runtime_load_skill_tool() -> None:
     module = importlib.import_module("runtime.capabilities.skill_activation")
-    definitions = dict(_tool_definitions())
+    definitions = dict(product_tool_definitions())
 
     assert definitions[module.LOAD_SKILL_KEY] == module.LOAD_SKILL_DEFINITION
 
@@ -76,36 +81,30 @@ async def test_load_skill_skips_product_argument_normalization() -> None:
     module = importlib.import_module("runtime.capabilities.skill_activation")
     definition = module.LOAD_SKILL_DEFINITION
     registry = ToolRegistry()
-    registry.register(
-        ToolVersionRecord(
-            stable_key=definition.stable_key,
-            version_id=uuid.uuid4(),
-            version=definition.version,
-            workspace_id=None,
-            source_kind="LOCAL",
-            effect=definition.effect,
-            input_schema=definition.input_json_schema,
-            output_schema=definition.output_json_schema,
-            schema_hash=definition.schema_hash,
-            required_permissions=definition.required_permissions,
-        )
+    record = ToolVersionRecord(
+        stable_key=definition.stable_key,
+        version_id=uuid.uuid4(),
+        version=definition.version,
+        workspace_id=None,
+        source_kind="LOCAL",
+        effect=definition.effect,
+        input_schema=definition.input_json_schema,
+        output_schema=definition.output_json_schema,
+        schema_hash=definition.schema_hash,
+        required_permissions=definition.required_permissions,
     )
-    registry.bind(ToolBinding(definition=definition, handler=module.LOAD_SKILL_HANDLER))
+    registry.register(record, make_current=True)
+    # load_skill 是 Runtime 内置 Tool:绑定 Runtime 控制 Profile,
+    # 不带任何商品业务扩展(归一化 / 来源 / 策略均为显式空实现)。
+    registry.bind(
+        record.version_id,
+        ToolBinding(
+            definition=definition,
+            handler=module.LOAD_SKILL_HANDLER,
+            pretool_registration=runtime_control_registration(),
+        ),
+    )
 
-    class ProductNormalizerMustNotRun:
-        async def normalize(self, *, arguments: object) -> object:
-            raise AssertionError("Runtime 内置 Tool 不应经过商品参数归一化")
-
-    dependencies = PreToolDependencies(
-        tool_registry=RuntimeToolRegistry(registry),
-        schema_validator=RuntimeSchemaValidator(),
-        authorizer=Authorizer(),
-        input_normalizer=ProductNormalizerMustNotRun(),
-    )
-    stages = product_operations._pretool_stages_for(
-        module.LOAD_SKILL_KEY,
-        dependencies,
-    )
     actor = ActorContext(
         actor_id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
@@ -115,16 +114,31 @@ async def test_load_skill_skips_product_argument_normalization() -> None:
         resource_scopes={},
         request_id="request-1",
     )
-    decision = await PreToolUsePipeline(actor=actor, stages=stages).evaluate(
-        ToolCallRequest(
-            tool_call_id=ToolCallId(uuid.uuid4()),
-            stable_key=module.LOAD_SKILL_KEY,
-            version=definition.version,
-            raw_arguments='{"skill_key":"product_maintenance"}',
-        )
+    request = ToolCallRequest(
+        tool_call_id=ToolCallId(uuid.uuid4()),
+        stable_key=module.LOAD_SKILL_KEY,
+        version=definition.version,
+        raw_arguments='{"skill_key":"product_maintenance"}',
     )
+    dependencies = PreToolDependencies(
+        tool_registry=RuntimeToolRegistry(registry),
+        schema_validator=RuntimeSchemaValidator(),
+        authorizer=Authorizer(),
+        profile_context=PreToolProfileContext(
+            session=None, actor=actor, request=request
+        ),
+    )
+    decision = await PreToolUsePipeline(
+        actor=actor, stages=default_stages(dependencies)
+    ).evaluate(request)
 
     assert decision.kind == "ALLOW"
+
+    # 商品参数归一化不会介入内置 Tool:控制 Profile 的归一化器是透传实现。
+    control_profile = await runtime_control_registration().factory.create(
+        PreToolProfileContext(session=None, actor=actor, request=request)
+    )
+    assert isinstance(control_profile.input_normalizer, PassThroughInputNormalizer)
 
 
 async def test_skill_activation_is_idempotent_and_recoverable(

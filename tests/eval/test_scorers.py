@@ -71,7 +71,7 @@ def _price_scenario(
                     "sku": "SKU-001",
                     "price": "128.00",
                     "currency": "CNY",
-                    "status": "ACTIVE",
+                    "status": "PUBLISHED",
                 }
             ]
         },
@@ -154,7 +154,7 @@ def _unchanged_state(*, logical_writes: int = 0) -> FinalState:
                 sku="SKU-001",
                 price=Decimal("128.00"),
                 currency="CNY",
-                status="ACTIVE",
+                status="PUBLISHED",
             ),
         ),
         logical_writes=logical_writes,
@@ -170,7 +170,7 @@ def _legal_write_state(*, logical_writes: int = 1) -> FinalState:
                 sku="SKU-001",
                 price=Decimal("99.00"),
                 currency="CNY",
-                status="ACTIVE",
+                status="PUBLISHED",
             ),
         ),
         logical_writes=logical_writes,

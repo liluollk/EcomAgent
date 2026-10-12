@@ -39,6 +39,7 @@ from runtime.backend.protocol import (
     TextDelta,
     ToolCallCompleted,
 )
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.operations import (
     BegunOperation,
     LeaseStaleError,
@@ -53,6 +54,7 @@ from runtime.execution.reconciliation import (
     ReconcileResult,
     ReconciliationService,
 )
+from runtime.execution.tool_executor import PreparedToolWrite
 from runtime.execution.tool_result_processor import (
     ToolExecutionReceipt,
     ToolResultProcessor,
@@ -127,6 +129,9 @@ TEST_OUTPUT_SCHEMA: dict = {
     "required": ["result"],
 }
 
+_CRASH_ADAPTER_KEY = "crash-adapter"
+"""崩溃恢复测试写 Tool 的执行 Profile Adapter Key。"""
+
 TEST_LIMITS = RunLimits(
     max_model_rounds=4,
     max_tool_calls=5,
@@ -187,14 +192,22 @@ class CrashWriteHandler:
         self.crash_point: str | None = None
         self.receipt_status = "APPLIED"
         self.receipt_payload: Any = {"result": "written"}
+        self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
-    async def execute(
+    async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
+        return PreparedToolWrite(
+            command={"arguments": dict(normalized_arguments)},
+            expected_state=dict(self.expected_state),
+            request_fingerprint="crash-write-fingerprint",
+        )
+
+    async def execute_prepared(
         self,
         *,
         tool_call_id: uuid.UUID,
         operation_id: uuid.UUID,
         idempotency_key: str,
-        normalized_arguments: Mapping[str, Any],
+        prepared: PreparedToolWrite,
     ) -> ToolExecutionReceipt:
         # 受控外部世界:进入 handler 即视为外部写入已生效。
         self.write_count += 1
@@ -203,6 +216,7 @@ class CrashWriteHandler:
                 "tool_call_id": tool_call_id,
                 "operation_id": operation_id,
                 "idempotency_key": idempotency_key,
+                "normalized_arguments": dict(prepared.command["arguments"]),
             }
         )
         if self.crash_point == AFTER_EXTERNAL_WRITE_BEFORE_RESULT:
@@ -328,8 +342,6 @@ class CrashHarness:
                 self.write_handler,
             ),
             pipeline_factory=lambda: AlwaysAllowPipeline(),
-            adapter_key="crash-adapter",
-            supports_reconciliation=True,
             worker_id="crash-worker",
         )
 
@@ -385,6 +397,7 @@ class CrashHarness:
                     lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=TEST_LIMITS.reconcile_budget,
+                    write_retry_budget=TEST_LIMITS.write_retry_budget,
                 )
                 outcome = await service.apply_result(verdict)
                 assert await LeaseService(session).complete(job.id, lease.lease_token)
@@ -496,7 +509,10 @@ class CrashHarness:
                     expected_state_version=run.state_version,
                 )
                 return await service.begin(
-                    tool_call.id, adapter_key="crash-adapter", supports_reconciliation=True
+                    tool_call.id,
+                    adapter_key=_CRASH_ADAPTER_KEY,
+                    expected_state=dict(self.write_handler.expected_state),
+                    supports_reconciliation=True,
                 )
         finally:
             await session.close()
@@ -643,6 +659,10 @@ class _WriteToolPins:
             effect=ToolEffect.WRITE,
             handler=handler,
             output_schema=TEST_OUTPUT_SCHEMA,
+            execution_profile=ToolExecutionProfile(
+                adapter_key=_CRASH_ADAPTER_KEY,
+                supports_reconciliation=True,
+            ),
         )
 
     def by_stable_key(self, stable_key: str) -> ToolPin | None:
@@ -1029,11 +1049,14 @@ async def test_stale_fencing_token_rejected_without_second_write(
     stale_lease = await harness.claim_lease("stale-worker")
     begun = await harness.begin_operation(stale_lease)
     # 旧 Worker 已发出外部写请求(网络请求无法被租约撤回)。
-    await harness.write_handler.execute(
+    prepared = await harness.write_handler.prepare(
+        normalized_arguments={"listing_id": "L1"}
+    )
+    await harness.write_handler.execute_prepared(
         tool_call_id=tool_call.id,
         operation_id=begun.operation_id,
         idempotency_key=begun.idempotency_key,
-        normalized_arguments={"listing_id": "L1"},
+        prepared=prepared,
     )
     assert harness.external_write_count == 1
 

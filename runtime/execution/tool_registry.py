@@ -39,26 +39,27 @@ class RuntimeToolRegistry:
         self._registry = registry
 
     def resolve(self, *, stable_key: str, version: int) -> ToolResolution:
-        """解析该 Run 期望的 Tool 版本;漂移与禁用版本不通过。"""
-        record = self._registry.find_by_key(stable_key)
+        """解析该 Run 期望的精确 Tool 版本;漂移与禁用版本不通过。"""
+        record = self._registry.find_by_key_version(stable_key, version)
         if record is None:
-            return ToolResolution(status=TOOL_UNKNOWN)
-        if record.version != version:
-            return ToolResolution(status=TOOL_VERSION_MISMATCH, record=record)
+            # 区分"从未注册"与"注册了其他版本":前者未知,后者版本漂移。
+            current = self._registry.find_by_key(stable_key)
+            if current is None:
+                return ToolResolution(status=TOOL_UNKNOWN)
+            return ToolResolution(status=TOOL_VERSION_MISMATCH, record=current)
         if record.effect is None:
             # 未经本地 effect/permission 分类的 MCP Tool 默认禁用。
             return ToolResolution(status=TOOL_DISABLED, record=record)
-        bindings = self._registry.bindings_for(stable_key)
         return ToolResolution(
             status=TOOL_RESOLVED,
             record=record,
-            binding=bindings[0] if bindings else None,
+            binding=self._registry.binding_for_version(record.version_id),
         )
 
     def definition_for(self, stable_key: str) -> ToolDefinition | None:
-        """返回该 Tool 的模型可见数据定义(来自进程内 ToolBinding)。"""
-        bindings = self._registry.bindings_for(stable_key)
-        return bindings[0].definition if bindings else None
+        """返回该 Tool 当前版本的模型可见数据定义(来自进程内 ToolBinding)。"""
+        binding = self._registry.binding_for_key(stable_key)
+        return binding.definition if binding is not None else None
 
 
 __all__ = [

@@ -36,8 +36,21 @@ from runtime.capabilities.registry import (
 from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.capabilities.write_service import WriteAuthorizationService
+from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.pretool.profiles import (
+    PreToolProfileRegistration,
+    no_op_profile,
+)
 from runtime.interfaces.tools import ToolDefinition, ToolEffect
 from runtime.persistence.base import MembershipRole, ModelBackendType
+
+
+class _StaticProfileFactory:
+    """测试替身 Profile 工厂:固定返回空 Profile。"""
+
+    async def create(self, context: object) -> object:
+        del context
+        return no_op_profile()
 from runtime.persistence.models.configuration import (
     Agent,
     AgentVersion,
@@ -100,7 +113,38 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture()
 async def capability_catalog(db_session: AsyncSession) -> CapabilityCatalog:
-    """种子能力目录行并构造等价的进程内注册表与 RuntimeAssembly。"""
+    """种子能力目录行并构造等价的进程内注册表与 RuntimeAssembly。
+
+    先清掉同名全局残留:组合层套件会经正式 provisioner 提交全局能力目录行
+    (provisioner 幂等但从不回收),不清理会让本 fixture 在合并运行时撞
+    唯一约束。删除发生在本 Session 事务内,结束时随 rollback 一起还原。
+    """
+    leftover_agents = select(Agent.id).where(Agent.stable_key == AGENT_KEY)
+    await db_session.execute(
+        delete(AgentVersion).where(AgentVersion.agent_id.in_(leftover_agents))
+    )
+    await db_session.execute(delete(Agent).where(Agent.stable_key == AGENT_KEY))
+    leftover_skills = select(Skill.id).where(
+        Skill.scope == "GLOBAL", Skill.stable_key == "price-adjustment"
+    )
+    await db_session.execute(
+        delete(SkillVersion).where(SkillVersion.skill_id.in_(leftover_skills))
+    )
+    await db_session.execute(
+        delete(Skill).where(Skill.scope == "GLOBAL", Skill.stable_key == "price-adjustment")
+    )
+    leftover_tools = select(ToolDefinitionRow.id).where(
+        ToolDefinitionRow.scope == "GLOBAL", ToolDefinitionRow.stable_key == "update_price"
+    )
+    await db_session.execute(
+        delete(ToolVersionRow).where(ToolVersionRow.tool_id.in_(leftover_tools))
+    )
+    await db_session.execute(
+        delete(ToolDefinitionRow).where(
+            ToolDefinitionRow.scope == "GLOBAL",
+            ToolDefinitionRow.stable_key == "update_price",
+        )
+    )
     workspace = Workspace(id=uuid.uuid4(), name=f"ws-{uuid.uuid4()}")
     user = User(id=uuid.uuid4(), login=f"user-{uuid.uuid4()}", password_hash="test-hash")
     agent = Agent(id=uuid.uuid4(), stable_key=AGENT_KEY, name="商品运营维护 Agent")
@@ -245,8 +289,9 @@ async def capability_catalog(db_session: AsyncSession) -> CapabilityCatalog:
     skill_registry = SkillRegistry()
     skill_registry.register(skill_rec)
     tool_registry = ToolRegistry()
-    tool_registry.register(tool_rec)
+    tool_registry.register(tool_rec, make_current=True)
     tool_registry.bind(
+        tool_rec.version_id,
         ToolBinding(
             definition=ToolDefinition(
                 stable_key="update_price",
@@ -260,6 +305,12 @@ async def capability_catalog(db_session: AsyncSession) -> CapabilityCatalog:
                 schema_hash=SCHEMA_HASH,
             ),
             handler=object(),
+            pretool_registration=PreToolProfileRegistration(
+                factory=_StaticProfileFactory(),
+                policy_mode="BUSINESS",
+                resource_mode="RESOURCE",
+            ),
+            execution_profile=ToolExecutionProfile(adapter_key="test-adapter"),
             write_adapter_capabilities=frozenset({"operation", "reconciliation"}),
         )
     )
