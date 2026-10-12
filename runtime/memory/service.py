@@ -2,7 +2,7 @@
 
 权威语义:
 - Runtime 只保存已确认的偏好/反馈/决策/经验;执行关键事实(权限、资源
-  范围、价格规则、凭据)与 Secret/凭据形态的内容绝不入库;
+  范围、业务规则、凭据)与 Secret/凭据形态的内容绝不入库;
 - 纠正创建新 Revision 并替代旧记录(旧记录置 SUPERSEDED);
 - 删除写 Tombstone(deleted_at + DELETED),不做物理删除;
 - 写入/纠正/删除在同一事务内产生 MEMORY_UPSERT/MEMORY_DELETE Outbox 行;
@@ -43,9 +43,14 @@ ACCEPTED_MEMORY_KINDS: Final[frozenset[str]] = frozenset(
 """Runtime 允许入库的已确认记忆类型(架构文档 §7)。"""
 
 EXECUTION_CRITICAL_MEMORY_KINDS: Final[frozenset[str]] = frozenset(
-    {"permission", "resource_scope", "price_rule", "credential"}
+    {"permission", "resource_scope", "business_rule", "credential"}
 )
-"""执行关键事实:禁止作为长期记忆入库(计划 04 Task 7)。"""
+"""执行关键事实:禁止作为长期记忆入库(计划 04 Task 7)。
+
+分类名称保持领域无关:Runtime 不认识价格、库存等具体业务规则,业务规则
+统一归入 ``business_rule``。未知 kind 本来就拒绝入库,因此历史输入
+(如旧的 ``price_rule``)继续 fail-closed,不需要兼容放行。
+"""
 
 _SECRET_CONTENT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"sk-[A-Za-z0-9]{16,}"),
