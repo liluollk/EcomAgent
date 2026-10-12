@@ -45,6 +45,7 @@ from runtime.backend.protocol import BackendCompleted, TextDelta, ToolCallComple
 from runtime.capabilities.skill_activation import LOAD_SKILL_KEY
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect
+from runtime.orchestration.limits import RunLimits
 
 
 PRODUCT_TOOL_KEYS = (
@@ -89,6 +90,34 @@ async def test_product_and_runtime_tools_are_registered(
     assert SKILL_VERSION == 4
     assert PRODUCT_AGENT_DEFINITION.system_prompt_version == "product-agent-prompt-v4"
     assert UPDATE_PRICE_TOOL_VERSION == 3
+
+
+def test_agent_definition_carries_reference_loop_limits() -> None:
+    """版本化定义携带参考 Agent 的保守运行上限(非 Runtime 全局默认)。"""
+    assert PRODUCT_AGENT_DEFINITION.loop_limits == {
+        "max_model_rounds": 8,
+        "max_tool_calls": 8,
+        "tool_timeout_seconds": 60,
+        "run_deadline_seconds": 3600,
+        "backend_retries": 1,
+        "reconcile_budget": 3,
+    }
+
+
+def test_run_limits_follow_agent_definition_not_private_constant(
+    product_application,
+) -> None:
+    """运行限制来自 ``AgentDefinition.loop_limits``,组合根不再持有私有常量。
+
+    同一份定义必须同时驱动 Runtime 构造与 Reconciliation 预算,避免出现
+    定义已改、运行限制仍钉在模块级 ``_LIMITS`` 的漂移。
+    """
+    from composition import product_operations as composition_module
+
+    assert not hasattr(composition_module, "_LIMITS")
+    assert product_application.run_limits == RunLimits.from_definition(
+        PRODUCT_AGENT_DEFINITION.loop_limits
+    )
 
 
 async def test_update_price_model_visible_fields_are_exactly_store_sku_price(

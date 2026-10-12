@@ -200,15 +200,6 @@ MODEL_CONNECTION_KEY: Final = "product-worker-model"
 
 _WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset({"operation", "reconciliation"})
 
-_LIMITS: Final = RunLimits(
-    max_model_rounds=8,
-    max_tool_calls=8,
-    tool_timeout_seconds=60,
-    run_deadline_seconds=3600,
-    backend_retries=1,
-    reconcile_budget=3,
-)
-
 _MAX_RECONCILE_ROUNDS: Final = 5
 
 
@@ -967,6 +958,7 @@ class ToolCallSnapshot:
     failure_code: str | None
     operation_id: uuid.UUID | None
     raw_arguments: Mapping[str, Any]
+    normalized_arguments: Mapping[str, Any] | None
 
 
 class ProductApplication:
@@ -1005,6 +997,11 @@ class ProductApplication:
         self._adapter_key = adapter_key
         self._answered: dict[str, str] = {}
         self._scope = _ScopeHolder()
+        # 运行限制是 AgentVersion 定义的一部分:同一份定义同时驱动 Runtime
+        # 构造与 Reconciliation 预算,不再持有独立的模块级常量。
+        self._run_limits = RunLimits.from_definition(
+            PRODUCT_AGENT_DEFINITION.loop_limits
+        )
         estimator = HeuristicTokenEstimator()
         assembler = ContextAssembler(
             safety_rules=(
@@ -1035,7 +1032,7 @@ class ProductApplication:
             session_factory=self._session_factory,
             backend=backend,
             assembler=assembler,
-            limits=_LIMITS,
+            limits=self._run_limits,
             tool_pins=_RegistryToolPins(tool_registry),
             pipeline_factory=_ProductPipelineFactory(
                 engine=engine,
@@ -1063,6 +1060,11 @@ class ProductApplication:
     @property
     def assembly(self) -> RuntimeAssembly:
         return self._assembly
+
+    @property
+    def run_limits(self) -> RunLimits:
+        """当前应用实际使用的运行限制(由 AgentVersion 定义组装)。"""
+        return self._run_limits
 
     @property
     def price_config(self) -> PricePolicyConfig:
@@ -1287,6 +1289,11 @@ class ProductApplication:
                 failure_code=row.failure_code,
                 operation_id=row.operation_id,
                 raw_arguments=dict(row.raw_arguments),
+                normalized_arguments=(
+                    dict(row.normalized_arguments)
+                    if row.normalized_arguments is not None
+                    else None
+                ),
             )
         finally:
             await session.close()
@@ -1411,7 +1418,7 @@ class ProductApplication:
                     operation_id=operation_id,
                     lease_token=lease_token,
                     expected_state_version=expected_state_version,
-                    reconcile_budget=_LIMITS.reconcile_budget,
+                    reconcile_budget=self._run_limits.reconcile_budget,
                 ).apply_result(verdict)
                 await LeaseService(session).complete(job.id, lease_token)
                 return outcome.next_job_kind is RunJobKind.ADVANCE_RUN

@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from runtime.capabilities.registry import AgentDefinition
 from runtime.orchestration.limits import LoopBudget, LoopLimitExceeded, RunLimits
 
 
@@ -119,6 +120,28 @@ def test_from_definition_overrides_conservative_defaults() -> None:
     assert limits.max_model_rounds == 3
     assert limits.max_tool_calls == 7
     # 未覆盖字段保持保守默认。
+    assert limits.tool_timeout_seconds == RunLimits().tool_timeout_seconds
+
+
+def test_from_definition_consumes_agent_definition_loop_limits() -> None:
+    """``from_definition`` 直接消费 AgentDefinition 的 ``loop_limits`` 组装视图。"""
+    definition = AgentDefinition(
+        name="TestAgent",
+        required_backend_capabilities=frozenset(),
+        required_skill_keys=frozenset(),
+        required_tool_keys=frozenset(),
+        required_source_keys=frozenset(),
+        loop_limits={
+            "max_model_rounds": 3,
+            "max_tool_calls": 4,
+            "reconcile_budget": 1,
+        },
+    )
+    limits = RunLimits.from_definition(definition.loop_limits)
+    assert limits.max_model_rounds == 3
+    assert limits.max_tool_calls == 4
+    assert limits.reconcile_budget == 1
+    # 未覆盖字段仍回落保守默认,不被同一 Mapping 带偏。
     assert limits.tool_timeout_seconds == RunLimits().tool_timeout_seconds
 
 
