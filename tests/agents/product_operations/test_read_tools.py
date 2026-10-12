@@ -44,6 +44,7 @@ from agents.product_operations.tools.search_products import (
 )
 from runtime.access.actor import ActorContext
 from runtime.access.authorization import PERMISSION_DENIED, RESOURCE_SCOPE_DENIED
+from runtime.backend.protocol import BackendCompleted, TextDelta, ToolCallCompleted
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.interfaces.identifiers import ResourceScope
 from runtime.interfaces.tools import ToolEffect
@@ -439,3 +440,43 @@ def test_tool_bindings_connect_definitions_to_handlers() -> None:
         COMPARE_LISTING_PRICES_BINDING,
     ):
         assert binding.write_adapter_capabilities == frozenset()
+
+
+# ---- Runtime 路径:归一化不得丢弃只读 Tool 的多店铺/查询参数 ----
+
+
+async def test_search_products_normalization_preserves_query_and_store_ids(
+    product_application,
+) -> None:
+    """经真实 Runtime 路径:search_products 的 query/store_ids 不丢失。
+
+    回归证据:旧 ProductPreToolNormalizer 用固定写字段白名单归一化所有
+    Tool,``query``/``store_ids`` 被整体丢弃,只读 Tool 因此拿不到查询条件。
+    """
+    backend = product_application.scripted_backend
+    store_id = str(product_application.seed_ids.store_id)
+    backend.set_rounds(
+        [
+            [
+                ToolCallCompleted(
+                    call_id="search-1",
+                    name=SEARCH_PRODUCTS_DEFINITION.stable_key,
+                    arguments={"query": "保温杯", "store_ids": [store_id]},
+                ),
+                BackendCompleted(finish_reason="tool_calls"),
+            ],
+            [
+                TextDelta(text_delta="已完成检索。"),
+                BackendCompleted(finish_reason="stop"),
+            ],
+        ]
+    )
+
+    view = await product_application.start("搜索授权店铺内的保温杯。")
+    snapshot = await product_application.tool_call_snapshot(view.run_id)
+
+    assert snapshot is not None
+    assert snapshot.normalized_arguments == {
+        "query": "保温杯",
+        "store_ids": [store_id],
+    }
