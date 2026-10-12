@@ -6,6 +6,16 @@
   与 EXECUTE Attempt;恢复、确认和重试不得重新生成 ``operation_id``),提交后
   才调用 Adapter;结果经 :meth:`OperationService.record_result` 在结果事务内
   提交(状态、脱敏结果与 AgentEvent 同事务);
+- **begin 状态机**:可复用的 Operation 只能是 PREPARED(确认前只预约了
+  ``operation_id``)、EXECUTING(同一 operation_id 的幂等重入)或 NOT_APPLIED
+  (上次尝试确定未生效);已绑定目标时要求规范化 ``expected_state`` 与执行能力
+  (adapter / 原生幂等 / 回查)完全一致;``expected_state IS NULL`` 只允许在
+  PREPARED / NOT_APPLIED 下首次绑定目标,其余状态一律 fail closed;进入执行
+  边界即把状态推进 EXECUTING——这是恢复方识别"可能已执行"的唯一判据;
+- **本地确定性拒绝**:prepare 阶段发现的确定性冲突走
+  :meth:`OperationService.record_rejected_preparation`,直接落 NOT_APPLIED,
+  不写 EXECUTING、不写 TOOL_WRITE_ALLOWED、不新增 EXECUTE Attempt,因而不产生
+  外部执行的不确定窗口;拒绝上下文只进 ``last_receipt``(审计用途,不参与回查);
 - **结果分类**:适配器回执状态 → :class:`OperationOutcome`(APPLIED /
   NOT_APPLIED / UNKNOWN)确定性分类(:func:`classify_receipt_status`);
 - **UNKNOWN 只能进 Reconciliation**:Run ``RUNNING → WAITING_RECONCILIATION``,
@@ -26,6 +36,7 @@
 from __future__ import annotations
 
 import enum
+import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,6 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from runtime.audit.models import OUTCOME_FAILURE
 from runtime.audit.service import AuditService
 from runtime.events.writer import AgentEventWriter, AppendedEvent
 from runtime.execution.run_service import RunService
@@ -56,6 +68,7 @@ from runtime.persistence.repositories.runs import RunRepository
 
 TOOL_WRITE_ALLOWED: Final = "TOOL_WRITE_ALLOWED"
 TOOL_WRITE_DENIED: Final = "TOOL_WRITE_DENIED"
+TOOL_WRITE_REJECTED: Final = "TOOL_WRITE_REJECTED"
 TOOL_WRITE_EXECUTED: Final = "TOOL_WRITE_EXECUTED"
 TOOL_WRITE_RECONCILED: Final = "TOOL_WRITE_RECONCILED"
 TOOL_WRITE_UNKNOWN: Final = "TOOL_WRITE_UNKNOWN"
@@ -105,6 +118,31 @@ class OperationConflictError(RuntimeError):
 
 class LeaseStaleError(RuntimeError):
     """fencing 失败:lease token 与活动租约不匹配或租约已过期。"""
+
+
+# ---- Operation 状态机(执行边界前提) ----
+
+_BEGINNABLE_OPERATION_STATUSES: Final[frozenset[OperationStatus]] = frozenset(
+    {
+        # 确认前只预约了 operation_id,尚未绑定业务目标。
+        OperationStatus.PREPARED,
+        # 同一 operation_id 的幂等重入:崩溃恢复或 NOT_APPLIED 后的再次执行。
+        OperationStatus.EXECUTING,
+        # 上次尝试确定未生效(适配器判定或本地 prepare 拒绝):可以重新绑定目标。
+        OperationStatus.NOT_APPLIED,
+    }
+)
+
+_NULL_STATE_BINDABLE_STATUSES: Final[frozenset[OperationStatus]] = frozenset(
+    # 只有"从未发起外部调用"的状态允许以 NULL expected_state 首次绑定目标。
+    {OperationStatus.PREPARED, OperationStatus.NOT_APPLIED}
+)
+
+_EXECUTABLE_TOOL_CALL_STATUSES: Final[tuple[ToolCallStatus, ...]] = (
+    # 执行边界的 ToolCall 前提:VALIDATING(新执行)或 EXECUTING(幂等重入)。
+    ToolCallStatus.VALIDATING,
+    ToolCallStatus.EXECUTING,
+)
 
 
 # ---- 值对象 ----
@@ -211,6 +249,56 @@ def _rowcount(result: Any) -> int:
     return cast("CursorResult[Any]", result).rowcount
 
 
+def canonical_expected_state(value: Mapping[str, Any] | None) -> str:
+    """``expected_state`` 的规范化 JSON;``None`` 归一为空对象。
+
+    用于判断"复用同一 Operation 时目标是否被改写":键序、空白与非 JSON 值
+    都不影响比较结果。
+    """
+    return json.dumps(
+        {} if value is None else dict(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _require_same_execution_contract(
+    operation_row: Operation,
+    *,
+    adapter_key: str,
+    supports_native_idempotency: bool,
+    supports_reconciliation: bool,
+) -> None:
+    """已绑定目标的 Operation 不得在执行能力上被改写。
+
+    Adapter 与幂等/回查能力决定了"重复提交是否安全"与"结果能否被查证",
+    因此必须与首次落库值完全一致;不一致即 fail closed,而不是以新值覆盖。
+    """
+    mismatches: list[str] = []
+    if operation_row.adapter_key != adapter_key:
+        mismatches.append(
+            f"adapter_key persisted={operation_row.adapter_key!r} requested={adapter_key!r}"
+        )
+    if operation_row.supports_native_idempotency != supports_native_idempotency:
+        mismatches.append(
+            "supports_native_idempotency "
+            f"persisted={operation_row.supports_native_idempotency} "
+            f"requested={supports_native_idempotency}"
+        )
+    if operation_row.supports_reconciliation != supports_reconciliation:
+        mismatches.append(
+            "supports_reconciliation "
+            f"persisted={operation_row.supports_reconciliation} "
+            f"requested={supports_reconciliation}"
+        )
+    if mismatches:
+        raise OperationConflictError(
+            f"operation {operation_row.operation_id} 执行能力不一致:"
+            + "; ".join(mismatches)
+        )
+
+
 # ---- 服务 ----
 
 
@@ -253,6 +341,7 @@ class OperationService:
         tool_call_id: uuid.UUID,
         *,
         adapter_key: str,
+        expected_state: Mapping[str, Any],
         supports_native_idempotency: bool = False,
         supports_reconciliation: bool = False,
         idempotency_key: str | None = None,
@@ -262,8 +351,15 @@ class OperationService:
 
         - ToolCall 已分配 ``operation_id`` 时复用(恢复/确认/重试不重新生成),
           未分配时生成并写回 ToolCall;
-        - Operation 行存在即复用(幂等),否则以该 operation_id 创建(状态
-          EXECUTING);每次 begin 都对应一次即将发生的外部调用,新增 Attempt;
+        - 复用已有 Operation 时先收敛状态机(见
+          :meth:`_prepare_existing_for_execution`):状态必须可执行、业务目标与
+          执行能力必须一致,``expected_state IS NULL`` 只能首次绑定;任一不满足
+          即抛 :class:`OperationConflictError`(fail closed);
+        - 新建 Operation 时一并持久化服务端 ``expected_state``——它必须早于任何
+          外部副作用落库,回查只能依据该记录;
+        - 任何即将发起外部调用的 begin 都会让 Operation 处于 EXECUTING:这是
+          恢复/回收方判断"可能已执行"的唯一判据;
+        - 每次 begin 都对应一次即将发生的外部调用,新增 Attempt;
         - ToolCall ``VALIDATING → EXECUTING``(条件更新,竞争抛冲突);
         - 同时写 TOOL_WRITE_ALLOWED 审计(到达执行边界即已获准执行)。
         """
@@ -274,6 +370,11 @@ class OperationService:
             lease_token=self._lease_token,
         )
         tool_call = await self._load_tool_call(tool_call_id)
+        # 只读前提检查:ToolCall 必须处于可执行状态;失败时不留任何状态改动。
+        if tool_call.status not in _EXECUTABLE_TOOL_CALL_STATUSES:
+            raise OperationConflictError(
+                f"tool call {tool_call_id} is not VALIDATING/EXECUTING; cannot begin execution"
+            )
         assigned_id = tool_call.operation_id
         existing = (
             await self._load_operation_row(assigned_id) if assigned_id is not None else None
@@ -283,6 +384,14 @@ class OperationService:
             operation_row = existing
             # Operation.operation_id 列非空;复用时以行上的稳定值为准。
             operation_id: uuid.UUID = existing.operation_id
+            self._prepare_existing_for_execution(
+                existing,
+                adapter_key=adapter_key,
+                expected_state=expected_state,
+                supports_native_idempotency=supports_native_idempotency,
+                supports_reconciliation=supports_reconciliation,
+            )
+            await self._session.flush()
         else:
             operation_id = assigned_id if assigned_id is not None else uuid.uuid4()
             key = idempotency_key if idempotency_key is not None else f"op:{operation_id}"
@@ -297,6 +406,7 @@ class OperationService:
                 adapter_key=adapter_key,
                 supports_native_idempotency=supports_native_idempotency,
                 supports_reconciliation=supports_reconciliation,
+                expected_state=dict(expected_state),
                 status=OperationStatus.EXECUTING,
             )
             self._session.add(operation_row)
@@ -455,7 +565,184 @@ class OperationService:
             event=event,
         )
 
+    async def record_rejected_preparation(
+        self,
+        tool_call_id: uuid.UUID,
+        *,
+        adapter_key: str,
+        rejection_context: Mapping[str, Any],
+        error_code: str,
+        supports_native_idempotency: bool = False,
+        supports_reconciliation: bool = False,
+        idempotency_key: str | None = None,
+    ) -> RecordResultOutcome:
+        """prepare 阶段确定性拒绝:直接落 NOT_APPLIED,不进入外部执行窗口。
+
+        - 绝不写 EXECUTING、绝不写 TOOL_WRITE_ALLOWED、不新增 EXECUTE Attempt,
+          因此不存在"可能已执行"的不确定窗口,也不会有回查被无谓触发;
+        - ``expected_state`` 保持 NULL:拒绝不存在可回查的业务目标,把模型输入
+          与策略版本这类审计上下文放进 ``last_receipt.rejection_context``;
+        - ToolCall 回到/保持 VALIDATING 并落 ``failure_code``:再次执行必须重新
+          通过完整 PreToolUse(与 NOT_APPLIED 的通用语义一致);
+        - Run 状态不变,不产生 RECONCILE Job。
+        """
+        await ensure_write_fencing(
+            self._session,
+            workspace_id=self._workspace_id,
+            run_id=self._run_id,
+            lease_token=self._lease_token,
+        )
+        tool_call = await self._load_tool_call(tool_call_id)
+        receipt = {
+            "outcome": OperationOutcome.NOT_APPLIED.value,
+            "error_code": error_code,
+            "external_reference": None,
+            "payload": None,
+            "rejection_context": dict(rejection_context),
+        }
+        assigned_id = tool_call.operation_id
+        existing = (
+            await self._load_operation_row(assigned_id) if assigned_id is not None else None
+        )
+        if existing is not None:
+            # 只有尚未发起外部调用的 Operation 可以被改写为"确定未生效";
+            # 已进入 EXECUTING/UNKNOWN/APPLIED 的行必须走 Reconciliation。
+            if existing.status not in _NULL_STATE_BINDABLE_STATUSES:
+                raise OperationConflictError(
+                    f"operation {existing.operation_id} 状态 {existing.status.value} "
+                    "不允许记录 prepare 拒绝;已执行或不确定的操作只能走 Reconciliation"
+                )
+            if existing.adapter_key != adapter_key:
+                raise OperationConflictError(
+                    f"operation {existing.operation_id} 已绑定 adapter_key="
+                    f"{existing.adapter_key!r},与本次 {adapter_key!r} 不一致"
+                )
+            operation_row = existing
+            operation_row.status = OperationStatus.NOT_APPLIED
+            operation_row.supports_native_idempotency = supports_native_idempotency
+            operation_row.supports_reconciliation = supports_reconciliation
+            operation_row.last_receipt = receipt
+            await self._session.flush()
+            operation_id = existing.operation_id
+        else:
+            operation_id = assigned_id if assigned_id is not None else uuid.uuid4()
+            key = idempotency_key if idempotency_key is not None else f"op:{operation_id}"
+            operation_row = Operation(
+                workspace_id=self._workspace_id,
+                tool_call_id=tool_call_id,
+                operation_id=operation_id,
+                idempotency_key=key,
+                adapter_key=adapter_key,
+                supports_native_idempotency=supports_native_idempotency,
+                supports_reconciliation=supports_reconciliation,
+                expected_state=None,
+                status=OperationStatus.NOT_APPLIED,
+                last_receipt=receipt,
+            )
+            self._session.add(operation_row)
+            await self._session.flush()
+            if assigned_id is None:
+                await self._assign_operation_id(tool_call_id, operation_id)
+        if not await self._transition_tool_call(
+            tool_call_id,
+            new_status=ToolCallStatus.VALIDATING,
+            expected_statuses=frozenset(
+                {ToolCallStatus.VALIDATING, ToolCallStatus.EXECUTING}
+            ),
+            failure_code=error_code,
+        ):
+            raise OperationConflictError(
+                f"tool call {tool_call_id} 不处于 VALIDATING/EXECUTING;"
+                " 无法记录 prepare 拒绝"
+            )
+        await self._audit.append(
+            TOOL_WRITE_REJECTED,
+            payload={
+                "tool_call_id": str(tool_call_id),
+                "operation_id": str(operation_id),
+                "adapter_key": adapter_key,
+                "error_code": error_code,
+            },
+            run_id=self._run_id,
+            tool_call_id=tool_call_id,
+            outcome=OUTCOME_FAILURE,
+            reason_code=error_code,
+        )
+        event = await self._writer.append(
+            self._run_id,
+            EVENT_TOOL_RESULT_RECORDED,
+            {
+                "tool_call_id": str(tool_call_id),
+                "operation_id": str(operation_id),
+                "outcome": OperationOutcome.NOT_APPLIED.value,
+                "error_code": error_code,
+            },
+            tool_call_id=tool_call_id,
+        )
+        return RecordResultOutcome(
+            tool_call_id=tool_call_id,
+            operation_id=operation_id,
+            operation_outcome=OperationOutcome.NOT_APPLIED,
+            tool_call_status=ToolCallStatus.VALIDATING,
+            run_status=await self._load_run_status(),
+            next_job_kind=None,
+            event=event,
+        )
+
     # ---- 内部 ----
+
+    def _prepare_existing_for_execution(
+        self,
+        operation_row: Operation,
+        *,
+        adapter_key: str,
+        expected_state: Mapping[str, Any],
+        supports_native_idempotency: bool,
+        supports_reconciliation: bool,
+    ) -> None:
+        """复用已有 Operation 的执行前提校验与状态推进;任一不满足即 fail closed。"""
+        status = operation_row.status
+        if status not in _BEGINNABLE_OPERATION_STATUSES:
+            raise OperationConflictError(
+                f"operation {operation_row.operation_id} 状态 {status.value} "
+                "不允许进入执行边界;已生效(APPLIED)或结果不确定(UNKNOWN/FAILED)"
+                " 的操作只能走 Reconciliation"
+            )
+        if operation_row.expected_state is None:
+            # 只有"从未发起外部调用"的状态可以首次绑定业务目标。其他状态出现
+            # NULL 说明目标记录缺失:此时若放行,恢复方会把一个可能已执行的
+            # 操作误判为"尚未绑定目标"→ 重复写。
+            if status not in _NULL_STATE_BINDABLE_STATUSES:
+                raise OperationConflictError(
+                    f"operation {operation_row.operation_id} 状态 {status.value} 下 "
+                    "expected_state 为空;无法确认业务目标,拒绝执行(fail closed)"
+                )
+            if operation_row.adapter_key != adapter_key:
+                raise OperationConflictError(
+                    f"operation {operation_row.operation_id} 已绑定 adapter_key="
+                    f"{operation_row.adapter_key!r},与本次 {adapter_key!r} 不一致"
+                )
+            operation_row.expected_state = dict(expected_state)
+            operation_row.supports_native_idempotency = supports_native_idempotency
+            operation_row.supports_reconciliation = supports_reconciliation
+        else:
+            persisted = canonical_expected_state(operation_row.expected_state)
+            requested = canonical_expected_state(expected_state)
+            if persisted != requested:
+                raise OperationConflictError(
+                    f"operation {operation_row.operation_id} 已持久化不同的 "
+                    f"expected_state: persisted={persisted} requested={requested};"
+                    " 同一 operation_id 不得改变业务目标"
+                )
+            _require_same_execution_contract(
+                operation_row,
+                adapter_key=adapter_key,
+                supports_native_idempotency=supports_native_idempotency,
+                supports_reconciliation=supports_reconciliation,
+            )
+        # 任何即将发起外部调用的 begin 都必须让 Operation 处于 EXECUTING:
+        # 这是恢复/回收方识别"可能已执行"的唯一判据。
+        operation_row.status = OperationStatus.EXECUTING
 
     async def _load_tool_call(self, tool_call_id: uuid.UUID) -> ToolCall:
         stmt = (

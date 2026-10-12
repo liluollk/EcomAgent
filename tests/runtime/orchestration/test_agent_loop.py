@@ -30,6 +30,7 @@ from runtime.backend.protocol import (
     TextDelta,
     ToolCallCompleted,
 )
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.pretool.decisions import (
     POLICY_DENIED,
     PreToolDecision,
@@ -121,6 +122,9 @@ TEST_LIMITS = RunLimits(
 
 READ_TOOL_KEY = "read_tool"
 WRITE_TOOL_KEY = "write_tool"
+
+DEFAULT_WRITE_EXECUTION_PROFILE = ToolExecutionProfile(adapter_key="local")
+"""直接构造 AgentLoop 的默认写执行 Profile(历史上是 Loop 的全局默认值)。"""
 
 
 @dataclass
@@ -402,6 +406,11 @@ def make_agent_loop(
                             else write_handler
                         ),
                         output_schema=TEST_OUTPUT_SCHEMA,
+                        execution_profile=(
+                            None
+                            if pin.effect is ToolEffect.READ
+                            else DEFAULT_WRITE_EXECUTION_PROFILE
+                        ),
                     )
                     for key, pin in tool_pins.pins.items()
                 }
@@ -656,6 +665,122 @@ async def test_each_read_tool_uses_its_own_bound_handler(
     assert len(first_handler.calls) == len(second_handler.calls) == 1
     assert first_handler.calls[0]["tool_call_id"] == persisted_calls[0].id
     assert second_handler.calls[0]["tool_call_id"] == persisted_calls[1].id
+
+
+async def test_write_operations_use_each_pin_execution_profile(
+    db_session: AsyncSession,
+    seeded_run: Run,
+    make_agent_loop,
+) -> None:
+    """两个写 Tool 各自携带执行 Profile:Operation 的 Adapter 能力来自本 Tool。"""
+    pricing_key = "pricing_write_tool"
+    inventory_key = "inventory_write_tool"
+    pricing_definition, pricing_version = _tool_rows(pricing_key, ToolEffect.WRITE)
+    inventory_definition, inventory_version = _tool_rows(inventory_key, ToolEffect.WRITE)
+    db_session.add_all(
+        [pricing_definition, pricing_version, inventory_definition, inventory_version]
+    )
+    pricing_handler = FakeWriteHandler()
+    inventory_handler = FakeWriteHandler()
+    pins = FakeToolPins(
+        pins={
+            pricing_key: ToolPin(
+                stable_key=pricing_key,
+                version=1,
+                version_id=pricing_version.id,
+                effect=ToolEffect.WRITE,
+                handler=pricing_handler,
+                output_schema=TEST_OUTPUT_SCHEMA,
+                execution_profile=ToolExecutionProfile(
+                    adapter_key="pricing-mock",
+                    supports_native_idempotency=False,
+                    supports_reconciliation=True,
+                ),
+            ),
+            inventory_key: ToolPin(
+                stable_key=inventory_key,
+                version=1,
+                version_id=inventory_version.id,
+                effect=ToolEffect.WRITE,
+                handler=inventory_handler,
+                output_schema=TEST_OUTPUT_SCHEMA,
+                execution_profile=ToolExecutionProfile(
+                    adapter_key="inventory-rest",
+                    supports_native_idempotency=True,
+                    supports_reconciliation=True,
+                ),
+            ),
+        }
+    )
+    backend = SequencedBackend(
+        [
+            [
+                ToolCallCompleted(
+                    call_id="c0", name=pricing_key, arguments={"listing_id": "L1"}
+                ),
+                ToolCallCompleted(
+                    call_id="c1", name=inventory_key, arguments={"listing_id": "L2"}
+                ),
+                BackendCompleted(finish_reason="tool_calls"),
+            ],
+            [BackendCompleted(finish_reason="stop")],
+        ]
+    )
+    lease = await _claim_advance_job(db_session, seeded_run)
+
+    result = await make_agent_loop(
+        backend=backend,
+        pipeline=ScriptedPipeline([allow(), allow()]),
+        tool_pins_override=pins,
+    ).advance(seeded_run.id, lease_token=lease.lease_token)
+
+    assert result.run_status is RunStatus.COMPLETED
+    operations = list(
+        (
+            await db_session.scalars(
+                select(Operation)
+                .where(Operation.workspace_id == seeded_run.workspace_id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    by_adapter = {operation.adapter_key: operation for operation in operations}
+    assert set(by_adapter) == {"pricing-mock", "inventory-rest"}
+    assert by_adapter["pricing-mock"].supports_native_idempotency is False
+    assert by_adapter["pricing-mock"].supports_reconciliation is True
+    assert by_adapter["inventory-rest"].supports_native_idempotency is True
+    assert by_adapter["inventory-rest"].supports_reconciliation is True
+
+
+async def test_missing_write_execution_profile_fails_deterministically(
+    db_session: AsyncSession,
+    seeded_run: Run,
+    make_agent_loop,
+    tool_pins: FakeToolPins,
+) -> None:
+    """写 Tool 缺执行 Profile:不执行外部调用,Run 以稳定失败码结束。"""
+    lease = await _claim_advance_job(db_session, seeded_run)
+    write_handler = FakeWriteHandler()
+    pins = FakeToolPins(
+        pins={
+            WRITE_TOOL_KEY: replace(
+                tool_pins.pins[WRITE_TOOL_KEY],
+                handler=write_handler,
+                output_schema=TEST_OUTPUT_SCHEMA,
+                execution_profile=None,
+            )
+        }
+    )
+
+    result = await make_agent_loop(
+        backend=SequencedBackend([_write_round()]),
+        pipeline=ScriptedPipeline([allow()]),
+        tool_pins_override=pins,
+    ).advance(seeded_run.id, lease_token=lease.lease_token)
+
+    assert result.run_status is RunStatus.FAILED
+    assert result.failure_code == "WRITE_EXECUTION_PROFILE_MISSING"
+    assert write_handler.calls == []
 
 
 async def test_denied_tool_call_does_not_interrupt_loop(

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from runtime.audit.service import AuditService
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.operations import (
     OperationConflictError,
     OperationOutcome,
@@ -445,7 +446,7 @@ def _executor(
                 "required": ["result"],
             }
         ),
-        adapter_key="test-adapter",
+        execution_profile=ToolExecutionProfile(adapter_key="test-adapter"),
     )
 
 

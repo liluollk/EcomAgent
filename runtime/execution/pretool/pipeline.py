@@ -73,11 +73,12 @@ from runtime.execution.pretool.decisions import (
     require_confirmation,
     require_input,
 )
-from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.pretool.profiles import (
     PreToolProfile,
     PreToolProfileContext,
 )
+from runtime.execution.pretool.provenance import TRUSTED_TRUST_LEVELS
+from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.tool_registry import (
     TOOL_RESOLVED as TOOL_STATUS_RESOLVED,
 )
@@ -111,9 +112,6 @@ class ToolCallRequest(BaseModel):
     version: int
     raw_arguments: str
 
-
-ARGUMENT_UNTRUSTED: Final = "UNTRUSTED"
-"""来源守卫判定的不可信来源标识(与 ArgumentTrustLevel.UNTRUSTED 同值)。"""
 
 PROVENANCE_GUARD_MESSAGE: Final = (
     "key arguments lack trusted user or authoritative evidence"
@@ -260,7 +258,14 @@ def _tool_resolution_stage(dependencies: PreToolDependencies) -> StageHandler:
                 TOOL_PRETOOL_PROFILE_MISSING,
                 safe_message="resolved tool binding has no pretool profile registered",
             )
-        context.profile = await registration.factory.create(dependencies.profile_context)
+        profile_context = dependencies.profile_context
+        if profile_context is None:
+            # 缺请求级上下文无法延迟创建 Profile:装配错误,fail closed。
+            return deny(
+                PIPELINE_INVARIANT,
+                safe_message="pretool profile context is required to build a tool profile",
+            )
+        context.profile = await registration.factory.create(profile_context)
         return None
 
     return handler
@@ -334,6 +339,8 @@ def _apply_provenance_guard(
 
     关键字段由 Tool 自己的 Profile 声明;守卫把命中字段并入 SchemaDiagnostic,
     交由 input_requirement 阶段转成可回答的 Input Request,不进入写执行阶段。
+    **未在 field_sources 中声明的字段按 UNTRUSTED 处理**(fail closed):只有
+    出现在可信白名单里的来源才放行。
     """
     guard_fields = profile.provenance_guard_fields
     if not guard_fields:
@@ -342,7 +349,7 @@ def _apply_provenance_guard(
         field
         for field in guard_fields
         if field in arguments
-        and provenance.field_sources.get(field) == ARGUMENT_UNTRUSTED
+        and provenance.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
     )
     if not untrusted:
         return

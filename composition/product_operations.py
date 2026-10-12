@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -71,16 +71,16 @@ from agents.product_operations.skill import (
     SKILL_KEY,
     SKILL_VERSION,
 )
-from agents.product_operations.tools.compare_listing_prices import (
-    COMPARE_LISTING_PRICES_DEFINITION,
-    compare_listing_prices,
-)
 from agents.product_operations.tools.definitions import (
+    COMPARE_LISTING_PRICES_DEFINITION,
     GET_PRODUCT_SNAPSHOT_DEFINITION,
     SEARCH_PRODUCTS_DEFINITION,
 )
-from agents.product_operations.tools.get_product_snapshot import get_product_snapshot
-from agents.product_operations.tools.search_products import search_products
+from agents.product_operations.tools.handlers import (
+    CompareListingPricesHandler,
+    GetProductSnapshotHandler,
+    SearchProductsHandler,
+)
 from agents.product_operations.tools.update_price import (
     STABLE_KEY_UPDATE_PRICE,
     UPDATE_PRICE_DEFINITION,
@@ -88,7 +88,7 @@ from agents.product_operations.tools.update_price import (
     UpdatePriceWriteCommand,
     UpdatePriceWriteReceipt,
 )
-from runtime.access.actor import ActorContext, ActorContextBuilder
+from runtime.access.actor import ActorContextBuilder
 from runtime.access.authorization import Authorizer
 from runtime.backend.protocol import (
     AgentBackend,
@@ -137,7 +137,6 @@ from runtime.execution.pretool.profiles import (
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.reconciliation import ReconciliationService
 from runtime.execution.tool_registry import RuntimeToolRegistry
-from runtime.execution.tool_result_processor import ToolExecutionReceipt
 from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
@@ -155,7 +154,6 @@ from runtime.persistence.base import (
     ConfirmationRequestStatus,
     ExecutionMode,
     InputRequestStatus,
-    MessageRole,
     ModelBackendType,
     OperationStatus,
     RunJobKind,
@@ -420,6 +418,9 @@ class _RegistryToolPins:
                 effect=ToolEffect(record.effect.value),
                 handler=binding.handler if binding is not None else None,
                 output_schema=record.output_schema,
+                execution_profile=(
+                    binding.execution_profile if binding is not None else None
+                ),
             )
             self._by_key[record.stable_key] = pin
             self._by_id[record.version_id] = pin
@@ -598,80 +599,6 @@ class _AcceptedConfirmationLookup:
         return result.valid
 
 
-class _ProductReadToolHandler:
-    """绑定到单个商品读 Tool 的执行端点。"""
-
-    def __init__(
-        self,
-        *,
-        stable_key: str,
-        engine: AsyncEngine,
-        workspace_id: uuid.UUID,
-        actor_id: uuid.UUID,
-    ) -> None:
-        self._stable_key = stable_key
-        self._engine = engine
-        self._workspace_id = workspace_id
-        self._actor_id = actor_id
-
-    async def read(
-        self,
-        *,
-        tool_call_id: uuid.UUID,
-        normalized_arguments: Mapping[str, Any],
-        deadline: datetime,
-    ) -> Any:
-        del deadline  # 读 Tool 超时由 Loop 预算覆盖。
-        arguments = dict(normalized_arguments)
-        session = AsyncSession(self._engine, expire_on_commit=False)
-        try:
-            actor = await ActorContextBuilder(session).build(
-                actor_id=self._actor_id,
-                workspace_id=self._workspace_id,
-                request_id=f"read-{uuid.uuid4()}",
-            )
-            store_ids = _store_ids_of(arguments)
-            result: Any
-            if self._stable_key == SEARCH_PRODUCTS_DEFINITION.stable_key:
-                query = arguments.get("query")
-                result = await search_products(
-                    actor=actor,
-                    session=session,
-                    query=query if isinstance(query, str) else None,
-                    store_ids=store_ids,
-                )
-            elif self._stable_key == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
-                result = await get_product_snapshot(
-                    actor=actor,
-                    session=session,
-                    store_id=str(arguments["store_id"]),
-                    sku=str(arguments.get("sku", "")),
-                )
-            elif self._stable_key == COMPARE_LISTING_PRICES_DEFINITION.stable_key:
-                result = await compare_listing_prices(
-                    actor=actor,
-                    session=session,
-                    sku=str(arguments["sku"]),
-                    store_ids=store_ids,
-                )
-            else:
-                raise LookupError(f"no product read tool handler for {self._stable_key}")
-            return ToolExecutionReceipt(
-                tool_call_id=tool_call_id,
-                status="OK",
-                payload=result.model_dump(mode="json"),
-            )
-        finally:
-            await session.close()
-
-
-def _store_ids_of(arguments: Mapping[str, Any]) -> Sequence[str]:
-    raw = arguments.get("store_ids")
-    if isinstance(raw, Sequence) and not isinstance(raw, str):
-        return tuple(str(value) for value in raw)
-    return ()
-
-
 class _CommerceGateway:
     """把商品写命令映射到注入的商品平台 Adapter。"""
 
@@ -748,7 +675,6 @@ class ProductApplication:
         membership_id: uuid.UUID,
         capability: Mapping[str, Any],
         worker_id: str,
-        adapter_key: str,
     ) -> None:
         self._engine = engine
         self._assembly = assembly
@@ -762,7 +688,6 @@ class ProductApplication:
         self._actor_id = actor_id
         self._membership_id = membership_id
         self._capability = dict(capability)
-        self._adapter_key = adapter_key
         self._answered: dict[str, str] = {}
         self._scope = _ScopeHolder()
         # 运行限制是 AgentVersion 定义的一部分:同一份定义同时驱动 Runtime
@@ -807,8 +732,6 @@ class ProductApplication:
                 tool_registry=tool_registry,
                 scope=self._scope,
             ),
-            adapter_key=adapter_key,
-            supports_reconciliation=True,
             worker_id=worker_id,
         )
         # 测试接缝:脚本模型与种子标识由夹具注入/读取。
@@ -1303,20 +1226,32 @@ async def build_product_application(
         supports_reconciliation=True,
     )
 
+    # 每个 Tool 显式映射到自己的 Handler:不再按 stable_key 在运行时 if/elif
+    # 分发,新增读 Tool 只需新增一个 Handler 并在此登记。
+    read_session_factory = lambda: AsyncSession(engine, expire_on_commit=False)
+    handlers: dict[str, Any] = {
+        SEARCH_PRODUCTS_DEFINITION.stable_key: SearchProductsHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+        ),
+        GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key: GetProductSnapshotHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+        ),
+        COMPARE_LISTING_PRICES_DEFINITION.stable_key: CompareListingPricesHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+        ),
+        STABLE_KEY_UPDATE_PRICE: write_handler,
+        LOAD_SKILL_KEY: LOAD_SKILL_HANDLER,
+    }
+
     tool_registry = ToolRegistry()
     for key, definition in _tool_definitions():
-        handler: Any
-        if key == STABLE_KEY_UPDATE_PRICE:
-            handler = write_handler
-        elif key == LOAD_SKILL_KEY:
-            handler = LOAD_SKILL_HANDLER
-        else:
-            handler = _ProductReadToolHandler(
-                stable_key=key,
-                engine=engine,
-                workspace_id=workspace_id,
-                actor_id=actor_id,
-            )
+        handler = handlers[key]
         is_write = definition.effect is ToolEffectKind.WRITE
         tool_registry.register(
             ToolVersionRecord(
@@ -1372,7 +1307,6 @@ async def build_product_application(
         membership_id=membership_id,
         capability=capability,
         worker_id=worker_id,
-        adapter_key=adapter_key,
     )
 
 

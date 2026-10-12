@@ -39,6 +39,7 @@ from runtime.backend.protocol import (
     TextDelta,
     ToolCallCompleted,
 )
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.operations import (
     BegunOperation,
     LeaseStaleError,
@@ -126,6 +127,9 @@ TEST_OUTPUT_SCHEMA: dict = {
     "properties": {"result": {"type": "string"}},
     "required": ["result"],
 }
+
+_CRASH_ADAPTER_KEY = "crash-adapter"
+"""崩溃恢复测试写 Tool 的执行 Profile Adapter Key。"""
 
 TEST_LIMITS = RunLimits(
     max_model_rounds=4,
@@ -328,8 +332,6 @@ class CrashHarness:
                 self.write_handler,
             ),
             pipeline_factory=lambda: AlwaysAllowPipeline(),
-            adapter_key="crash-adapter",
-            supports_reconciliation=True,
             worker_id="crash-worker",
         )
 
@@ -496,7 +498,9 @@ class CrashHarness:
                     expected_state_version=run.state_version,
                 )
                 return await service.begin(
-                    tool_call.id, adapter_key="crash-adapter", supports_reconciliation=True
+                    tool_call.id,
+                    adapter_key=_CRASH_ADAPTER_KEY,
+                    supports_reconciliation=True,
                 )
         finally:
             await session.close()
@@ -643,6 +647,10 @@ class _WriteToolPins:
             effect=ToolEffect.WRITE,
             handler=handler,
             output_schema=TEST_OUTPUT_SCHEMA,
+            execution_profile=ToolExecutionProfile(
+                adapter_key=_CRASH_ADAPTER_KEY,
+                supports_reconciliation=True,
+            ),
         )
 
     def by_stable_key(self, stable_key: str) -> ToolPin | None:

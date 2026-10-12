@@ -66,6 +66,7 @@ from runtime.capabilities.skill_activation import (
     SkillActivationService,
 )
 from runtime.events.writer import AgentEventWriter
+from runtime.execution.bindings import ToolExecutionProfile
 from runtime.execution.operations import OperationOutcome
 from runtime.execution.pretool.decisions import PreToolDecision
 from runtime.execution.pretool.pipeline import ToolCallRequest
@@ -117,6 +118,7 @@ CONTEXT_BUDGET_EXCEEDED: Final = "CONTEXT_BUDGET_EXCEEDED"
 CONTEXT_ASSEMBLY_FAILED: Final = "CONTEXT_ASSEMBLY_FAILED"
 TOOL_HANDLER_MISSING: Final = "TOOL_HANDLER_MISSING"
 REQUIRE_INPUT_INVALID: Final = "REQUIRE_INPUT_INVALID"
+WRITE_EXECUTION_PROFILE_MISSING: Final = "WRITE_EXECUTION_PROFILE_MISSING"
 
 DEFAULT_INPUT_REQUEST_TTL: Final = timedelta(minutes=15)
 DEFAULT_CONFIRMATION_TTL: Final = timedelta(minutes=30)
@@ -133,7 +135,11 @@ _PENDING_TOOL_CALL_STATUSES: Final[frozenset[ToolCallStatus]] = frozenset(
 
 @dataclass(frozen=True)
 class ToolPin:
-    """Run 固定的 Tool 版本及其进程内 Handler、结果 Schema。"""
+    """Run 固定的 Tool 版本及其进程内 Handler、结果 Schema 与写执行元数据。
+
+    ``execution_profile`` 只对写 Tool 有意义:写执行的 Adapter Key 与幂等/回查
+    能力来自本 Tool 自身的绑定,不再由 Runtime/AgentLoop 全局持有。
+    """
 
     stable_key: str
     version: int
@@ -141,6 +147,7 @@ class ToolPin:
     effect: ToolEffect
     handler: Any | None = None
     output_schema: Mapping[str, Any] | None = None
+    execution_profile: ToolExecutionProfile | None = None
 
 
 class ToolPinResolver(Protocol):
@@ -215,9 +222,6 @@ class AgentLoop:
         pipeline: ToolCallEvaluator,
         tool_pins: ToolPinResolver,
         processor: ToolResultProcessor,
-        adapter_key: str = "local",
-        supports_native_idempotency: bool = False,
-        supports_reconciliation: bool = False,
         checkpoint: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] | None = None,
         input_request_ttl: timedelta = DEFAULT_INPUT_REQUEST_TTL,
@@ -231,9 +235,6 @@ class AgentLoop:
         self._pipeline = pipeline
         self._tool_pins = tool_pins
         self._processor = processor
-        self._adapter_key = adapter_key
-        self._supports_native_idempotency = supports_native_idempotency
-        self._supports_reconciliation = supports_reconciliation
         self._checkpoint_callback = checkpoint
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._input_request_ttl = input_request_ttl
@@ -768,8 +769,14 @@ class AgentLoop:
         )
         operation_id = call.operation_id
         if operation_id is None and pin.effect is ToolEffect.WRITE:
+            if pin.execution_profile is None:
+                # 写 Tool 缺执行 Profile:无法登记 Operation,确定性失败而不是
+                # 生成无法执行的 Confirmation。
+                return _Stop(
+                    RunStatus.RUNNING, failure_code=WRITE_EXECUTION_PROFILE_MISSING
+                )
             operation_id = uuid.uuid4()
-            await self._assign_operation_id(call, operation_id)
+            await self._assign_operation_id(call, operation_id, pin.execution_profile)
         await self._confirmations_for(run).create(
             session_id=run.session_id,
             run_id=run.id,
@@ -891,8 +898,13 @@ class AgentLoop:
     ) -> _Stop | None:
         """写 Tool:begin → 外部调用 → PostToolUse → 结果事务(含 fencing)。"""
         handler = pin.handler
-        if handler is None or not callable(getattr(handler, "execute", None)):
+        if handler is None or not callable(getattr(handler, "execute_prepared", None)):
             return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
+        execution_profile = pin.execution_profile
+        if execution_profile is None:
+            return _Stop(
+                RunStatus.RUNNING, failure_code=WRITE_EXECUTION_PROFILE_MISSING
+            )
         if lease_token is None:
             raise RuntimeError(
                 "write tool execution requires an active lease_token for fencing"
@@ -909,9 +921,7 @@ class AgentLoop:
             processor=self._processor,
             checkpoint=self._checkpoint,
             output_schema=pin.output_schema,
-            adapter_key=self._adapter_key,
-            supports_native_idempotency=self._supports_native_idempotency,
-            supports_reconciliation=self._supports_reconciliation,
+            execution_profile=execution_profile,
         )
         executed = await executor.execute(
             tool_call_id=call.id, normalized_arguments=arguments
@@ -1078,12 +1088,18 @@ class AgentLoop:
             ToolCallStatus.SUCCEEDED if succeeded else ToolCallStatus.FAILED
         )
 
-    async def _assign_operation_id(self, call: ToolCall, operation_id: uuid.UUID) -> None:
+    async def _assign_operation_id(
+        self,
+        call: ToolCall,
+        operation_id: uuid.UUID,
+        execution_profile: ToolExecutionProfile,
+    ) -> None:
         """写 Tool 首次进入 Confirmation 前分配稳定 operation_id(只分配一次)。
 
         ``tool_calls.operation_id`` 对 operations 表有复合外键,因此同时创建
         PREPARED Operation 行(代表已分配 ID,不代表已发起外部写入);执行
         边界 ``OperationService.begin`` 幂等复用同一行并推进 EXECUTING。
+        Adapter Key 来自该写 Tool 自己的执行 Profile。
         """
         self._session.add(
             Operation(
@@ -1091,7 +1107,7 @@ class AgentLoop:
                 tool_call_id=call.id,
                 operation_id=operation_id,
                 idempotency_key=f"op:{operation_id}",
-                adapter_key=self._adapter_key,
+                adapter_key=execution_profile.adapter_key,
                 status=OperationStatus.PREPARED,
             )
         )
