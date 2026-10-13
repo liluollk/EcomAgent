@@ -101,6 +101,7 @@ def test_agent_definition_carries_reference_loop_limits() -> None:
         "run_deadline_seconds": 3600,
         "backend_retries": 1,
         "reconcile_budget": 3,
+        "write_retry_budget": 1,
     }
 
 

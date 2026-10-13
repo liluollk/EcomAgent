@@ -897,6 +897,7 @@ class ProductApplication:
                     lease_token=lease_token,
                     expected_state_version=expected_state_version,
                     reconcile_budget=self._run_limits.reconcile_budget,
+                    write_retry_budget=self._run_limits.write_retry_budget,
                 ).apply_result(verdict)
                 await LeaseService(session).complete(job.id, lease_token)
                 return outcome.next_job_kind is RunJobKind.ADVANCE_RUN

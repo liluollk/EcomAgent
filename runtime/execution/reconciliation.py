@@ -8,9 +8,11 @@
 - **APPLIED** → Operation APPLIED、ToolCall ``UNKNOWN → SUCCEEDED``、Run
   ``WAITING_RECONCILIATION → QUEUED``(返回 ``next_job_kind=ADVANCE_RUN`` 指令,
   编排层据此调度恢复 Job);
-- **NOT_APPLIED** → Operation NOT_APPLIED、ToolCall ``UNKNOWN → VALIDATING``、
-  Run 回 QUEUED;``direct_execute`` 恒为 False——必须重新通过完整 PreToolUse,
-  绝不直接重执行;
+- **NOT_APPLIED** → Operation NOT_APPLIED;ToolCall 由**写入重试预算**裁决:该
+  Operation 已持久化的 ``EXECUTE`` Attempt 数 < ``write_retry_budget`` 时回
+  ``VALIDATING``(必须重走完整 PreToolUse),否则落 ``FAILED`` 终态、不再产生可
+  重排入口;两种情况 Run 均回 QUEUED(``next_job_kind=ADVANCE_RUN``)让模型据
+  失败结果收尾;``direct_execute`` 恒为 False——绝不直接重执行;
 - **UNKNOWN(仍不确定)** → Operation/ToolCall 保持 UNKNOWN 作为权威事实;
   预算内 Run 保持 WAITING_RECONCILIATION 并再次返回 RECONCILE_OPERATION 指令;
   超过回查预算(注入值)Run ``FAILED``(``RECONCILE_BUDGET_EXCEEDED``),但
@@ -104,6 +106,7 @@ class ReconciliationService:
         lease_token: uuid.UUID,
         expected_state_version: int,
         reconcile_budget: int,
+        write_retry_budget: int,
     ) -> None:
         self._session = session
         self._workspace_id = workspace_id
@@ -113,6 +116,7 @@ class ReconciliationService:
         self._lease_token = lease_token
         self._expected_state_version = expected_state_version
         self._reconcile_budget = reconcile_budget
+        self._write_retry_budget = write_retry_budget
         self._runs = RunService(session=session, workspace_id=workspace_id)
         self._writer = AgentEventWriter(session=session, workspace_id=workspace_id)
         self._audit = AuditService(session, workspace_id=workspace_id, actor_id=actor_id)
@@ -159,7 +163,14 @@ class ReconciliationService:
             tool_call_status = ToolCallStatus.SUCCEEDED
         elif result is ReconcileResult.NOT_APPLIED:
             operation_status = OperationStatus.NOT_APPLIED
-            tool_call_status = ToolCallStatus.VALIDATING
+            # 写入重试预算按持久化的 EXECUTE Attempt 数裁决(恢复重入沿用同一预算):
+            # 未耗尽才允许回 VALIDATING 重排,耗尽则落 FAILED 终态、不再重排。
+            executed = await self._count_execute_attempts(operation_row.id)
+            tool_call_status = (
+                ToolCallStatus.VALIDATING
+                if executed < self._write_retry_budget
+                else ToolCallStatus.FAILED
+            )
         else:
             operation_status = OperationStatus.UNKNOWN
             tool_call_status = ToolCallStatus.UNKNOWN
@@ -340,6 +351,23 @@ class ReconciliationService:
                 OperationAttempt.workspace_id == self._workspace_id,
                 OperationAttempt.operation_row_id == operation_row_id,
                 OperationAttempt.kind == OperationAttemptKind.RECONCILE,
+            )
+        )
+        return int(await self._session.scalar(stmt) or 0)
+
+    async def _count_execute_attempts(self, operation_row_id: uuid.UUID) -> int:
+        """该 Operation 已持久化的 EXECUTE 次数(写入重试预算的计数依据)。
+
+        只读 ``OperationAttempt`` 事实,不从内存计数推断,使幂等恢复重入沿用
+        同一预算。
+        """
+        stmt = (
+            select(sa.func.count())
+            .select_from(OperationAttempt)
+            .where(
+                OperationAttempt.workspace_id == self._workspace_id,
+                OperationAttempt.operation_row_id == operation_row_id,
+                OperationAttempt.kind == OperationAttemptKind.EXECUTE,
             )
         )
         return int(await self._session.scalar(stmt) or 0)

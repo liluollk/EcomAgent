@@ -1069,6 +1069,7 @@ async def test_reconciliation_applied_recovery_completes_run(
         lease_token=reconcile_lease.lease_token,
         expected_state_version=(await _load_run(db_session, run)).state_version,
         reconcile_budget=TEST_LIMITS.reconcile_budget,
+        write_retry_budget=TEST_LIMITS.write_retry_budget,
     )
     outcome = await reconciler.apply_result(ReconcileResult.APPLIED)
     assert outcome.run_status is RunStatus.QUEUED
