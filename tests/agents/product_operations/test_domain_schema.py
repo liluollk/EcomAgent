@@ -461,3 +461,119 @@ async def test_set_listing_publication_state_rejects_stale_version(
         expected_version=listing.version + 1,
     )
     assert updated is None
+
+
+# ---- P1 Task 6.1:组合 Workspace 外键(跨 Workspace 引用被数据库拒绝) ----
+
+
+async def test_listing_rejects_cross_workspace_store(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    """Workspace A 的 listing 不得引用 Workspace B 的 store。"""
+    other = await product_seeder.seed()
+    cross = Listing(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        store_id=other.store.id,
+        product_id=product_seed.product.id,
+        external_product_ref="item-cross-store",
+        currency="CNY",
+        current_price=Decimal("100.00"),
+        cost_price=Decimal("88.00"),
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()
+
+
+async def test_listing_rejects_cross_workspace_product(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    """Workspace A 的 listing 不得引用 Workspace B 的 product。"""
+    other = await product_seeder.seed()
+    cross = Listing(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        store_id=product_seed.store.id,
+        product_id=other.product.id,
+        external_product_ref="item-cross-product",
+        currency="CNY",
+        current_price=Decimal("100.00"),
+        cost_price=Decimal("88.00"),
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()
+
+
+async def test_fulfillment_location_rejects_cross_workspace_store(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    other = await product_seeder.seed()
+    cross = FulfillmentLocation(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        store_id=other.store.id,
+        external_location_ref=f"loc-{uuid.uuid4()}",
+        name="cross-workspace-location",
+        aliases=[],
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()
+
+
+async def test_inventory_level_rejects_cross_workspace_location(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    other = await product_seeder.seed()
+    cross = InventoryLevel(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        location_id=other.fulfillment_location.id,
+        product_id=product_seed.product.id,
+        available_quantity=5,
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()
+
+
+async def test_inventory_level_rejects_cross_workspace_product(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    other = await product_seeder.seed()
+    cross = InventoryLevel(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        location_id=product_seed.fulfillment_location.id,
+        product_id=other.product.id,
+        available_quantity=5,
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()
+
+
+async def test_price_lock_rejects_cross_workspace_listing(
+    product_seeder, product_seed, db_session: AsyncSession
+) -> None:
+    other = await product_seeder.seed()
+    now = datetime.now(tz=UTC)
+    cross = PriceLock(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        listing_id=other.listing.id,
+        reason="cross-workspace-lock",
+        starts_at=now - timedelta(minutes=1),
+        ends_at=now + timedelta(days=1),
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(cross)
+            await db_session.flush()

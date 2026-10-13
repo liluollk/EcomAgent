@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.product_operations.domain.models import ListingStatus
 from agents.product_operations.persistence.models import (
+    FulfillmentLocation,
     InventoryLevel,
     Listing,
     PriceLock,
@@ -77,6 +78,38 @@ class ProductRepository:
         )
         updated: Listing | None = (await self._session.scalars(stmt)).one_or_none()
         return updated
+
+    async def get_fulfillment_location(
+        self, workspace_id: uuid.UUID, location_id: uuid.UUID
+    ) -> FulfillmentLocation | None:
+        """按 (workspace_id, location_id) 读取履约位置;错误 Workspace 返回 None。"""
+        stmt = (
+            select(FulfillmentLocation)
+            .where(
+                FulfillmentLocation.workspace_id == workspace_id,
+                FulfillmentLocation.id == location_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.scalars(stmt)).one_or_none()
+
+    async def get_inventory_level(
+        self, workspace_id: uuid.UUID, location_id: uuid.UUID, product_id: uuid.UUID
+    ) -> InventoryLevel | None:
+        """按 (workspace_id, location_id, product_id) 读取库存;越权返回 None。
+
+        ``populate_existing`` 绕过身份映射,避免 CAS 后读到过期的 ``version``。
+        """
+        stmt = (
+            select(InventoryLevel)
+            .where(
+                InventoryLevel.workspace_id == workspace_id,
+                InventoryLevel.location_id == location_id,
+                InventoryLevel.product_id == product_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.scalars(stmt)).one_or_none()
 
     async def adjust_inventory(
         self,

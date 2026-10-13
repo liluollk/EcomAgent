@@ -1,4 +1,4 @@
-"""确定性 Mock 平台 Adapter(计划 03 Task 5;架构文档 §3、§7)。
+"""确定性 Mock 平台 Adapter(计划 03 Task 5;P1 Task 6 迁移到 PricingGateway)。
 
 权威状态:``product_operations`` 的 ``listings`` 表即 Mock 平台的平台侧
 权威状态(架构文档 §3:"Mock Adapter 将这些表视为外部平台的权威状态")。
@@ -7,7 +7,11 @@
 自身只额外维护 ``operation_id`` 幂等去重表(内存),记录每个操作的上次回执
 与逻辑写事实,供重复提交回放与 ``count_logical_writes`` 断言。
 
-``execute`` 执行顺序(确定性,无随机):
+P1 起本 Adapter 实现 :class:`PricingGateway`(``get_price`` / ``set_price`` /
+``reconcile_price``);旧 ``execute`` / ``reconcile`` 保留为兼容包装,委托新方法
+并映射回旧回执类型,供历史 ToolVersion 的 Run 恢复。
+
+``set_price`` 执行顺序(确定性,无随机):
 
 1. ``timeout_before_write`` → UNKNOWN(请求未达平台逻辑,零状态变更);
 2. 幂等去重:已见 ``operation_id`` 直接回放上次回执,不再写;
@@ -46,6 +50,15 @@ from adapters.commerce.protocol import (
 )
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
+from agents.product_operations.pricing.gateway import (
+    PriceQuery,
+    PriceSnapshot,
+    PriceUnavailable,
+    PriceWriteReceipt,
+    ReconcilePriceCommand,
+    SetListingPriceCommand,
+)
+from agents.product_operations.shared.write_contracts import WriteStatus
 from runtime.execution.reconciliation import ReconcileResult
 
 
@@ -53,7 +66,7 @@ from runtime.execution.reconciliation import ReconcileResult
 class _OperationRecord:
     """operation_id 幂等记录:上次回执与逻辑写事实。"""
 
-    receipt: ExecutionReceipt
+    receipt: PriceWriteReceipt
     workspace_id: uuid.UUID
     listing_id: uuid.UUID
     logical_writes: int
@@ -62,7 +75,7 @@ class _OperationRecord:
 
 
 class MockCommerceAdapter:
-    """确定性 Mock 平台;结构化实现 :class:`CommerceAdapter` 协议。
+    """确定性 Mock 平台;结构化实现 :class:`PricingGateway` 协议。
 
     幂等去重表为内存状态:仅在请求到达平台写路径(第 4 步之后)时创建
     记录,写前超时与持续失败不产生记录——两者都可确定地重试。
@@ -74,20 +87,83 @@ class MockCommerceAdapter:
         self.faults = FaultInjector()
         self._operations: dict[str, _OperationRecord] = {}
 
-    async def execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
+    # ---- PricingGateway ----
+
+    async def get_price(self, query: PriceQuery) -> PriceSnapshot:
+        """读取平台侧权威价格;Listing 缺失或币种不符即不可读。"""
+        if self._session.in_transaction():
+            return await self._get_price(query)
+        async with self._session.begin():
+            return await self._get_price(query)
+
+    async def _get_price(self, query: PriceQuery) -> PriceSnapshot:
+        listing = await self._repository.get_listing(
+            query.workspace_id, query.listing_id
+        )
+        if listing is None or listing.currency != query.currency:
+            raise PriceUnavailable("listing is not readable on the platform")
+        return PriceSnapshot(
+            price=listing.current_price,
+            currency=listing.currency,
+            listing_version=listing.version,
+            external_ref=listing.external_product_ref,
+        )
+
+    async def set_price(self, command: SetListingPriceCommand) -> PriceWriteReceipt:
         """按确定性顺序执行写命令;独立模拟平台事务只覆盖数据库操作。"""
         if self._session.in_transaction():
-            return await self._execute(command)
+            return await self._set_price(command)
         async with self._session.begin():
-            return await self._execute(command)
+            return await self._set_price(command)
 
-    async def _execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
+    async def reconcile_price(self, command: ReconcilePriceCommand) -> ReconcileResult:
+        """以权威状态回答;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
+
+        幂等记录不存在或未提交 → 确定未应用;已提交则重读 Listing,权威
+        价格与期望价格及本操作应用价一致才返回 APPLIED。
+        """
+        if self._session.in_transaction():
+            return await self._reconcile_price(command)
+        async with self._session.begin():
+            return await self._reconcile_price(command)
+
+    # ---- 兼容包装(历史 ToolVersion 的 Run 恢复) ----
+
+    async def execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
+        """旧写入口:委托 :meth:`set_price` 并映射回 :class:`ExecutionReceipt`。"""
+        receipt = await self.set_price(_to_set_price_command(command))
+        return _to_execution_receipt(receipt, command.idempotency_key)
+
+    async def reconcile(self, command: ReconciliationCommand) -> ReconcileResult:
+        """旧回查入口:委托 :meth:`reconcile_price`。"""
+        return await self.reconcile_price(
+            ReconcilePriceCommand(
+                operation_id=command.operation_id,
+                workspace_id=command.workspace_id,
+                store_id=command.store_id,
+                listing_id=command.listing_id,
+                external_store_ref=command.external_store_ref,
+                external_product_ref=command.external_product_ref,
+                expected_price=command.expected_price,
+                currency=command.currency,
+            )
+        )
+
+    async def count_logical_writes(self, operation_id: str) -> int:
+        """该 operation_id 已发生的逻辑写次数;未知操作返回 0。"""
+        record = self._operations.get(operation_id)
+        return 0 if record is None else record.logical_writes
+
+    # ---- 内部 ----
+
+    async def _set_price(self, command: SetListingPriceCommand) -> PriceWriteReceipt:
         """执行数据库 Mock 平台逻辑(不发起网络请求)。"""
         # 1. 写前超时:请求未达平台逻辑(含去重层),无任何状态变更。
         if self.faults.should_timeout_before_write():
-            return self._receipt(
-                command,
-                ExecutionStatus.UNKNOWN,
+            return _receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.UNKNOWN,
                 reason_code=REASON_TIMEOUT_BEFORE_WRITE,
             )
 
@@ -98,9 +174,10 @@ class MockCommerceAdapter:
 
         # 3. 平台逻辑不可用:确定失败(非 UNKNOWN);未达写路径,不建记录。
         if self.faults.should_fail_permanently():
-            return self._receipt(
-                command,
-                ExecutionStatus.FAILED,
+            return _receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.FAILED,
                 reason_code=REASON_PLATFORM_FAILURE,
             )
 
@@ -111,9 +188,10 @@ class MockCommerceAdapter:
         if listing is None:
             return self._record(
                 command,
-                self._receipt(
-                    command,
-                    ExecutionStatus.FAILED,
+                _receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
                     reason_code=REASON_LISTING_NOT_FOUND,
                 ),
                 logical_writes=0,
@@ -123,9 +201,10 @@ class MockCommerceAdapter:
         if listing.currency != command.currency:
             return self._record(
                 command,
-                self._receipt(
-                    command,
-                    ExecutionStatus.FAILED,
+                _receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
                     reason_code=REASON_CURRENCY_MISMATCH,
                 ),
                 logical_writes=0,
@@ -145,9 +224,10 @@ class MockCommerceAdapter:
         if updated is None:
             return self._record(
                 command,
-                self._receipt(
-                    command,
-                    ExecutionStatus.FAILED,
+                _receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
                     reason_code=REASON_VERSION_CONFLICT,
                 ),
                 logical_writes=0,
@@ -160,14 +240,15 @@ class MockCommerceAdapter:
             command.workspace_id, command.listing_id
         )
         observed: Listing = reread if reread is not None else updated
-        receipt = ExecutionReceipt(
+        receipt = PriceWriteReceipt(
             operation_id=command.operation_id,
             idempotency_key=command.idempotency_key,
-            status=ExecutionStatus.APPLIED,
+            status=WriteStatus.APPLIED,
             before_price=before_price,
             after_price=observed.current_price,
-            listing_version=observed.version,
+            resource_version=observed.version,
             external_ref=observed.external_product_ref,
+            changed=True,
         )
         self._operations[command.operation_id] = _OperationRecord(
             receipt=receipt,
@@ -180,28 +261,15 @@ class MockCommerceAdapter:
 
         # 7. 响应丢失:写入已生效,调用方只能得到 UNKNOWN,回查恢复。
         if self.faults.should_lose_response_after_commit():
-            return ExecutionReceipt(
-                operation_id=command.operation_id,
-                idempotency_key=command.idempotency_key,
-                status=ExecutionStatus.UNKNOWN,
+            return _receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.UNKNOWN,
                 reason_code=REASON_RESPONSE_LOST_AFTER_COMMIT,
             )
         return receipt
 
-    async def reconcile(
-        self, command: ReconciliationCommand
-    ) -> ReconcileResult:
-        """以权威状态回答;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
-
-        幂等记录不存在或未提交 → 确定未应用;已提交则重读 Listing,权威
-        价格与期望价格及本操作应用价一致才返回 APPLIED。
-        """
-        if self._session.in_transaction():
-            return await self._reconcile(command)
-        async with self._session.begin():
-            return await self._reconcile(command)
-
-    async def _reconcile(self, command: ReconciliationCommand) -> ReconcileResult:
+    async def _reconcile_price(self, command: ReconcilePriceCommand) -> ReconcileResult:
         if self.faults.consume_reconcile_unknown():
             return ReconcileResult.UNKNOWN
 
@@ -221,36 +289,15 @@ class MockCommerceAdapter:
             return ReconcileResult.APPLIED
         return ReconcileResult.NOT_APPLIED
 
-    async def count_logical_writes(self, operation_id: str) -> int:
-        """该 operation_id 已发生的逻辑写次数;未知操作返回 0。"""
-        record = self._operations.get(operation_id)
-        return 0 if record is None else record.logical_writes
-
-    def _receipt(
-        self,
-        command: UpdatePriceCommand,
-        status: ExecutionStatus,
-        *,
-        reason_code: str,
-    ) -> ExecutionReceipt:
-        """构造回执;可重试性由 ``reason_code`` 的受控集合确定性给出。"""
-        return ExecutionReceipt(
-            operation_id=command.operation_id,
-            idempotency_key=command.idempotency_key,
-            status=status,
-            reason_code=reason_code,
-            retryable=is_retryable_reason_code(reason_code),
-        )
-
     def _record(
         self,
-        command: UpdatePriceCommand,
-        receipt: ExecutionReceipt,
+        command: SetListingPriceCommand,
+        receipt: PriceWriteReceipt,
         *,
         logical_writes: int,
         committed: bool,
         applied_price: Decimal | None,
-    ) -> ExecutionReceipt:
+    ) -> PriceWriteReceipt:
         """登记幂等记录并返回回执(回执与记录所见一致,供回放)。"""
         self._operations[command.operation_id] = _OperationRecord(
             receipt=receipt,
@@ -263,10 +310,62 @@ class MockCommerceAdapter:
         return receipt
 
 
+def _receipt(
+    operation_id: str,
+    idempotency_key: str,
+    status: WriteStatus,
+    *,
+    reason_code: str,
+) -> PriceWriteReceipt:
+    """构造无观测的价格回执(UNKNOWN/FAILED 只带 reason_code)。"""
+    return PriceWriteReceipt(
+        operation_id=operation_id,
+        idempotency_key=idempotency_key,
+        status=status,
+        reason_code=reason_code,
+    )
+
+
+def _to_set_price_command(command: UpdatePriceCommand) -> SetListingPriceCommand:
+    """旧写命令 → PricingGateway 写命令(字段一一对应,``sku`` 不参与平台判定)。"""
+    return SetListingPriceCommand(
+        operation_id=command.operation_id,
+        idempotency_key=command.idempotency_key,
+        workspace_id=command.workspace_id,
+        store_id=command.store_id,
+        listing_id=command.listing_id,
+        external_store_ref=command.external_store_ref,
+        external_product_ref=command.external_product_ref,
+        sku="",
+        target_price=command.target_price,
+        currency=command.currency,
+        expected_version=command.expected_version,
+    )
+
+
+def _to_execution_receipt(
+    receipt: PriceWriteReceipt, idempotency_key: str
+) -> ExecutionReceipt:
+    """价格回执 → 旧 :class:`ExecutionReceipt`(幂等键沿用旧命令派生)。"""
+    return ExecutionReceipt(
+        operation_id=receipt.operation_id,
+        idempotency_key=idempotency_key,
+        status=ExecutionStatus(receipt.status.value),
+        before_price=receipt.before_price,
+        after_price=receipt.after_price,
+        listing_version=receipt.resource_version,
+        external_ref=receipt.external_ref,
+        reason_code=receipt.reason_code,
+        retryable=is_retryable_reason_code(receipt.reason_code),
+    )
+
+
 if TYPE_CHECKING:
     from adapters.commerce.protocol import CommerceAdapter
+    from agents.product_operations.pricing.gateway import PricingGateway
 
     _protocol_conformance: type[CommerceAdapter] = MockCommerceAdapter
+    _pricing_conformance: type[PricingGateway] = MockCommerceAdapter
 
 
 __all__ = ["MockCommerceAdapter"]

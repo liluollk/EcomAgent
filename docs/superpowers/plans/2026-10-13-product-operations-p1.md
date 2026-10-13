@@ -1219,7 +1219,7 @@ Expected: PASS。
 - Create: `tests/agents/product_operations/pricing/test_set_listing_price.py`
 - Create: `tests/agents/product_operations/pricing/test_price_reconciliation.py`
 
-- [ ] **Step 1: 写价格比较和绝对设置失败测试**
+- [x] **Step 1: 写价格比较和绝对设置失败测试**
 
 ```python
 async def test_compare_listing_prices_returns_deterministic_summary(service) -> None:
@@ -1235,7 +1235,7 @@ def test_set_listing_price_has_only_business_inputs() -> None:
     }
 ```
 
-- [ ] **Step 2: 定义 Pricing Gateway 和命令**
+- [x] **Step 2: 定义 Pricing Gateway 和命令**
 
 ```python
 class PricingGateway(Protocol):
@@ -1246,11 +1246,11 @@ class PricingGateway(Protocol):
 
 `SetListingPriceCommand` 必须包含 `operation_id`、可信内部资源、`target_price`、`currency`、`expected_version`；其 `idempotency_key` 由 Runtime 参数注入，不从 Tool input 读取。
 
-- [ ] **Step 3: 实现确定性价格比较**
+- [x] **Step 3: 实现确定性价格比较**
 
 同币种时计算最低价、最高价和价差；存在多个币种时返回 `CURRENCY_MISMATCH`，不得由模型自行换算。
 
-- [ ] **Step 4: 实现 `set_listing_price` prepare/execute**
+- [x] **Step 4: 实现 `set_listing_price` prepare/execute**
 
 `prepare()`：
 
@@ -1262,15 +1262,21 @@ class PricingGateway(Protocol):
 
 `execute_prepared()` 只调用 `PricingGateway.set_price(command)` 并转换 `WriteReceipt`。
 
-- [ ] **Step 5: 实现价格 Reconciler**
+- [x] **Step 5: 实现价格 Reconciler**
 
 只使用 `Operation.expected_state` 构造 `ReconcilePriceCommand`；不得从最新对话、当前 Agent Prompt 或模型文本恢复目标价格。
 
-- [ ] **Step 6: 迁移 Mock/REST Adapter 的价格接口**
+- [x] **Step 6: 迁移 Mock/REST Adapter 的价格接口**
 
 `MockCommerceAdapter` 和 `RestCommerceAdapter` 实现 `PricingGateway`。REST 路径、安全主机、响应大小限制保持不变；旧 `execute/reconcile` 暂由兼容包装调用新方法。
 
-- [ ] **Step 7: 运行价格全链路测试并提交**
+补充：`adapters → agents.product_operations.pricing.gateway` 这条新依赖暴露了
+`input` ↔ `tools` 的模块级循环导入（`input.requirements`/`input.references`
+→ `tools.__init__` → `tools.compare_listing_prices` → `input.profiles` →
+`input.requirements`）。在 `input/references.py` 与 `input/requirements.py`
+把 `tools.access` / `tools.errors` 改为**调用点导入**打破环，不改变任何对外行为。
+
+- [x] **Step 7: 运行价格全链路测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations/pricing tests/adapters/commerce/test_mock_adapter.py tests/adapters/commerce/test_rest_adapter.py -q

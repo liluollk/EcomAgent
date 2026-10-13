@@ -16,6 +16,10 @@
 错误通道固定为两类:授权与资源范围拒绝沿用既有读路径的
 :class:`ToolAccessError`(PreToolUse 管线已识别该类型),领域查找失败用
 :class:`ProductOperationError`(规范错误码)。
+
+``tools.access`` / ``tools.errors`` 在**调用点**导入:``tools`` 包的
+``__init__`` 会拉起 ``tools.compare_listing_prices``,后者又依赖
+``input.profiles``,模块级互相 import 会形成 ``input`` ↔ ``tools`` 循环。
 """
 
 from __future__ import annotations
@@ -34,8 +38,6 @@ from agents.product_operations.shared.errors import (
     NOT_FOUND,
     ProductOperationError,
 )
-from agents.product_operations.tools.access import authorized_store_ids
-from agents.product_operations.tools.errors import ToolAccessError
 from runtime.access.actor import ActorContext
 from runtime.access.authorization import RESOURCE_SCOPE_DENIED
 
@@ -73,6 +75,9 @@ class StoreReferenceResolver:
         """
         candidates = await self._load_active_stores(actor)
         if not store_refs:
+            # 调用点导入打破 ``input`` ↔ ``tools`` 的模块级环(见文件头说明)。
+            from agents.product_operations.tools.access import authorized_store_ids
+
             authorized = authorized_store_ids(actor)
             return tuple(
                 candidate.store_id
@@ -106,6 +111,10 @@ class StoreReferenceResolver:
                 f"店铺引用 {reference!r} 匹配到 {len(matches)} 个店铺,无法确定性解析",
             )
         store_id = matches[0].store_id
+        # 调用点导入打破 ``input`` ↔ ``tools`` 的模块级环(见文件头说明)。
+        from agents.product_operations.tools.access import authorized_store_ids
+        from agents.product_operations.tools.errors import ToolAccessError
+
         authorized = authorized_store_ids(actor)
         if authorized is not None and str(store_id) not in authorized:
             raise ToolAccessError(
