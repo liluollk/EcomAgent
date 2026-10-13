@@ -67,12 +67,8 @@ BusinessPolicyFactory = Callable[[PreToolProfileContext], Any]
 
 #: 需要"来源守卫"的关键字段:已提供但来源不可信时必须退回 Input Request。
 #: 取值来自架构文档 §5:店铺与 SKU 是可被模型猜测的写目标;金额由确定性
-#: 归一化判定,不属守卫范围。P1 起写目标改用模型可见引用 ``store_ref``,
-#: 库存写还增加 ``location_ref``——它们与 ``store_id`` 同类(存在且有权 ≠
-#: 用户选择的目标),因此同样纳入守卫。守卫只对"已提供"的字段生效
-#: (``field in arguments``),``location_ref`` 缺省仍由 Service 在唯一启用
-#: 位置时确定性解析,不在此处要求补充。
-PROVENANCE_GUARD_FIELDS: Final = ("store_id", "store_ref", "sku", "location_ref")
+#: 归一化判定,不属守卫范围。
+PROVENANCE_GUARD_FIELDS: Final = ("store_id", "sku")
 
 
 async def current_user_message(
@@ -142,11 +138,7 @@ class ProductPreToolProfileFactory:
                 fields=self._fields,
             ),
             input_requirement_resolver=ProductPreToolInputRequirementResolver(
-                resolver,
-                fields=self._fields,
-                actor=context.actor,
-                user_message=user_message,
-                answered=context.answered,
+                resolver, fields=self._fields, actor=context.actor
             ),
             authorization_resource_resolver=self._resource_resolver,
             business_policy=business_policy,

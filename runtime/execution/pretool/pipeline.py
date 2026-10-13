@@ -134,7 +134,6 @@ class PreToolContext:
     schema_diagnostic: SchemaDiagnostic | None = None
     resources: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     resource_versions: Mapping[str, int] = field(default_factory=dict)
-    policy_decision: PolicyDecision | None = None
     execution_mode: ExecutionModeDecision | None = None
 
 
@@ -200,19 +199,10 @@ class ExecutionModeResolver(Protocol):
 
 
 class AcceptedConfirmationLookup(Protocol):
-    """已接受 Confirmation 的查询回调;指纹/Actor/过期/状态校验由实现方负责。
-
-    ``policy_version`` 是本轮 PreToolUse 读到的**当前**业务策略修订号:实现方必须把
-    它喂给指纹重算,否则策略更新后旧确认仍会被当成有效。
-    """
+    """已接受 Confirmation 的查询回调;指纹/Actor/过期/状态校验由实现方负责。"""
 
     async def __call__(
-        self,
-        *,
-        tool_call_id: UUID,
-        stable_key: str,
-        actor_id: UUID,
-        policy_version: int | None,
+        self, *, tool_call_id: UUID, stable_key: str, actor_id: UUID
     ) -> bool: ...
 
 
@@ -463,9 +453,6 @@ def _business_policy_stage() -> StageHandler:
         )
         if policy_decision.allowed:
             context.resource_versions = dict(policy_decision.resource_versions)
-            # 保留允许决策:确认阶段要把它携带的策略修订号写进 ConfirmationSpec,
-            # 使"规则更新后旧确认失效"有可比较的依据。
-            context.policy_decision = policy_decision
             return None
         return deny(
             policy_decision.reason_code or POLICY_DENIED,
@@ -508,19 +495,11 @@ def _confirmation_verification_stage(dependencies: PreToolDependencies) -> Stage
         if mode.mode != "CONFIRM":
             return None
         lookup = dependencies.accepted_confirmation_lookup
-        # 当前业务策略修订号先算出来:它既用于查询已接受确认(供指纹重算判定旧确认
-        # 是否随策略更新而失效),也用于本轮新生成的 ConfirmationSpec。
-        policy_revision = (
-            context.policy_decision.policy_revision
-            if context.policy_decision is not None
-            else None
-        )
         accepted = (
             await lookup(
                 tool_call_id=context.request.tool_call_id,
                 stable_key=context.request.stable_key,
                 actor_id=context.actor.actor_id,
-                policy_version=policy_revision,
             )
             if lookup is not None
             else False
@@ -529,8 +508,7 @@ def _confirmation_verification_stage(dependencies: PreToolDependencies) -> Stage
             return None
         return require_confirmation(
             confirmation_spec=ConfirmationSpec(
-                resource_versions=dict(context.resource_versions),
-                policy_version=policy_revision,
+                resource_versions=dict(context.resource_versions)
             )
         )
 

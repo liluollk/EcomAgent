@@ -27,17 +27,6 @@ from agents.product_operations.agent import (
     AGENT_VERSION,
     PRODUCT_AGENT_DEFINITION,
 )
-from agents.product_operations.policy.models import PricePolicyConfig
-from agents.product_operations.pricing.configuration import (
-    PRICING_POLICY_CONFIG_INVALID,
-    PRICING_POLICY_NOT_PUBLISHED,
-    PRICING_POLICY_STABLE_KEY,
-    InvalidPricingPolicyConfig,
-    PublishedPricingPolicy,
-    canonical_pricing_policy_payload,
-    parse_pricing_policy_config,
-    pricing_policy_config_hash,
-)
 from agents.product_operations.skill import (
     PRODUCT_MAINTENANCE_SKILL,
     SKILL_KEY,
@@ -62,8 +51,6 @@ from runtime.persistence.base import (
 from runtime.persistence.models.configuration import (
     Agent,
     AgentVersion,
-    BusinessPolicy,
-    BusinessPolicyVersion,
     ModelConfigVersion,
     ModelConnection,
     Skill,
@@ -95,12 +82,7 @@ class ModelConnectionProvisioningSpec:
 
 @dataclass(frozen=True)
 class ProductOperationsCapabilities:
-    """一次发布得到的精确版本 ID 快照(装配只读消费)。
-
-    ``pricing_policy_version_id`` / ``pricing_policy_config_hash`` 指向**已发布**的
-    价格策略行:装配期据此读取唯一一份规则,而不是从常量或调用参数注入。缺少它们
-    就意味着"这次发布没有发布价格策略",装配必须失败闭合。
-    """
+    """一次发布得到的精确版本 ID 快照(装配只读消费)。"""
 
     agent_id: uuid.UUID
     agent_version_id: uuid.UUID
@@ -109,8 +91,6 @@ class ProductOperationsCapabilities:
     tool_definition_ids: Mapping[str, uuid.UUID]
     tool_version_ids: Mapping[str, uuid.UUID]
     model_config_version_id: uuid.UUID
-    pricing_policy_version_id: uuid.UUID
-    pricing_policy_config_hash: str
 
     def as_ids(self) -> dict[str, Any]:
         """兼容既有字典式访问(测试断言与清理使用)。"""
@@ -122,8 +102,6 @@ class ProductOperationsCapabilities:
             "tool_definition_ids": dict(self.tool_definition_ids),
             "tool_version_ids": dict(self.tool_version_ids),
             "model_config_version_id": self.model_config_version_id,
-            "pricing_policy_version_id": self.pricing_policy_version_id,
-            "pricing_policy_config_hash": self.pricing_policy_config_hash,
         }
 
 
@@ -163,13 +141,7 @@ class ProductOperationsProvisioner:
         *,
         workspace_id: uuid.UUID,
         model: ModelConnectionProvisioningSpec,
-        pricing_policy: PricePolicyConfig,
     ) -> ProductOperationsCapabilities:
-        """发布一次完整能力快照。
-
-        ``pricing_policy`` 是**显式注入**的规则配置:发布方(测试夹具、Eval、E2E)
-        提供它,正式装配路径不再接受价格配置参数,只消费这里发布的精确版本。
-        """
         session = self._session_factory()
         try:
             async with session.begin():
@@ -179,9 +151,6 @@ class ProductOperationsProvisioner:
                 model_config_version_id = await self._provision_model(
                     session, workspace_id=workspace_id, spec=model
                 )
-                published_policy = await self._provision_pricing_policy(
-                    session, workspace_id=workspace_id, config=pricing_policy
-                )
             return ProductOperationsCapabilities(
                 agent_id=agent_id,
                 agent_version_id=agent_version_id,
@@ -190,8 +159,6 @@ class ProductOperationsProvisioner:
                 tool_definition_ids=tool_definition_ids,
                 tool_version_ids=tool_version_ids,
                 model_config_version_id=model_config_version_id,
-                pricing_policy_version_id=published_policy.version_id,
-                pricing_policy_config_hash=published_policy.config_hash,
             )
         finally:
             await session.close()
@@ -373,155 +340,6 @@ class ProductOperationsProvisioner:
             await session.flush()
         return model_config_version.id
 
-    async def _provision_pricing_policy(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: uuid.UUID,
-        config: PricePolicyConfig,
-    ) -> PublishedPricingPolicy:
-        """把价格策略发布到 ``BusinessPolicy`` / ``BusinessPolicyVersion``。
-
-        幂等口径是**规范化载荷**而非对象相等:同一份配置产生逐字节相同的载荷与
-        hash,于是复用已发布行;配置任一项变化则 hash 变化,发布一个新版本(旧版本
-        保留,便于历史 Run 解释自己当时读的是哪一版规则)。
-        """
-        payload = canonical_pricing_policy_payload(config)
-        config_hash = pricing_policy_config_hash(payload)
-        policy = (
-            await session.scalars(
-                select(BusinessPolicy).where(
-                    BusinessPolicy.workspace_id == workspace_id,
-                    BusinessPolicy.stable_key == PRICING_POLICY_STABLE_KEY,
-                )
-            )
-        ).one_or_none()
-        if policy is None:
-            policy = BusinessPolicy(
-                id=uuid.uuid4(),
-                workspace_id=workspace_id,
-                stable_key=PRICING_POLICY_STABLE_KEY,
-                name="Product pricing policy",
-            )
-            session.add(policy)
-            await session.flush()
-        existing = list(
-            await session.scalars(
-                select(BusinessPolicyVersion)
-                .where(
-                    BusinessPolicyVersion.workspace_id == workspace_id,
-                    BusinessPolicyVersion.business_policy_id == policy.id,
-                )
-                .order_by(BusinessPolicyVersion.version)
-            )
-        )
-        for row in existing:
-            if row.config_hash == config_hash and row.config_json == payload:
-                return PublishedPricingPolicy(
-                    version_id=row.id,
-                    version=row.version,
-                    config=config,
-                    config_hash=config_hash,
-                )
-        version = 1 + max((row.version for row in existing), default=0)
-        row = BusinessPolicyVersion(
-            id=uuid.uuid4(),
-            workspace_id=workspace_id,
-            business_policy_id=policy.id,
-            version=version,
-            config_json=payload,
-            config_hash=config_hash,
-            status=ConfigVersionStatus.PUBLISHED,
-            published_at=datetime.now(UTC),
-        )
-        session.add(row)
-        await session.flush()
-        return PublishedPricingPolicy(
-            version_id=row.id,
-            version=row.version,
-            config=config,
-            config_hash=config_hash,
-        )
-
-
-async def load_published_pricing_policy(
-    engine: AsyncEngine,
-    *,
-    workspace_id: uuid.UUID,
-    version_id: uuid.UUID,
-    expected_config_hash: str,
-) -> PublishedPricingPolicy:
-    """读取并校验已发布的价格策略;任何不一致都以 ``AssemblyError`` fail closed。
-
-    五项校验缺一不可,因为每一项都对应一类真实错误装配:
-
-    - 行存在且属于**本 Workspace**(跨 Workspace 读策略等于用别人的规则);
-    - 策略目录的 ``stable_key`` 是 ``product-pricing``(防错指到别的业务规则);
-    - 版本状态为 ``PUBLISHED``(草稿不得进入执行路径);
-    - 行 ``config_hash`` 等于能力快照里的 hash(防"发布后又改了行");
-    - 载荷能严格还原成 :class:`PricePolicyConfig`,且重新计算的 hash 与行一致
-      (防脏数据写着合法 hash、内容却不是同一份配置)。
-
-    只读:不创建、不修改任何行。
-    """
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        row = (
-            await session.execute(
-                select(BusinessPolicyVersion, BusinessPolicy)
-                .join(
-                    BusinessPolicy,
-                    (BusinessPolicy.workspace_id == BusinessPolicyVersion.workspace_id)
-                    & (BusinessPolicy.id == BusinessPolicyVersion.business_policy_id),
-                )
-                .where(
-                    BusinessPolicyVersion.id == version_id,
-                    BusinessPolicyVersion.workspace_id == workspace_id,
-                )
-            )
-        ).one_or_none()
-        if row is None:
-            raise AssemblyError(
-                PRICING_POLICY_NOT_PUBLISHED,
-                f"BusinessPolicyVersion {version_id} 不存在于该 Workspace",
-            )
-        version_row, policy_row = row
-        if policy_row.stable_key != PRICING_POLICY_STABLE_KEY:
-            raise AssemblyError(
-                PRICING_POLICY_NOT_PUBLISHED,
-                f"策略 stable_key 不是 {PRICING_POLICY_STABLE_KEY}: {policy_row.stable_key!r}",
-            )
-        if version_row.status is not ConfigVersionStatus.PUBLISHED:
-            raise AssemblyError(
-                PRICING_POLICY_NOT_PUBLISHED,
-                f"价格策略版本 {version_id} 状态为 {version_row.status.value}",
-            )
-        if version_row.config_hash != expected_config_hash:
-            raise AssemblyError(
-                PRICING_POLICY_NOT_PUBLISHED,
-                f"价格策略版本 {version_id} 的 config_hash 与能力快照不一致",
-            )
-        try:
-            config = parse_pricing_policy_config(version_row.config_json)
-        except InvalidPricingPolicyConfig as error:
-            raise AssemblyError(PRICING_POLICY_CONFIG_INVALID, error.detail) from error
-        recomputed = pricing_policy_config_hash(
-            canonical_pricing_policy_payload(config)
-        )
-        if recomputed != version_row.config_hash:
-            raise AssemblyError(
-                PRICING_POLICY_CONFIG_INVALID,
-                f"价格策略版本 {version_id} 的载荷与其 config_hash 不自洽",
-            )
-        return PublishedPricingPolicy(
-            version_id=version_row.id,
-            version=version_row.version,
-            config=config,
-            config_hash=recomputed,
-        )
-    finally:
-        await session.close()
-
 
 async def require_published_capabilities(
     engine: AsyncEngine, capabilities: ProductOperationsCapabilities
@@ -582,18 +400,8 @@ async def require_published_capabilities(
                 CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
                 f"ModelConfigVersion {capabilities.model_config_version_id} 不存在",
             )
-        # 在会话内取走标量:关闭后不再依赖 ORM 实例的惰性加载。
-        pricing_workspace_id = model_config_version.workspace_id
     finally:
         await session.close()
-    # 价格策略必须同样处于已发布可读状态:能力快照含"哪一版规则",装配期必须能
-    # 真正读到它,否则等于这次发布没有可执行的价格规则。
-    await load_published_pricing_policy(
-        engine,
-        workspace_id=pricing_workspace_id,
-        version_id=capabilities.pricing_policy_version_id,
-        expected_config_hash=capabilities.pricing_policy_config_hash,
-    )
 
 
 __all__ = [
@@ -602,7 +410,6 @@ __all__ = [
     "ModelConnectionProvisioningSpec",
     "ProductOperationsCapabilities",
     "ProductOperationsProvisioner",
-    "load_published_pricing_policy",
     "product_tool_definitions",
     "require_published_capabilities",
 ]

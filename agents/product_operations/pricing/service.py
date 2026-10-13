@@ -34,13 +34,13 @@ from agents.product_operations.input.normalizer import normalize_arguments
 from agents.product_operations.input.profiles import p1_fields_for
 from agents.product_operations.input.references import StoreReferenceResolver
 from agents.product_operations.persistence.models import Listing, Product, Store
+from agents.product_operations.policy.models import PricePolicyConfig
 from agents.product_operations.policy.price_policy import (
     LISTING_NOT_FOUND as POLICY_LISTING_NOT_FOUND,
 )
 from agents.product_operations.policy.price_policy import (
     LISTING_VERSION_CONFLICT as POLICY_LISTING_VERSION_CONFLICT,
 )
-from agents.product_operations.pricing.configuration import PublishedPricingPolicy
 from agents.product_operations.pricing.gateway import (
     PriceWriteReceipt,
     PricingGateway,
@@ -167,12 +167,7 @@ class PricingService:
 
 @dataclass(frozen=True)
 class PreparedSetPrice:
-    """prepare 阶段解析出的可信资源与目标价(不含 ``operation_id``)。
-
-    ``policy_*`` 三个字段记录**写前究竟校验了哪一版价格规则**:版本行主键供事后
-    精确追溯,修订号供确认指纹跨提交比较,``config_hash`` 供证明载荷未被改写。
-    三者都进 ``expected_state``,Operation 因此能自解释。
-    """
+    """prepare 阶段解析出的可信资源与目标价(不含 ``operation_id``)。"""
 
     workspace_id: uuid.UUID
     store_ref: str
@@ -185,13 +180,10 @@ class PreparedSetPrice:
     currency: str
     expected_version: int
     policy_version: str
-    policy_version_id: str | None = None
-    policy_revision: int | None = None
-    policy_config_hash: str | None = None
 
     def expected_state(self) -> dict[str, Any]:
         """可回放的业务预期(服务端补全,模型不可见)。"""
-        state: dict[str, Any] = {
+        return {
             "operation_type": OPERATION_TYPE,
             "workspace_id": str(self.workspace_id),
             "store_id": str(self.store_id),
@@ -205,13 +197,6 @@ class PreparedSetPrice:
             "external_store_ref": self.external_store_ref,
             "external_product_ref": self.external_product_ref,
         }
-        if self.policy_version_id is not None:
-            state["policy_version_id"] = self.policy_version_id
-        if self.policy_revision is not None:
-            state["policy_revision"] = self.policy_revision
-        if self.policy_config_hash is not None:
-            state["policy_config_hash"] = self.policy_config_hash
-        return state
 
     def to_command(self, operation_id: uuid.UUID, idempotency_key: str) -> SetListingPriceCommand:
         """注入执行边界分配的 ``operation_id`` 与幂等键,得到平台写命令。"""
@@ -260,15 +245,14 @@ class SetListingPriceHandler:
         actor: ActorContext,
         session: AsyncSession,
         gateway: PricingGateway,
-        pricing_policy: PublishedPricingPolicy,
+        policy_config: PricePolicyConfig,
         stores: StoreReferenceResolver | None = None,
     ) -> None:
         self._actor = actor
         self._workspace_id = actor.workspace_id
         self._session = session
         self._gateway = gateway
-        self._pricing_policy = pricing_policy
-        self._policy = PricingPolicy(session, pricing_policy.config)
+        self._policy = PricingPolicy(session, policy_config)
         self._stores = stores or StoreReferenceResolver(session)
 
     async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
@@ -378,9 +362,6 @@ class SetListingPriceHandler:
             currency=listing.currency,
             expected_version=listing.version,
             policy_version=self._policy.policy_version,
-            policy_version_id=str(self._pricing_policy.version_id),
-            policy_revision=self._pricing_policy.version,
-            policy_config_hash=self._pricing_policy.config_hash,
         )
 
     async def _resolve_store(self, store_ref: str) -> tuple[uuid.UUID | None, _Rejection | None]:

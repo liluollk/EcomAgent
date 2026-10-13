@@ -8,17 +8,6 @@ P1 起本 Adapter 实现 :class:`PricingGateway`(``get_price`` / ``set_price`` /
 ``reconcile_price``);旧 ``execute`` / ``reconcile`` 保留为兼容包装,委托新方法
 并映射回旧回执类型,供历史 ToolVersion 的 Run 恢复。固定路径、安全主机与响应
 大小限制与迁移前一致。
-
-**能力范围(P1)**:本 Adapter 只声明 :data:`CAPABILITIES` 中的 ``pricing``。
-库存与刊登能力不在它的适配边界内——真实第三方平台未必存在对应的可写端点,
-**不允许**为了"凑齐接口"而猜测 URL。这两个能力的每个方法都必须立刻失败闭合:
-
-- 读方法抛 :class:`CapabilityUnsupportedError`(``LookupError`` 家族,与 Port 的
-  读失败通道一致);
-- 写方法返回 ``FAILED`` + ``CAPABILITY_UNSUPPORTED`` 回执——写路径的确定失败本就
-  以回执承载,不需要异常;它同时意味着"绝不重试",与 ``ProductOperationError``
-  中 ``CAPABILITY_UNSUPPORTED`` 的语义(不得降级为删除资源等替代动作)一致;
-- 回查返回 ``NOT_APPLIED``:能力不支持的写不可能生效,且回查不发起任何请求。
 """
 
 from __future__ import annotations
@@ -26,7 +15,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -38,19 +26,6 @@ from adapters.commerce.protocol import (
     UpdatePriceCommand,
     is_retryable_reason_code,
 )
-from agents.product_operations.inventory.gateway import (
-    AdjustInventoryCommand,
-    InventoryLevelSnapshot,
-    InventoryQuery,
-    InventoryWriteReceipt,
-    ReconcileInventoryCommand,
-)
-from agents.product_operations.listing.gateway import (
-    ChangePublicationCommand,
-    ListingPublicationSnapshot,
-    ListingQuery,
-    ReconcileListingCommand,
-)
 from agents.product_operations.pricing.gateway import (
     PriceQuery,
     PriceSnapshot,
@@ -59,31 +34,8 @@ from agents.product_operations.pricing.gateway import (
     ReconcilePriceCommand,
     SetListingPriceCommand,
 )
-from agents.product_operations.shared.errors import CAPABILITY_UNSUPPORTED
-from agents.product_operations.shared.write_contracts import WriteReceipt, WriteStatus
+from agents.product_operations.shared.write_contracts import WriteStatus
 from runtime.execution.reconciliation import ReconcileResult
-
-
-CAPABILITIES: Final[frozenset[str]] = frozenset({"pricing"})
-"""P1 的 REST Adapter 声明的能力集合:只有定价。"""
-
-
-class CapabilityUnsupportedError(LookupError):
-    """适配边界之外的业务能力被误调用(装配错误,不是平台故障)。
-
-    ``LookupError`` 家族与 :class:`InventoryUnavailable` / :class:`ListingUnavailable`
-    一致,因此读路径的失败通道不变;``reason_code`` 携带稳定的
-    ``CAPABILITY_UNSUPPORTED`` 错误码,便于上层记录与诊断。
-    """
-
-    reason_code: Final = CAPABILITY_UNSUPPORTED
-
-    def __init__(self, capability: str) -> None:
-        super().__init__(
-            f"{CAPABILITY_UNSUPPORTED}: REST adapter does not implement "
-            f"the {capability!r} capability"
-        )
-        self.capability = capability
 
 
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -146,49 +98,6 @@ class RestCommerceAdapter:
 
     async def aclose(self) -> None:
         await self._client.aclose()
-
-    # ---- 能力范围:P1 只声明定价 ----
-
-    supported_capabilities: Final[frozenset[str]] = CAPABILITIES
-
-    async def get_inventory(self, query: InventoryQuery) -> InventoryLevelSnapshot:
-        """库存读取不在本 Adapter 能力内:立即失败,不猜测第三方端点。"""
-        raise CapabilityUnsupportedError("inventory")
-
-    async def adjust_inventory(
-        self, command: AdjustInventoryCommand
-    ) -> InventoryWriteReceipt:
-        """库存写入返回确定失败回执:零副作用,且绝不重试。"""
-        return InventoryWriteReceipt(
-            operation_id=command.operation_id,
-            idempotency_key=command.idempotency_key,
-            status=WriteStatus.FAILED,
-            reason_code=CAPABILITY_UNSUPPORTED,
-        )
-
-    async def reconcile_inventory(
-        self, command: ReconcileInventoryCommand
-    ) -> ReconcileResult:
-        """能力不支持的写不可能生效:确定为 ``NOT_APPLIED``,且不发起任何请求。"""
-        return ReconcileResult.NOT_APPLIED
-
-    async def get_listing(self, query: ListingQuery) -> ListingPublicationSnapshot:
-        """刊登读取不在本 Adapter 能力内:立即失败,不猜测第三方端点。"""
-        raise CapabilityUnsupportedError("listing")
-
-    async def publish_listing(self, command: ChangePublicationCommand) -> WriteReceipt:
-        """刊登发布返回确定失败回执:零副作用,且绝不重试。"""
-        return _unsupported_receipt(command.operation_id, command.idempotency_key)
-
-    async def unpublish_listing(self, command: ChangePublicationCommand) -> WriteReceipt:
-        """刊登取消发布返回确定失败回执:零副作用,且绝不重试。"""
-        return _unsupported_receipt(command.operation_id, command.idempotency_key)
-
-    async def reconcile_listing(
-        self, command: ReconcileListingCommand
-    ) -> ReconcileResult:
-        """能力不支持的写不可能生效:确定为 ``NOT_APPLIED``,且不发起任何请求。"""
-        return ReconcileResult.NOT_APPLIED
 
     # ---- PricingGateway ----
 
@@ -416,16 +325,6 @@ def _failed(command: SetListingPriceCommand, reason_code: str) -> PriceWriteRece
     )
 
 
-def _unsupported_receipt(operation_id: str, idempotency_key: str) -> WriteReceipt:
-    """能力不支持的刊登写回执:确定失败、零观测,只能落 ToolCall 终态。"""
-    return WriteReceipt(
-        operation_id=operation_id,
-        idempotency_key=idempotency_key,
-        status=WriteStatus.FAILED,
-        reason_code=CAPABILITY_UNSUPPORTED,
-    )
-
-
 def _to_set_price_command(command: UpdatePriceCommand) -> SetListingPriceCommand:
     """旧写命令 → PricingGateway 写命令(幂等键沿用旧命令派生)。"""
     return SetListingPriceCommand(
@@ -460,16 +359,4 @@ def _to_execution_receipt(
     )
 
 
-if TYPE_CHECKING:
-    from agents.product_operations.inventory.gateway import InventoryGateway
-    from agents.product_operations.listing.gateway import ListingGateway
-    from agents.product_operations.pricing.gateway import PricingGateway
-
-    # 声明能力范围不等于"接口形状可以不合":三个 Port 的方法签名仍必须吻合,
-    # 否则组合根在把本 Adapter 当作某能力注入时不会有任何静态提示。
-    _pricing_conformance: type[PricingGateway] = RestCommerceAdapter
-    _inventory_conformance: type[InventoryGateway] = RestCommerceAdapter
-    _listing_conformance: type[ListingGateway] = RestCommerceAdapter
-
-
-__all__ = ["CAPABILITIES", "CapabilityUnsupportedError", "RestCommerceAdapter"]
+__all__ = ["RestCommerceAdapter"]

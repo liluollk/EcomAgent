@@ -43,7 +43,12 @@ class StoreCandidate:
 
     def matches_value(self, value: str) -> bool:
         """模型提供的店铺标识是否指向本店(id 或归一化后的名称/别名)。"""
-        return _candidate_matches_value(self.store_id, self._labels(), value)
+        normalized = normalize_label(value)
+        if not normalized:
+            return False
+        if value.strip() == self.store_id:
+            return True
+        return any(normalize_label(label) == normalized for label in self._labels())
 
     def matched_by_message(self, normalized_message: str) -> bool:
         """归一化消息中是否精确出现本店的名称/别名。"""
@@ -51,42 +56,19 @@ class StoreCandidate:
 
     def matched_labels(self, normalized_message: str) -> frozenset[str]:
         """返回当前消息实际命中的归一化名称/别名。"""
-        return _candidate_matched_labels(self._labels(), normalized_message)
+        return frozenset(
+            label
+            for label in (normalize_label(item) for item in self._labels())
+            if label and label in normalized_message
+        )
 
     def normalized_labels(self) -> frozenset[str]:
         """返回本店非空的归一化名称/别名集合。"""
-        return _candidate_normalized_labels(self._labels())
-
-    def _labels(self) -> tuple[str, ...]:
-        return (self.name, *self.aliases)
-
-
-@dataclass(frozen=True)
-class LocationCandidate:
-    """参与证据匹配的启用履约位置(id 为 ``str(location.id)``)。
-
-    P1 写 Tool 用 ``location_ref`` 引用仓库/门店位置。多仓场景下模型可能自行
-    补一个合法位置来绕过"多位置必须补充输入",因此 ``location_ref`` 的提供值
-    同样需要来源证明(见 :class:`EvidenceResolver`);缺省值不由本类判定,
-    交给 Service 在唯一启用位置时确定性解析。
-    """
-
-    location_id: str
-    store_id: str
-    name: str
-    aliases: tuple[str, ...] = ()
-
-    def matches_value(self, value: str) -> bool:
-        """模型提供的位置标识是否指向本位置(id 或归一化后的名称/别名)。"""
-        return _candidate_matches_value(self.location_id, self._labels(), value)
-
-    def matched_labels(self, normalized_message: str) -> frozenset[str]:
-        """返回当前消息实际命中的归一化名称/别名。"""
-        return _candidate_matched_labels(self._labels(), normalized_message)
-
-    def normalized_labels(self) -> frozenset[str]:
-        """返回本位置非空的归一化名称/别名集合。"""
-        return _candidate_normalized_labels(self._labels())
+        return frozenset(
+            label
+            for label in (normalize_label(item) for item in self._labels())
+            if label
+        )
 
     def _labels(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
@@ -98,15 +80,11 @@ class ProvenanceOutcome:
 
     - ``field_sources``:白名单关键字段 → 来源;
     - ``canonical_values``:可信来源下的规范化值(店铺别名 → ``str(store.id)``、
-      金额 → 两位小数 ``Decimal``);不可信字段为 ``None``;
-    - ``store_scope``:本次调用已确定的规范 ``str(store.id)``(来源为
-      ``store_id`` 或 ``store_ref`` 之一),供调用方把**位置引用**限定到目标店铺;
-      两者都不可信时为 ``None``。
+      金额 → 两位小数 ``Decimal``);不可信字段为 ``None``。
     """
 
     field_sources: Mapping[str, ArgumentTrustLevel]
     canonical_values: Mapping[str, Any]
-    store_scope: str | None = None
 
 
 class EvidenceResolver:
@@ -118,7 +96,6 @@ class EvidenceResolver:
         user_message: str,
         arguments: Mapping[str, Any],
         stores: Sequence[StoreCandidate] = (),
-        locations: Sequence[LocationCandidate] = (),
         answered: Mapping[str, str] | None = None,
         sku_unique_in_workspace: bool | None = None,
         history: Sequence[str] = (),
@@ -129,17 +106,6 @@ class EvidenceResolver:
         并有意忽略,避免调用方误以为历史消息参与判定。``sku_unique_in_workspace``
         是权威读取结果(SKU 在当前 Workspace 是否恰好唯一),``None`` 表示
         未做权威读取。
-
-        P1 写目标 ``store_ref`` / ``location_ref`` 与 ``store_id`` 同属"可被
-        模型猜测的业务目标",只接受 USER_EXPLICIT / USER_CONFIRMED;
-        ``store_ref`` 的规范化值不被本引擎改写(Service 只接受名称/别名,
-        不接受内部 UUID),``location_ref`` 缺省时不产生来源(由 Service 在
-        唯一启用位置时确定性解析)。
-
-        ``location_ref`` 在**已确定的店铺作用域**内判定:``store_id`` /
-        ``store_ref`` 已被证明时,先按该规范 ``store_id`` 过滤候选位置,再比较
-        名称/别名。不同店铺常有同名"默认仓",跨店铺比较会把用户已经明确的
-        "店铺 + 仓库"错误判成歧义(``UNTRUSTED``)。
         """
         del history
         normalized_message = normalize_label(user_message)
@@ -148,7 +114,6 @@ class EvidenceResolver:
         canonical_values: dict[str, Any] = {}
 
         store_source, store_value = self._resolve_store(
-            field="store_id",
             normalized_message=normalized_message,
             arguments=arguments,
             stores=stores,
@@ -156,19 +121,6 @@ class EvidenceResolver:
         )
         field_sources["store_id"] = store_source
         canonical_values["store_id"] = store_value
-
-        store_ref_source, store_ref_value = self._resolve_store(
-            field="store_ref",
-            normalized_message=normalized_message,
-            arguments=arguments,
-            stores=stores,
-            answers=answers,
-        )
-        field_sources["store_ref"] = store_ref_source
-
-        # 位置证据的店铺作用域:取已证明来源的规范店铺(store_id 优先),
-        # 二者都不可信时为 None(退回全 Workspace 匹配,由证据唯一性决定)。
-        store_scope = store_value if store_value is not None else store_ref_value
 
         sku_source, sku_value = self._resolve_sku(
             normalized_message=normalized_message,
@@ -179,14 +131,6 @@ class EvidenceResolver:
         field_sources["sku"] = sku_source
         canonical_values["sku"] = sku_value
 
-        field_sources["location_ref"] = self._resolve_location(
-            normalized_message=normalized_message,
-            arguments=arguments,
-            locations=locations,
-            answers=answers,
-            store_scope=store_scope,
-        )
-
         price_source, price_value = self._resolve_target_price(
             arguments=arguments, answers=answers
         )
@@ -194,82 +138,36 @@ class EvidenceResolver:
         canonical_values["target_price"] = price_value
 
         return ProvenanceOutcome(
-            field_sources=field_sources,
-            canonical_values=canonical_values,
-            store_scope=store_scope,
+            field_sources=field_sources, canonical_values=canonical_values
         )
 
     def _resolve_store(
         self,
         *,
-        field: str,
         normalized_message: str,
         arguments: Mapping[str, Any],
         stores: Sequence[StoreCandidate],
         answers: Mapping[str, str],
     ) -> tuple[ArgumentTrustLevel, str | None]:
-        """``store_id`` / ``store_ref`` 只接受 USER_EXPLICIT / USER_CONFIRMED。
-
-        返回值第二个元素是命中店铺的规范标识(``str(store.id)``);调用方按
-        字段语义决定是否采用(``store_ref`` 不改写模型引用,只取来源等级)。
-        """
-        value = _trimmed_str(arguments.get(field))
-        answered_store = _trimmed_str(answers.get(field))
+        """``store_id`` 只接受 USER_EXPLICIT / USER_CONFIRMED。"""
+        value = _trimmed_str(arguments.get("store_id"))
+        answered_store = _trimmed_str(answers.get("store_id"))
         if value is not None:
             evidence = self._explicit_store_evidence(
                 normalized_message, value, stores
             )
             if evidence is not None and evidence.matches_value(value):
                 return ArgumentTrustLevel.USER_EXPLICIT, evidence.store_id
-            if answered_store is not None and value == answered_store:
-                matched = _candidate_by_value(answered_store, stores)
-                if matched is not None:
-                    return ArgumentTrustLevel.USER_CONFIRMED, matched.store_id
-            return ArgumentTrustLevel.UNTRUSTED, None
-        if answered_store is not None:
-            matched = _candidate_by_value(answered_store, stores)
-            if matched is not None:
-                return ArgumentTrustLevel.USER_CONFIRMED, matched.store_id
-        return ArgumentTrustLevel.UNTRUSTED, None
-
-    def _resolve_location(
-        self,
-        *,
-        normalized_message: str,
-        arguments: Mapping[str, Any],
-        locations: Sequence[LocationCandidate],
-        answers: Mapping[str, str],
-        store_scope: str | None,
-    ) -> ArgumentTrustLevel:
-        """``location_ref`` 只接受 USER_EXPLICIT / USER_CONFIRMED。
-
-        ``store_scope`` 已知时,先在**该店铺内**的候选位置上判定:候选集先按
-        ``store_id`` 过滤,再做名称/别名唯一性比较。缺省(既未提供也未回答)
-        时不参与判定:唯一启用位置由 Service 确定性解析,多位置由 Service
-        要求补充;此处只负责"模型**自行提供**的位置引用必须有用户证据"。
-        """
-        scoped = (
-            locations
-            if store_scope is None
-            else tuple(loc for loc in locations if loc.store_id == store_scope)
-        )
-        value = _trimmed_str(arguments.get("location_ref"))
-        answered_location = _trimmed_str(answers.get("location_ref"))
-        if value is not None:
-            if self._explicit_location_evidence(normalized_message, value, scoped):
-                return ArgumentTrustLevel.USER_EXPLICIT
             if (
-                answered_location is not None
-                and value == answered_location
-                and _location_by_value(answered_location, scoped) is not None
+                answered_store is not None
+                and value == answered_store
+                and _in_candidates(answered_store, stores)
             ):
-                return ArgumentTrustLevel.USER_CONFIRMED
-            return ArgumentTrustLevel.UNTRUSTED
-        if answered_location is not None and _location_by_value(
-            answered_location, scoped
-        ) is not None:
-            return ArgumentTrustLevel.USER_CONFIRMED
-        return ArgumentTrustLevel.UNTRUSTED
+                return ArgumentTrustLevel.USER_CONFIRMED, answered_store
+            return ArgumentTrustLevel.UNTRUSTED, None
+        if answered_store is not None and _in_candidates(answered_store, stores):
+            return ArgumentTrustLevel.USER_CONFIRMED, answered_store
+        return ArgumentTrustLevel.UNTRUSTED, None
 
     def _resolve_sku(
         self,
@@ -334,59 +232,6 @@ class EvidenceResolver:
                 return selected
         return None
 
-    @staticmethod
-    def _explicit_location_evidence(
-        normalized_message: str,
-        value: str,
-        locations: Sequence[LocationCandidate],
-    ) -> bool:
-        """``location_ref`` 的目标必须唯一,且消息中至少有一个无歧义标签指向它。
-
-        与店铺证据同规则:消息可以同时点名多个仓,只要当前 ``location_ref``
-        唯一指向其中之一即构成用户显式证据;共享别名导致的歧义不做证据。
-        ``locations`` 已由调用方按目标店铺收窄,故"同名仓"只在**同一店铺内**
-        才构成歧义,不会把用户已明确的"店铺 + 仓库"误判成不可信。
-        """
-        value_matches = [loc for loc in locations if loc.matches_value(value)]
-        if len(value_matches) != 1:
-            return False
-        selected = value_matches[0]
-        for label in selected.matched_labels(normalized_message):
-            owners = sum(label in loc.normalized_labels() for loc in locations)
-            if owners == 1:
-                return True
-        return False
-
-
-def _candidate_matches_value(
-    primary_id: str, labels: tuple[str, ...], value: str
-) -> bool:
-    """候选标识是否被 ``value`` 指向(内部 id 精确匹配或归一化后名称/别名匹配)。"""
-    normalized = normalize_label(value)
-    if not normalized:
-        return False
-    if value.strip() == primary_id:
-        return True
-    return any(normalize_label(label) == normalized for label in labels)
-
-
-def _candidate_matched_labels(
-    labels: tuple[str, ...], normalized_message: str
-) -> frozenset[str]:
-    """归一化消息中实际命中的归一化名称/别名。"""
-    return frozenset(
-        label
-        for label in (normalize_label(item) for item in labels)
-        if label and label in normalized_message
-    )
-
-
-def _candidate_normalized_labels(labels: tuple[str, ...]) -> frozenset[str]:
-    """候选非空的归一化名称/别名集合。"""
-    return frozenset(
-        label for label in (normalize_label(item) for item in labels) if label
-    )
-
 
 def _trimmed_str(value: Any) -> str | None:
     """非空白字符串 → trim 后的值;其余(缺失/非字符串)→ ``None``。"""
@@ -395,27 +240,14 @@ def _trimmed_str(value: Any) -> str | None:
     return None
 
 
-def _candidate_by_value(
-    value: str, stores: Sequence[StoreCandidate]
-) -> StoreCandidate | None:
-    """``value`` 唯一指向的店铺;零匹配或多匹配都返回 ``None``(不猜歧义)。"""
-    matches = [store for store in stores if store.matches_value(value)]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _location_by_value(
-    value: str, locations: Sequence[LocationCandidate]
-) -> LocationCandidate | None:
-    """``value`` 唯一指向的位置;零匹配或多匹配都返回 ``None``(不猜歧义)。"""
-    matches = [loc for loc in locations if loc.matches_value(value)]
-    return matches[0] if len(matches) == 1 else None
+def _in_candidates(store_id: str, stores: Sequence[StoreCandidate]) -> bool:
+    return any(store.store_id == store_id for store in stores)
 
 
 __all__ = [
     "TRUSTED_TRUST_LEVELS",
     "ArgumentTrustLevel",
     "EvidenceResolver",
-    "LocationCandidate",
     "ProvenanceOutcome",
     "StoreCandidate",
 ]

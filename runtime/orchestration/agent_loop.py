@@ -737,13 +737,6 @@ class AgentLoop:
         response_schema = (
             dict(requirement.response_schema) if requirement is not None else {}
         )
-        # 服务端候选项随 Request 持久化:Workbench/API 直接读取,不再各自重算;
-        # 未提供候选项(如纯 Schema 缺失)时保持 None。
-        options = (
-            dict(requirement.options)
-            if requirement is not None and requirement.options
-            else None
-        )
         await self._inputs_for(run).create(
             session_id=run.session_id,
             run_id=run.id,
@@ -752,7 +745,6 @@ class AgentLoop:
             response_schema=response_schema,
             expires_at=self._clock() + self._input_request_ttl,
             tool_call_id=call.id,
-            options=options,
         )
         await self._mark_tool_call(call, ToolCallStatus.WAITING_INPUT)
         await self._run_service.transition_run(
@@ -796,8 +788,6 @@ class AgentLoop:
             expires_at=self._clock() + self._confirmation_ttl,
             operation_id=operation_id,
             tool_schema_version=pin.version,
-            # 策略修订号进确认指纹:规则更新后旧确认不再匹配,必须重新确认。
-            policy_version=spec.policy_version if spec is not None else None,
         )
         await self._mark_tool_call(call, ToolCallStatus.WAITING_CONFIRMATION)
         await self._run_service.transition_run(

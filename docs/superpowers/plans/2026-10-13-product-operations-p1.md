@@ -20,43 +20,6 @@
 - 不实现第二个真实平台、动态 `CapabilityRouter`、Workflow Engine 或 Multi-Agent。
 - 以下命令默认在 `C:\Users\L3553\Desktop\agent-runtime` 执行。
 
-## 剩余阶段连续执行协议（2026-10-14）
-
-本轮从提交 `a689765` 开始，只执行 **Task 8.2 与 Task 9–14**。Task 1–8.1
-均视为已完成历史，不重新实现、不改写既有提交。执行者必须使用
-`superpowers:executing-plans` 连续完成剩余任务，不在 Task、Step 或批次之间等待
-人工签收；只有下列情况才允许暂停并请求用户决策：
-
-1. 需要改变已批准的模块化单体边界、Runtime/业务边界或 ADR-001 Skill 目标模型；
-2. 需要删除历史 `AgentVersion` / `SkillVersion` / `ToolVersion`、执行破坏性迁移，
-   或覆盖用户未提交改动；
-3. 真实模型评测缺少外部凭据或 Provider 不可用。此类外部阻塞不得伪装成代码失败，
-   也不得阻止确定性代码、测试和文档完成。
-
-连续执行规则：
-
-- 严格按 `Task 8.2 → 9 → 10 → 11 → 12 → 13 → 14` 顺序执行；后续任务可以
-  消费前序任务公开契约，不得绕过前序任务临时复制实现。
-- 每个 Task 仍遵循 TDD：新增测试先证明旧实现失败，再写最小实现；如果测试在旧实现
-  上已通过，必须重写测试，使它能够锁定本任务真正新增的不变量。
-- 每个 Task 完成后运行该 Task 的聚焦门禁并单独提交，然后直接进入下一 Task；不推送、
-  不创建 PR，不把 `.workbuddy/`、`docs/审计/`、`reports/` 等既有未跟踪目录纳入提交。
-- 发现局部实现偏差时，执行者可在不改变架构口径的前提下自行修正，并把“计划偏差、
-  原因、验证证据”记入最终报告；不得为了赶进度降低 fail-closed、权限、幂等、恢复或
-  Workspace 隔离标准。
-- Task 14 之前不得手工修改评测成绩、简历数字或首版报告中的历史结果。真实模型评测
-  只能基于最终冻结的 `EvalCapabilityManifest` 运行，并将新结果写入新的报告文件。
-- 最终只进行一次统一交付：提交列表、最终门禁、真实模型评测状态、计划偏差和剩余风险。
-  中途无需输出长篇阶段报告。
-
-### 连续执行批次
-
-| 批次 | 任务 | 目标 | 批次退出条件 |
-|---|---|---|---|
-| A | Task 8.2–9 | 锁定幂等命名空间并建立 Adapter 契约 | Commerce Adapter 聚焦测试通过 |
-| B | Task 10–12 | 发布 Workspace Policy、新 Agent 版本并收缩组合根 | Composition + Architecture 测试通过 |
-| C | Task 13–14 | 冻结 Eval 能力快照，完成 E2E、安全矩阵与文档 | 全量 pytest、ruff、mypy 通过 |
-
 ## 目标文件结构
 
 ```text
@@ -1437,7 +1400,7 @@ Expected: 960 passed（943 + 17 新增），ruff/mypy 全绿，提交成功。
 - Create: `tests/agents/product_operations/inventory/test_inventory_policy.py`
 - Create: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
 
-- [x] **Step 1: 写位置解析和幂等失败测试**
+- [ ] **Step 1: 写位置解析和幂等失败测试**
 
 ```python
 async def test_missing_location_is_resolved_only_when_one_active_location(service) -> None:
@@ -1460,7 +1423,7 @@ async def test_same_operation_does_not_apply_delta_twice(adapter, command) -> No
     assert await adapter.count_logical_writes(command.operation_id) == 1
 ```
 
-- [x] **Step 2: 定义 Tool 和 Gateway**
+- [ ] **Step 2: 定义 Tool 和 Gateway**
 
 ```python
 STABLE_KEY_GET_INVENTORY_LEVEL = "get_inventory_level"
@@ -1472,7 +1435,7 @@ class InventoryGateway(Protocol):
     async def reconcile_inventory(self, command: ReconcileInventoryCommand) -> ReconcileResult: ...
 ```
 
-- [x] **Step 3: 实现 InventoryPolicy**
+- [ ] **Step 3: 实现 InventoryPolicy**
 
 规则必须覆盖：`delta != 0`、调整后数量非负、位置属于店铺、原因属于受控枚举、资源版本未变化。原因枚举固定为：
 
@@ -1484,15 +1447,15 @@ class InventoryAdjustmentReason(str, enum.Enum):
     RETURN = "RETURN"
 ```
 
-- [x] **Step 4: 实现 prepare/execute 和 expected_state**
+- [ ] **Step 4: 实现 prepare/execute 和 expected_state**
 
 库存 `expected_state` 必须包含 `quantity_before`、`delta`、`expected_quantity_after`、`expected_version`、位置和原因。Adapter 回执丢失后禁止直接重放 `delta`。
 
-- [x] **Step 5: 实现 Mock Adapter 与 Reconciler**
+- [ ] **Step 5: 实现 Mock Adapter 与 Reconciler**
 
 Mock Adapter 按 operation_id 去重，用 CAS 更新数量。Reconciler 同时验证操作记录和预期调整后数量；无法区分并发变化时返回 `UNKNOWN`，不得猜测 `APPLIED`。
 
-- [x] **Step 6: 运行库存测试并提交**
+- [ ] **Step 6: 运行库存测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations/inventory -q
@@ -1501,317 +1464,6 @@ git commit -m "feat: add inventory adjustment capability"
 ```
 
 Expected: PASS，提交成功。
-
-**实现说明(与计划原文的偏差):**
-- `operation_type` 取 `ADJUST_INVENTORY`;新增权限 `product.inventory.write`(与
-  `product.price.write` 对称)。`P1_TOOL_ARGUMENT_FIELDS` 已预置两个 Inventory
-  key 的字段集,未改动。
-- 位置引用解析 `resolve_location_for_store` 放在 `inventory/service.py`(与
-  `pricing/policy.py` 的 `resolve_listing_for_sku` 同构):候选为店铺内 ACTIVE
-  位置,未给出且唯一则自动解析,多位置 → `AmbiguousLocationError`(规范码
-  `AMBIGUOUS_LOCATION`)。
-- 类型化拒绝沿用 Task 6.1 的 `_Rejection`:缺 Listing/位置 → `NOT_FOUND`,歧义
-  店铺/位置 → `AMBIGUOUS_STORE_REFERENCE`/`AMBIGUOUS_LOCATION`,越权 →
-  `RESOURCE_SCOPE_DENIED`,策略拒绝 → `VERSION_CONFLICT` 或
-  `VALIDATION_FAILED + rule_code`(`ZERO_DELTA`/`NEGATIVE_RESULT`/... )。
-- 计划外的小改动:`ProductRepository` 新增 `get_fulfillment_location` 与
-  `get_inventory_level` 两个只读 getter(Mock Adapter 读库存/校验所必需);
-  库存 side 的 reason 码 `INVENTORY_NOT_FOUND` 定义在 `inventory/gateway.py`,
-  不改 `adapters/commerce/protocol.py`。
-- 测试新增 `tests/agents/product_operations/inventory/_support.py`(共享种子/
-  Actor/测试 Gateway)与 `conftest.py`(`inventory_env` 夹具);放在 `_support`
-  而非 conftest 是为了让 mypy 与 pytest 都能按目录解析导入,避免多层
-  `conftest` 同名冲突。
-- **Adapter 就地刷新坑**:`ProductRepository` 的 CAS 走 `populate_existing` /
-  `RETURNING`,会把身份映射中的 `InventoryLevel` 就地刷成写后值,测试必须在
-  调用前捕获 `quantity_before`/`version` 标量,不能事后读 `env.level`。
-- 按计划 Task 11/12 才把能力接入 Product Agent 与组合根,本任务不接线。
-
-
----
-
-### Task 7.1: 收口 P1 写目标来源守卫与库存回查绑定（Task 8 复用前置）
-
-Task 7 门禁全绿（993 passed），但复评发现 2 个 P1，且指向同一类问题：**写目标的
-"来源"从未进入守卫，只证明了"存在且有权"**。Task 8 的上下架操作同样使用
-`store_ref`，继续复制会扩大问题，因此先做一个不回滚既有提交的独立收口。
-
-**缺陷与证据（复评原文）：**
-
-- [P1] **新写 Tool 的业务目标没有进入 Provenance 守卫**：`profiles.py` 仍只守卫
-  `store_id`、`sku`，但 P1 写 Tool 已改用 `store_ref`，库存还增加了 `location_ref`。
-  模型自行补一个已授权的 `store_ref` 可能通过；多仓场景下模型自行补一个合法
-  `location_ref` 会绕过"多位置必须补充输入"。Handler 的授权与解析只能证明"这个
-  店/仓存在且有权操作"，不能证明"这是用户选择的写入目标"。
-- [P1] **库存回查没有验证 Operation 与原资源完全绑定**：`_OperationRecord` 已保存
-  `workspace_id`/`location_id`，但回查只比较 `applied_quantity`，也没有记录
-  `product_id`。同一个 `operation_id` 被错误地拿去回查另一个库存资源时，只要目标
-  数量碰巧相同就可能被判成 `APPLIED`。恢复契约应能抵御装配错误、错路由与脏数据，
-  不能依赖"上游肯定不会传错"。
-
-**Files:**
-- Modify: `agents/product_operations/input/profiles.py`
-- Modify: `agents/product_operations/input/provenance.py`
-- Modify: `agents/product_operations/input/requirements.py`
-- Modify: `adapters/commerce/mock_adapter.py`
-- Modify: `adapters/commerce/protocol.py`（新增 `IDEMPOTENCY_KEY_REUSED` 原因码）
-- Modify: `tests/agents/product_operations/test_argument_provenance.py`
-- Modify: `tests/adapters/commerce/test_mock_adapter.py`
-- Modify: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
-- Create: `tests/agents/product_operations/inventory/test_inventory_write_guard.py`
-
-- [x] **Step 1: 证据引擎识别 `store_ref` / `location_ref`**
-
-`provenance.py` 新增 `LocationCandidate`（`location_id`/`store_id`/`name`/`aliases`），
-`EvidenceResolver.resolve` 增加 `locations` 入参，并复用/新增两个判定：
-
-```python
-field_sources["store_ref"] = self._resolve_store(field="store_ref", ...)  # 只取来源等级
-field_sources["location_ref"] = self._resolve_location(...)               # 缺省不参与判定
-```
-
-`store_ref` 与 `store_id` 同规则（USER_EXPLICIT / USER_CONFIRMED，其余 UNTRUSTED）；
-**`store_ref` 不做规范化改写**——`StoreReferenceResolver` 只接受名称/别名，不接受
-内部 UUID，因此证据引擎只回传来源等级，不回填 `str(store.id)`。
-
-- [x] **Step 2: 只有"模型实际提供"的写目标才要求来源证明**
-
-`requirements.py` 的 `untrusted` 计算拆成两段：`key_fields`（`store_id`/`sku`/
-`target_price`，缺失即要求补充，沿用旧契约）与 `provided_provenance`
-（`store_ref`/`location_ref`，**仅在 `field in normalized` 时**参与）。
-
-```python
-provided_provenance = tuple(
-    field for field in fields
-    if field in _P1_PROVENANCE_FIELDS and field in normalized
-)
-```
-
-这样"唯一启用位置由 Service 确定性解析"与"多位置由 Service 要求补充"不被守卫破坏；
-`_build_requirement` 额外给出 `store_ref` 候选项（值为店铺**名称**，可被
-`store_ref` 解析，而非内部 UUID）。
-
-- [x] **Step 3: 守卫字段集合纳入 P1 写目标**
-
-```python
-PROVENANCE_GUARD_FIELDS: Final = ("store_id", "store_ref", "sku", "location_ref")
-```
-
-`ProductPreToolProfileFactory` 已按 `field in self._fields` 过滤，故各 Tool 只守卫
-自身字段集合内的写目标；管线守卫 `_apply_provenance_guard` 本就只对"已提供"
-（`field in arguments`）生效。
-
-- [x] **Step 4: 写 / 回查两条路径都绑定完整资源身份**
-
-`_OperationRecord` 增加 `resource_identity`（规范化资源元组）与 `product_id`：
-
-- **回查路径**：`_reconcile_price` 匹配 `workspace_id + listing_id`，
-  `_reconcile_inventory` 匹配 `workspace_id + location_id + product_id +
-  applied_quantity`；错 Workspace、错资源、数量/价格恰好相同一律 `NOT_APPLIED`
-  （不猜 `APPLIED`）；
-- **写路径**：同一 `operation_id` 被用于**另一个资源**时确定失败
-  （`IDEMPOTENCY_KEY_REUSED`，新增于 `adapters/commerce/protocol.py`，
-  非可重试），不回放旧回执；资源身份一致才按平台幂等契约回放。
-
-判定只看**资源身份**，不看 `expected_version` / `target_price` / `delta` 等会随
-首次写入自然变化的载荷字段——否则同一次重复提交（重读后 `expected_version` 已 +1）
-会被误判成冲突，破坏 safety matrix 的 `duplicate_submit` 契约。首版曾用"整条命令
-指纹"判定，正是因此触发 `duplicate_submit` 红灯，已收窄为资源身份。
-
-- [x] **Step 5: 回归测试与门禁**
-
-- 域证据：`test_argument_provenance.py` 6 例（store_ref 无证据→Input、消息点名→
-  USER_EXPLICIT、回答→USER_CONFIRMED、location_ref 无证据→Input、点名→
-  USER_EXPLICIT、缺省不要求）；
-- 管线守卫：`test_inventory_write_guard.py` 4 例（守卫字段集合；无证据 store_ref →
-  `REQUIRE_INPUT` 且 Adapter 调用为 0；无证据 location_ref 同理；可信目标放行至
-  `REQUIRE_CONFIRMATION`）；
-- Adapter 回查反例：`test_inventory_recovery.py` 4 例（错位置 / 错商品 / 错 Workspace
-  且数量相同 → `NOT_APPLIED`，同目标对照 → `APPLIED`）与 `test_mock_adapter.py`
-  1 例（错 Listing 且价格相同 → `NOT_APPLIED`）；
-- Adapter 写路径冲突：`test_inventory_recovery.py`
-  `test_reused_operation_id_on_another_location_fails_closed` 与
-  `test_mock_adapter.py` `test_reused_operation_id_on_another_listing_fails_closed`
-  2 例（同 `operation_id` 换资源 → `FAILED` + `IDEMPOTENCY_KEY_REUSED`，逻辑写不增）。
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce -q
-```
-
-Expected: PASS。全量 1010 passed（993 + 17 新增）/ ruff 通过 / mypy 源包 245 files。
-
-
----
-
-### Task 7.2: 拆分幂等资源身份与业务意图，位置证据按店铺作用域匹配，并接通多仓业务输入需求
-
-Task 7.1 门禁全绿，但复评连续两轮指出未收口点，方向正确、不要求回滚既有提交。
-
-第一轮的两处都不是"写错了"，而是**判定粒度太粗**：一个把"同一个资源"当成了
-"同一个业务动作"，另一个把"整个 Workspace 的位置集合"当成了"目标店铺的位置集合"。
-
-第二轮（本轮）指出：Task 7.2 首版新加的"多位置在 PreToolUse 直接要求补充"**没有
-真正接入 Runtime**，并且位置候选会越过授权边界：
-
-- [P1] `resolve()` 生成的 `InputRequirement` 被 `ProductPreToolNormalizer` 与
-  `ProductPreToolProvenanceResolver` 丢弃；`location_ref` 在 Tool Schema 中可选，
-  Schema 阶段不产生诊断，因此真实管线永远不会返回 `REQUIRE_INPUT`。
-- [P1] 即便修通链路，`AgentLoop` 创建持久化 Input Request 时没有传递
-  `requirement.options`，Workbench 看不到位置/店铺候选项。
-- [P1] `store_scope` 来自 Workspace 全量店铺证据，可能指向 Actor 越权店铺，而
-  `_location_options()` 在 Access Control **之前**返回该店铺的位置名称。
-
-**缺陷与证据（第一轮复评原文）：**
-
-- [P1] **幂等冲突只比较资源，没有比较业务意图**：`mock_adapter.py` 的写路径身份是
-  改价 `workspace_id + listing_id`、库存 `workspace_id + location_id + product_id`。
-  于是同一个 `operation_id`：同一 Listing `99 → 199` 仍回放第一次成功；同一库存
-  `delta=5 → delta=10` 仍回放第一次成功；`currency=CNY → USD` 甚至会在币种校验前
-  回放成功；调整原因变化也不产生冲突。复评用当前代码直接验证：
-  `inventory identity equal for delta 5 vs 10: True`、
-  `price identity equal for target 99 vs 199: True`。
-- [P1] **位置 Provenance 没有按已选店铺缩小候选范围**：`provenance.py` 已解析出
-  `store_ref` 对应的规范店铺 ID，却用 `_` 丢弃；随后 `location_ref` 在整个
-  Workspace 的位置集合中匹配。真实多店场景（淘宝旗舰店 → 默认仓；抖音小店 →
-  默认仓）下，用户明确说"淘宝旗舰店默认仓增加 5 件"，仍得到
-  `store_ref = USER_EXPLICIT` / `location_ref = UNTRUSTED`。
-
-**Files:**
-- Modify: `adapters/commerce/mock_adapter.py`
-- Modify: `adapters/commerce/protocol.py`（`IDEMPOTENCY_KEY_REUSED` 文档语义收口）
-- Modify: `agents/product_operations/input/provenance.py`
-- Modify: `agents/product_operations/input/requirements.py`
-- Modify: `agents/product_operations/input/profiles.py`（把用户消息/回答传给输入需求适配器）
-- Modify: `runtime/execution/pretool/pipeline.py`（业务输入检查契约）
-- Modify: `runtime/execution/pretool/decisions.py`（`require_input` 允许无诊断）
-- Modify: `runtime/execution/pretool/profiles.py`（空实现对齐新签名）
-- Modify: `runtime/orchestration/agent_loop.py`（持久化候选项）
-- Modify: `apps/api/routes/sessions.py`（候选项注释与兜底语义收口）
-- Modify: `tests/adapters/commerce/test_mock_adapter.py`
-- Modify: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
-- Modify: `tests/agents/product_operations/inventory/test_inventory_write_guard.py`
-- Modify: `tests/agents/product_operations/test_argument_provenance.py`
-- Add: `tests/agents/product_operations/test_location_requirement_scope.py`（无数据库用例）
-- Modify: `tests/runtime/execution/test_pretool_pipeline.py`
-- Modify: `tests/runtime/execution/test_argument_trust_levels.py`
-- Modify: `tests/runtime/orchestration/test_agent_loop.py`
-
-- [x] **Step 1: 把"同一个资源"与"同一个业务动作"拆成两个正交概念**
-
-`_OperationRecord` 同时保留两个指纹：
-
-```python
-resource_identity  # 回查路径使用:只证明是不是同一个资源
-operation_intent   # 写路径使用:证明是不是同一个业务动作
-```
-
-- **`resource_identity`（回查）**：价格 `workspace_id + listing_id`，库存
-  `workspace_id + location_id + product_id`。`_reconcile_price` /
-  `_reconcile_inventory` 改为直接比对该元组（库存侧再叠加
-  `applied_quantity == expected_quantity_after`），错资源一律 `NOT_APPLIED`。
-- **`operation_intent`（写路径）**：在资源身份之上并入外部引用与目标值，
-  价格再加 `target_price` / `currency`，库存再加 `delta` /
-  `expected_quantity_after` / `reason`。写路径逐项比对：意图不同 → 确定失败
-  `IDEMPOTENCY_KEY_REUSED`，零逻辑写，绝不回放旧成功。
-
-两个指纹都**排除** `expected_version`：它属于"基于哪一次读取"的乐观锁版本，
-重复提交会重读资源而自然 +1，纳入即会把正常重复提交误判成冲突（safety matrix 的
-`duplicate_submit` 契约）。这与 Task 7.1 首版"整条命令指纹"回退的教训一致——区别
-在于**排除的只有乐观锁版本，目标值/增量/币种/原因必须留下**。
-
-- [x] **Step 2: 位置证据按已解析店铺收窄候选**
-
-`EvidenceResolver.resolve` 不再丢弃 `store_ref` 的规范店铺，而是与 `store_id` 一起
-得出 `store_scope`：
-
-```python
-store_scope = store_value if store_value is not None else store_ref_value
-```
-
-`_resolve_location` 先按 `store_scope` 过滤 `LocationCandidate`，再在**目标店铺内**
-做名称/别名唯一性比较。`ProvenanceOutcome` 新增 `store_scope`，供调用方复用。
-作用域缺失（店铺本身不可信）时退回全 Workspace 匹配，跨店铺同名仓仍按歧义处理。
-
-- [x] **Step 3: 多位置时在 PreToolUse 直接要求补充**
-
-`requirements.py` 新增 `_requires_location_choice`：工具声明了 `location_ref`、
-模型未提供该字段、目标店铺已确定且该店铺存在**多个**启用位置时，直接并入
-`untrusted`，在 PreToolUse 阶段产生要求补充 `location_ref` 的 Input Request，
-不再等进入 Handler 后才确定性失败。`requirement_for` 同时给出目标店铺内的
-位置候选项（值为位置名称，可被 `location_ref` 解析）。
-
-- [x] **Step 4: 扩展 PreToolUse 业务输入检查契约（让 Step 3 真正接入 Runtime）**
-
-首版问题不在规则本身，而在**契约**：`resolve()` 产出的 `requirement` 被
-`ProductPreToolNormalizer` 与 `ProductPreToolProvenanceResolver` 丢弃，而
-`ProductPreToolInputRequirementResolver` 只接收 `SchemaDiagnostic`；`location_ref`
-在 Schema 中可选，Schema 阶段不产生诊断，于是业务需求永远到不了管线。选择完整
-方案而不是回退 P2：
-
-- `InputRequirementResolver` 协议放宽为
-  `resolve(*, diagnostic: SchemaDiagnostic | None, arguments)`；`input_requirement`
-  阶段**即使没有诊断也咨询业务层**（`input_normalization` 的规范化参数一并传入）。
-  这样"Schema 可选、却是执行前提"的字段（多位置店铺缺 `location_ref`）才能变成
-  `REQUIRE_INPUT`。
-- `require_input` 的 `schema_diagnostic` 改为可选：无诊断时 `detail.field_paths`
-  取 `InputRequirement.field_paths`；有诊断时保持原语义（仍取诊断字段）。
-- 适配层两条来源：**诊断驱动**沿用原逻辑；**无诊断**时复用域层同一份判定
-  （`ProductInputRequirementResolver.resolve`），不重复实现规则。只有声明了
-  `location_ref` 的工具会在无诊断时触发域层判定，其余 Tool 提前短路，不增加
-  权威读取。
-
-- [x] **Step 5: 持久化候选项，并让位置候选不越过授权边界**
-
-- `AgentLoop._handle_require_input` 把 `requirement.options` 传给
-  `InputService.create(options=...)`（服务已支持，此前**从未传入**，因此店铺/
-  位置候选在 API 与 Workbench 一律为空）；无候选时保持 `NULL`，保留"服务端未给
-  候选"的语义。`apps/api/routes/sessions.py` 的注释与兜底同步收口。
-- 位置候选与"多位置要求补充"都以**授权店铺**为界：新增
-  `_store_in_actor_scope`，`_requires_location_choice` 与 `requirement_for` 的
-  `location_ref` 分支都先校验 `store_scope` 在 Actor 范围内。越权店铺不生成
-  位置候选、也不向用户追问，交由 Access Control 以资源范围确定性拒绝。
-
-- [x] **Step 6: 回归测试与门禁**
-
-- 无数据库用例（`test_location_requirement_scope.py`，新增）：`_requires_location_choice`
-  的授权闸门与其它条件（已提供 `location_ref` / 单位置 / 没有该字段 / 店铺不可信）；
-  `requirement_for` 不为越权店铺产出位置候选；适配层在无诊断时接通业务需求、
-  不涉位置时短路；`require_input` 无诊断时的 `detail.field_paths` 语义。这组用例
-  在 PostgreSQL 未启动时同样可执行；
-- 管线契约（`test_pretool_pipeline.py`）：无 `SchemaDiagnostic` 的业务需求 →
-  `REQUIRE_INPUT`，且 `detail.field_paths` 取自需求本身；`test_argument_trust_levels.py`
-  的替身对齐新签名；
-- 真实管线（`test_inventory_write_guard.py`）：店铺多个启用位置 + 缺省
-  `location_ref` → 真实管线 `REQUIRE_INPUT`（无诊断）且 Adapter 调用为 0；
-  越权店铺 → 不生成位置候选、`RESOURCE_SCOPE_DENIED`；
-- 域证据（`test_argument_provenance.py`）：两店同名"默认仓" + 店铺已明确 →
-  `location_ref` 为 `USER_EXPLICIT`；店铺证据缺失时仍按歧义处理（对照组）；
-  目标店铺多位置且缺省 `location_ref` → `field_paths == ("location_ref",)`
-  且候选项限定在目标店铺内；越权店铺 → 不产生位置需求、候选项不含 `location_ref`；
-- 候选项持久化（`test_agent_loop.py`）：`REQUIRE_INPUT` 的 `options_json` 落库；
-  无候选时落 `NULL`；
-- Adapter 写路径意图冲突：`test_mock_adapter.py` 改目标价 / 换币种 2 例 +
-  `expected_version` 重读仍回放的对照面；`test_inventory_recovery.py` 改增量 /
-  改原因（参数化）→ `FAILED` + `IDEMPOTENCY_KEY_REUSED`，逻辑写不增，并补
-  `expected_version` 重读仍回放的对照面。
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce -q
-```
-
-Expected: PASS。`ruff check .` 通过 / `mypy runtime agents adapters apps eval` 241 files 通过。
-
-实际结果（2026-10-14，PostgreSQL 由 `docker compose up -d postgres` 提供）：
-
-- 聚焦 `tests/agents/product_operations tests/adapters/commerce`：**286 passed**；
-- 全量 `pytest -q`：**1036 passed**；
-- 无数据库子集（新增纯逻辑用例 + 既有管线单元测试）：34 passed，可在 PostgreSQL
-  未启动时独立运行：
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/runtime/execution tests/agents/product_operations/test_location_requirement_scope.py -q
-```
-
 
 ---
 
@@ -1827,26 +1479,27 @@ Expected: PASS。`ruff check .` 通过 / `mypy runtime agents adapters apps eval
 - Modify: `adapters/commerce/mock_adapter.py`
 - Create: `tests/agents/product_operations/listing/test_publication_tools.py`
 - Create: `tests/agents/product_operations/listing/test_publication_recovery.py`
-- Create: `tests/agents/product_operations/listing/publication_support.py`
-- Create: `tests/agents/product_operations/listing/conftest.py`
 
-- [x] **Step 1: 写发布状态幂等失败测试**
+- [ ] **Step 1: 写发布状态幂等失败测试**
 
 ```python
-async def test_publish_already_published_listing_is_successful_noop(env) -> None:
-    handler = env.make_publish_handler()
-    outcome = await handler.prepare(...)
-    result = await handler.execute_prepared(outcome.prepared)
-    assert result.status is WriteStatus.APPLIED
+async def test_publish_already_published_listing_is_successful_noop(service) -> None:
+    result = await service.publish_listing(store_ref="旗舰店", sku="SKU-1")
+    assert result.status == "APPLIED"
     assert result.changed is False
+
+
+async def test_unpublish_does_not_zero_inventory(service, repository, seed) -> None:
+    await service.unpublish_listing(store_ref="旗舰店", sku="SKU-1", reason="MANUAL")
+    inventory = await repository.get_inventory_level(
+        workspace_id=seed.workspace.id,
+        location_id=seed.fulfillment_location.id,
+        product_id=seed.product.id,
+    )
+    assert inventory.available_quantity == 20
 ```
 
-同目标（已发布再发布 / 已取消再取消）是**成功 no-op**，不是错误：`APPLIED`
-+ `changed=False` + **0 逻辑写**。`changed` 是新增在
-`ListingPublicationResult` 上的模型可见信号，让上层能区分"确实改了"和"本来就是
-这个状态"。
-
-- [x] **Step 2: 定义 ListingGateway**
+- [ ] **Step 2: 定义 ListingGateway**
 
 ```python
 class ListingGateway(Protocol):
@@ -1856,40 +1509,15 @@ class ListingGateway(Protocol):
     async def reconcile_listing(self, command: ReconcileListingCommand) -> ReconcileResult: ...
 ```
 
-方向**不进命令**：`publish_listing`/`unpublish_listing` 是两个独立 Port 方法，
-`ChangePublicationCommand` 不含 `target_state` 字段——从结构上杜绝"方法方向与命令
-方向互相矛盾"。
+- [ ] **Step 3: 实现状态规则**
 
-- [x] **Step 3: 实现状态规则**
+允许 `UNPUBLISHED → PUBLISHED`、`PUBLISHED → UNPUBLISHED` 和目标状态相同的幂等 no-op。平台能力缺失返回 `CAPABILITY_UNSUPPORTED`；不得回退为删除商品或库存清零。
 
-```python
-_ALLOWED_TARGETS: Final[dict[ListingStatus, frozenset[ListingStatus]]] = {
-    ListingStatus.PUBLISHED: frozenset({ListingStatus.PUBLISHED, ListingStatus.UNPUBLISHED}),
-    ListingStatus.UNPUBLISHED: frozenset({ListingStatus.PUBLISHED, ListingStatus.UNPUBLISHED}),
-}
-```
+- [ ] **Step 4: 实现 prepare/execute 和 Reconciler**
 
-`ListingPolicy` 规则顺序：能力（缺失 → `CAPABILITY_UNSUPPORTED`）→ reason 合法性
-（`INVALID_REASON`）→ Listing 存在（`LISTING_NOT_FOUND`）→ 状态迁移
-（`INVALID_STATE_TRANSITION`）。取消发布只翻转 `listings.status`，**不删除商品、
-不清零库存**（库存是另一个事实）。`UnpublishReason` 仅 `MANUAL`/`COMPLIANCE`/
-`SEASONAL_END`，刻意不含"缺货"——缺货是库存事实，不是取消发布理由。
+`expected_state` 保存 listing_id、目标发布状态、expected_version 和 reason。Reconciler 读取平台刊登状态并只返回 Runtime 的三态结论。
 
-- [x] **Step 4: 实现 prepare/execute 和 Reconciler**
-
-`PreparedChangePublication` 保存 listing_id、目标发布状态（`TARGET_STATE`）、
-`expected_version` 和 reason；`ChangePublicationHandler` 基类在 `prepare()` 返回
-类型化 `_Rejection`（error_code + rule_code + detail），`execute_prepared()` 只依据
-已 prepared 的命令调 `_call_gateway()`，按 `TARGET_STATE` 分发到对应 Port 方法。
-`PublishListingHandler` / `UnpublishListingHandler` 是 `TARGET_STATE` 不同的两个
-子类，共享 `OPERATION_TYPE = "CHANGE_LISTING_PUBLICATION"`
-（`STABLE_KEY_PUBLISH_LISTING` / `STABLE_KEY_UNPUBLISH_LISTING` 区分工具）。
-
-`build_reconcile_listing_command()` 对缺失字段、错误 `operation_type`、非枚举
-`target_state` 一律 **fail-closed**；`ListingReconciler` 只把平台刊登状态翻译成
-Runtime 三态结论。
-
-- [x] **Step 5: 运行 Listing 测试并提交**
+- [ ] **Step 5: 运行 Listing 测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations/listing -q
@@ -1898,243 +1526,6 @@ git commit -m "feat: add listing publication capability"
 ```
 
 Expected: PASS，提交成功。
-
----
-
-**实际实现补充（2026-10-14）：**
-
-- **幂等三件套与 Task 7.2 对齐**：价格写入的 `_price_resource_identity` 提升为共享的
-  `_listing_resource_identity(workspace_id, listing_id)`——价格与发布都作用于同一个
-  Listing。`operation_intent` 走写路径，`resource_identity` 走回查路径。两个能力的
-  指纹**长度相同但取值域不相交**（发布用 `ListingStatus` 名，价格用三位币种），因此
-  跨能力复用同一个 `operation_id` 永远是冲突，不会误回放。
-- **Mock Adapter**：`_OperationRecord` 增加 `applied_publication`；
-  `_apply_publication` 在 `listing.status is target_state` 时直接返回
-  `APPLIED + changed=False + 0 逻辑写`（不 bump 版本）；`_reconcile_listing` 对
-  `resource_identity` 不符或 `applied_publication != command.expected_state.value`
-  fail-closed。
-- **测试模块命名坑**：pytest `prepend` 导入模式下同目录下的两个测试包不能共用
-  `_support.py` 这个 basename（按 basename 缓存模块会 ImportError）。listing 的共享
-  夹具改名为 `publication_support.py`（并在 docstring 里记录原因）。
-- **门禁结果（PostgreSQL 由 `docker compose up -d postgres` 提供，容器 healthy）**：
-  - 聚焦 `tests/agents/product_operations/listing`：**51 passed**；
-  - 聚焦 `tests/agents/product_operations tests/adapters/commerce`：**328 passed**；
-  - 全量 `pytest -q`：**1078 passed**（较 Task 7.2 的 1036 增加 42）；
-  - `ruff check .`：通过；
-  - `mypy runtime agents adapters apps eval`：244 files，通过；
-  - `mypy tests/agents/product_operations/listing`：通过。
-- **说明**：`ruff format --check` 全仓 234 个文件"would be reformatted"是既有的、
-  未被门禁的基线，本轮未纳入；行内换行风格与相邻 inventory/pricing 测试保持一致。
-
----
-
-### Task 8.1: 回查绑定持久化 Workspace + 幂等指纹显式能力前缀
-
-Task 8 复核提出 1 个 P1、1 个 P2，均与"安全依赖隐含条件"有关，先补收口再进入 Task 9。
-
-**Files:**
-- Modify: `agents/product_operations/shared/reconciliation.py`
-- Modify: `agents/product_operations/pricing/reconciliation.py`
-- Modify: `agents/product_operations/inventory/reconciliation.py`
-- Modify: `agents/product_operations/listing/reconciliation.py`
-- Modify: `adapters/commerce/mock_adapter.py`
-- Modify: `tests/agents/product_operations/test_shared_contracts.py`
-- Modify: `tests/agents/product_operations/pricing/test_price_reconciliation.py`
-- Modify: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
-- Modify: `tests/agents/product_operations/listing/test_publication_recovery.py`
-- Modify: `tests/adapters/commerce/test_mock_adapter.py`
-
-- [x] **Step 1（P1）: 回查命令必须绑定持久化 Workspace**
-
-三个 `build_reconcile_*_command` 原先把 `expected_state["workspace_id"]` 列入必需字段，
-却在构造命令时**直接采用调用方传入的 `workspace_id`**——持久化 Workspace 被忽略。
-错误装配或跨 Workspace 脏数据因此会带进平台回查，而不是 fail closed。
-
-收口到 `shared/reconciliation.py` 的单一辅助函数：
-
-```python
-def resolve_persisted_workspace_id(
-    expected_state: Mapping[str, Any], *, current_workspace_id: uuid.UUID
-) -> uuid.UUID:
-    # 缺失 / 无法解析 / 与 current_workspace_id 不一致 → VALIDATION_FAILED
-```
-
-三个 Reconciler 一律先解析持久化 `workspace_id`，与当前 Workspace 不一致即
-`VALIDATION_FAILED`，命中后命令携带**已校验的**持久化身份。错误装配与跨 Workspace
-脏数据一律 fail closed，不再"用当前 Workspace 覆盖持久预期"。
-
-- [x] **P1 反例（修复前构造成功，修复后拒绝）**
-
-```python
-def test_build_reconcile_*_command_rejects_workspace_mismatch() -> None:
-    expected_state = _expected_state()          # workspace_id = A
-    with pytest.raises(ProductOperationError) as exc:
-        build_reconcile_*_command(..., workspace_id=uuid.uuid4())   # 传 B
-    assert exc.value.code == VALIDATION_FAILED
-```
-
-同一反例在 Pricing / Inventory / Listing 三个能力各锁定一条；`shared` 层另有
-匹配 / 不一致 / 缺失 / 不可解析四个分支的直测。
-
-- [x] **Step 2（P2）: 幂等指纹加入显式能力前缀**
-
-`operation_intent` 原先**没有显式能力标识**。改价与刊登同作用于一个 Listing，指纹
-中段同形（`external_store_ref`、`external_product_ref`），跨能力碰撞之所以不发生，
-只是因为后续字段取值域恰好不相交（`target_price`↔`target_state`、`currency`↔`reason`）——
-这是类型取值带来的偶然安全，不是明确契约；计划文档此前写的"`ListingStatus` 与三位
-币种比较"也不准确。
-
-现在三个指纹首元素是本能力的受控 `operation_type`（与 agents 的 `OPERATION_TYPE`
-常量同源，避免漂移）：
-
-```python
-_PRICE        = "SET_LISTING_PRICE"
-_INVENTORY    = "ADJUST_INVENTORY"
-_PUBLICATION  = "CHANGE_LISTING_PUBLICATION"
-```
-
-跨能力复用同一 `operation_id` 因此在**结构上**即冲突，与后续字段的取值域、
-元组长度都无关。
-
-- [x] **P2 回归测试（同一 Listing、同一 operation_id，先改价再改发布）**
-
-```python
-async def test_reused_operation_id_across_capabilities_price_then_publication(...):
-    await adapter.set_price(gateway_price_command(listing, operation_id=op))   # APPLIED
-    conflict = await adapter.unpublish_listing(gateway_publication_command(...))  # 同 op
-    assert conflict.status is WriteStatus.FAILED
-    assert conflict.reason_code == REASON_IDEMPOTENCY_CONFLICT
-    assert await adapter.count_logical_writes(op) == 1
-    assert (await adapter.get_listing(publication_query(listing))).publication_state \
-        is ListingStatus.PUBLISHED
-```
-
-反向（先取消发布再改价）同样锁定，并断言价格未被改动。
-
-- [x] **Step 3: 门禁**
-
-- 聚焦 `tests/agents/product_operations tests/adapters/commerce`：**337 passed**；
-- 全量 `pytest -q`：**1087 passed**（较 Task 8 的 1078 增加 9）；
-- `ruff check .`：通过；
-- `mypy runtime agents adapters apps eval`：244 files，通过；
-- 改动测试文件 mypy：通过（`tests/adapters/commerce` 单独运行仅剩 2 条既有的
-  `no-untyped-def`，位于本轮未触碰的 `test_rest_adapter.py`/`test_pricing_gateway.py`）。
-- **既有测试修正**：`test_build_reconcile_listing_command_rejects_unknown_target_state`
-  原本传入随机 `workspace_id`，P1 收口后会在"Workspace 不一致"处提前命中而掩盖
-  目标状态解析分支；已改为传入匹配的 `workspace_id`，使其继续校验枚举解析。
-
----
-
-### Task 8.2: 用结构断言锁定幂等能力命名空间
-
-Task 8.1 新增的两条跨能力行为测试在旧实现上也会通过：旧价格指纹与刊登指纹虽然
-没有能力前缀，但后续字段取值不同，仍然会被判为冲突。因此它们只能验证“当前发生
-冲突”，不能证明“冲突由显式能力命名空间保证”。本任务只补测试证明力，不修改生产
-实现。
-
-**Files:**
-- Modify: `tests/adapters/commerce/test_mock_adapter.py`
-
-- [x] **Step 1: 写能够杀死旧实现的结构测试**
-
-显式导入三个 intent 构造函数和对应 `OPERATION_TYPE`，基于测试命令断言首元素
-（`product_seed` 是 async fixture，用例必须写成 `async def`）：
-
-```python
-from adapters.commerce.mock_adapter import (
-    _inventory_operation_intent,
-    _price_operation_intent,
-    _publication_operation_intent,
-)
-from agents.product_operations.inventory.service import (
-    OPERATION_TYPE as INVENTORY_OPERATION_TYPE,
-)
-from agents.product_operations.listing.service import (
-    OPERATION_TYPE as LISTING_OPERATION_TYPE,
-)
-from agents.product_operations.pricing.service import (
-    OPERATION_TYPE as PRICING_OPERATION_TYPE,
-)
-
-
-async def test_operation_intents_are_explicitly_namespaced_by_capability(
-    product_seed: ProductOperationsSeed,
-) -> None:
-    listing = product_seed.listing
-    price_intent = _price_operation_intent(
-        gateway_price_command(listing, operation_id="op-price")
-    )
-    publication_intent = _publication_operation_intent(
-        gateway_publication_command(listing, operation_id="op-listing"),
-        ListingStatus.UNPUBLISHED,
-    )
-    inventory_intent = _inventory_operation_intent(
-        AdjustInventoryCommand(
-            operation_id="op-inventory",
-            idempotency_key="adjust_inventory_quantity:op-inventory",
-            workspace_id=product_seed.workspace.id,
-            store_id=product_seed.store.id,
-            location_id=product_seed.fulfillment_location.id,
-            product_id=product_seed.product.id,
-            external_store_ref=product_seed.store.external_store_ref,
-            external_location_ref=(
-                product_seed.fulfillment_location.external_location_ref
-            ),
-            external_product_ref=product_seed.listing.external_product_ref,
-            sku=product_seed.product.sku,
-            delta=1,
-            reason="MANUAL",
-            expected_version=product_seed.inventory_level.version,
-            quantity_before=product_seed.inventory_level.available_quantity,
-        )
-    )
-
-    assert price_intent[0] == PRICING_OPERATION_TYPE
-    assert inventory_intent[0] == INVENTORY_OPERATION_TYPE
-    assert publication_intent[0] == LISTING_OPERATION_TYPE
-    assert len({price_intent[0], inventory_intent[0], publication_intent[0]}) == 3
-```
-
-- [x] **Step 2: 证明测试能识别旧实现**
-
-使用 `git show f1e3427:adapters/commerce/mock_adapter.py` 读取旧函数，或在临时检验中移除
-三个前缀；上述测试必须因首元素是 `workspace_id` 而失败。不得把“旧行为最终也返回
-冲突”当作 RED 证据。
-
-**实际 RED 证据**：临时删除三个指纹的首元素行后运行
-`pytest -k "namespaced or across_capabilities"` →
-
-```
-FAILED ...::test_operation_intents_are_explicitly_namespaced_by_capability
-E  assert '8455bff1-54cb-4bd9-b316-ef654a99e75b' == 'SET_LISTING_PRICE'
-1 failed, 2 passed, 20 deselected
-```
-
-失败点是首元素为 `workspace_id`（UUID），而**两条跨能力行为测试在旧实现上仍然通过**
-（`2 passed`）——正是本任务要解决的问题：行为测试只能证明“当前发生冲突”，不能证明
-“冲突由显式能力命名空间保证”。随后 `git checkout -- adapters/commerce/mock_adapter.py`
-恢复生产实现。
-
-- [x] **Step 3: 恢复当前实现并运行聚焦测试**
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/adapters/commerce/test_mock_adapter.py -q
-.venv\Scripts\python.exe -m ruff check tests/adapters/commerce/test_mock_adapter.py
-```
-
-Expected: 两条命令均通过。
-
-**实际结果**：PASS。`23 passed in 2.58s`（旧 22 + 新增 1）；`ruff check` 通过；
-`mypy tests/adapters/commerce/test_mock_adapter.py`（带 `MYPYPATH=tests`）成功。
-
-- [x] **Step 4: 提交**
-
-```powershell
-git add tests/adapters/commerce/test_mock_adapter.py
-git commit -m "test: lock idempotency capability namespaces"
-```
-
-**实际结果**：已提交（见下方 Task 8.2 提交说明）。
 
 ---
 
@@ -2147,29 +1538,11 @@ git commit -m "test: lock idempotency capability namespaces"
 - Modify: `adapters/commerce/rest_adapter.py`
 - Modify: `adapters/commerce/__init__.py`
 
-- [x] **Step 1: 提取共享契约测试**
+- [ ] **Step 1: 提取共享契约测试**
 
 `contracts.py` 提供三个可复用协程：`assert_price_gateway_contract`、`assert_inventory_gateway_contract`、`assert_listing_gateway_contract`。每个协程接收 Gateway 和对应 Fixture，并顺序执行成功写入、旧版本冲突、同 `operation_id` 重复提交、写后丢响应、按该 `operation_id` 回查五个断言；每一步都断言最终资源状态和逻辑写次数。
 
-**实际实现**：契约参数化为 `PriceContractEnv` / `InventoryContractEnv` /
-`ListingContractEnv`（frozen dataclass）。它们把"命令怎么构造、权威状态怎么读、
-逻辑写怎么数、响应怎么丢"全部留给测试侧，因此契约本身不 import 任何具体 Adapter。
-三个协程共用同一套五步顺序，每步同时断言**回执**、**平台权威状态**与**逻辑写次数**。
-
-两处与原始描述不同的实现决定（均为让契约本身站得住）：
-
-1. **写前基线改为显式读取**：版本（以及库存的 `quantity_before`）不再由 Fixture 硬编码，
-   而由协程开头的一次 `read_state()` 确定，再据以推导后续版本断言。硬编码版本会让
-   "上一套契约推进了版本"悄悄污染下一套的基线。
-2. **重复提交必须是同一条已冻结命令**：库存的业务意图指纹包含
-   `expected_quantity_after`（由写前 `quantity_before` 推导），所以"重读后再提交"会
-   改变意图、被判 `IDEMPOTENCY_KEY_REUSED`。协程改为重放**同一条**命令，与两阶段
-   协议"重试 `execute_prepared`"的真实链路一致。
-3. 刊登契约的两个方向**交替**使用（初始状态 → 另一侧 → 回到初始状态）：同目标写入是
-   幂等 no-op 且不推进版本，只有真正的状态迁移才能被"版本 +1 / 零逻辑写"观察到。
-   步骤 2 的冲突方向必须回到初始状态，否则会先撞上"同目标 no-op"而不是 CAS。
-
-- [x] **Step 2: Mock Adapter 跑三套契约**
+- [ ] **Step 2: Mock Adapter 跑三套契约**
 
 ```python
 async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixture) -> None:
@@ -2178,37 +1551,11 @@ async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixt
     await assert_listing_gateway_contract(mock_adapter, fixture.listing)
 ```
 
-**实际实现**：`test_mock_adapter_satisfies_all_supported_contracts` 用一个 Adapter
-实例依次跑完三套契约，但**每个能力使用独立种子**（`product_seeder.seed()` 各调一次），
-避免上一套契约推进的版本污染下一套的写前基线。
-
-**RED 证据（证明契约有证明力）**：把 `_reconcile_price` 中"记录不存在或未提交"的
-分支临时改成返回 `APPLIED`，契约在第 5 步 `contracts.py:191` 失败
-（`never-seen operation_id` 必须 `NOT_APPLIED`）；恢复实现后通过。
-
-- [x] **Step 3: REST Adapter 明确能力范围**
+- [ ] **Step 3: REST Adapter 明确能力范围**
 
 P1 的 REST Adapter 只声明 `pricing` 能力。库存和 Listing 方法若被误调用，返回结构化 `CAPABILITY_UNSUPPORTED`，不构造猜测性 URL。不要为了契约测试虚构第三方库存或刊登端点。
 
-**实际实现**：`adapters/commerce/rest_adapter.py` 新增
-`CAPABILITIES = frozenset({"pricing"})` 与 `CapabilityUnsupportedError`
-（`LookupError` 家族，`reason_code` 固定为 `CAPABILITY_UNSUPPORTED`），类上声明
-`supported_capabilities`。两类失败通道按 Port 语义分开：
-
-- **读**抛 `CapabilityUnsupportedError`——与 `InventoryUnavailable` /
-  `ListingUnavailable` 同属 `LookupError`，读失败通道不变；
-- **写**返回 `FAILED` + `CAPABILITY_UNSUPPORTED` 回执（零观测）——写路径的确定失败
-  本就以回执承载，且天然"绝不重试"；
-- **回查**返回 `NOT_APPLIED`（能力不支持的写不可能生效），不发起任何请求。
-
-`TYPE_CHECKING` 块追加三个 Port 的结构一致性断言：声明"能力范围"不等于"接口形状
-可以不合"。`adapters/commerce/__init__.py` 导出 `CAPABILITIES` /
-`CapabilityUnsupportedError` / `RestCommerceAdapter`。
-
-测试 `test_unsupported_capabilities_fail_closed_without_network` 用
-`AssertionError` 型 handler 保证九个方法**一次请求都没发出**。
-
-- [x] **Step 4: 运行 Adapter 测试并提交**
+- [ ] **Step 4: 运行 Adapter 测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/adapters/commerce -q
@@ -2218,40 +1565,19 @@ git commit -m "test: add commerce gateway contract suites"
 
 Expected: PASS，提交成功。
 
-**实际结果**：PASS。`tests/adapters/commerce` → `42 passed in 3.58s`
-（旧 41 + 新增 1）；`ruff check .` 通过；`mypy runtime agents adapters apps eval`
-244 files 通过。`mypy tests/adapters/commerce` 仅剩 **2 条既有的** `no-untyped-def`
-（`test_rest_adapter.py:59` 的 `make_adapter(handler, **kwargs)`、
-`test_pricing_gateway.py:152`），均在本任务的改动区域之外，未纳入。
-
 ---
 
 ### Task 10: 将 PricePolicyConfig 接入正式 Workspace 配置
 
 **Files:**
 - Create: `agents/product_operations/pricing/configuration.py`
-- Modify: `agents/product_operations/pricing/policy.py`
-- Modify: `agents/product_operations/pricing/service.py`
-- Modify: `agents/product_operations/policy/models.py`
-- Modify: `agents/product_operations/policy/price_pretool.py`
 - Modify: `composition/provisioning/product_operations.py`
 - Modify: `composition/product_operations.py`
 - Modify: `runtime/capabilities/run_factory.py`
-- Modify: `runtime/persistence/repositories/run_snapshots.py`
-- Modify: `runtime/execution/pretool/decisions.py`
-- Modify: `runtime/execution/pretool/pipeline.py`
-- Modify: `runtime/orchestration/agent_loop.py`
-- Modify: `apps/worker/e2e.py`
-- Modify: `eval/fixtures.py`
-- Modify: `tests/agents/product_operations/conftest.py`
 - Create: `tests/agents/product_operations/pricing/test_configuration.py`
 - Modify: `tests/composition/test_product_operations_provisioning.py`
-- Modify: `tests/runtime/capabilities/conftest.py`
-- Modify: `tests/runtime/capabilities/test_assembly.py`
-- Modify: `tests/runtime/execution/test_pretool_pipeline.py`
-- Modify: `tests/runtime/orchestration/test_agent_loop.py`
 
-- [x] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
+- [ ] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
 
 ```python
 async def test_build_rejects_missing_published_pricing_policy(
@@ -2268,131 +1594,39 @@ async def test_build_rejects_missing_published_pricing_policy(
         )
 ```
 
-- [x] **Step 2: 实现价格策略发布和加载**
+- [ ] **Step 2: 实现价格策略发布和加载**
 
-stable key 固定为 `product-pricing`。Provisioner 接收显式 `PricePolicyConfig`，把
-Decimal 规范化成字符串后发布到已有 `BusinessPolicy` / `BusinessPolicyVersion`；相同
-规范化配置幂等复用已发布版本，配置变化才递增版本。`ProductOperationsCapabilities`
-在本任务新增 `pricing_policy_version_id` 与 `pricing_policy_config_hash`，不得等到
-Task 11 才临时补字段。
+stable key 固定为 `product-pricing`。Provisioner 接收显式 `PricePolicyConfig`，发布到已有 `BusinessPolicy`/`BusinessPolicyVersion`，并把精确 `business_policy_version_id` 放入能力快照。
 
 ```python
 @dataclass(frozen=True)
 class PublishedPricingPolicy:
     version_id: UUID
-    version: int
     config: PricePolicyConfig
     config_hash: str
 ```
 
-`load_published_pricing_policy()` 必须同时校验 Workspace、stable key、
-`PUBLISHED` 状态、`config_hash` 与 Pydantic 配置形状；任一不一致都以
-`PRICING_POLICY_NOT_PUBLISHED` / `PRICING_POLICY_CONFIG_INVALID` fail closed。
+- [ ] **Step 3: Run 固定 PolicySnapshot**
 
-- [x] **Step 3: Run 固定 PolicySnapshot**
+创建 Run 时把 P1 已解析的价格策略版本写入 `RunPolicySnapshot`。执行仍读取当前权限和资源状态，但确认指纹与 Operation 记录已验证的 policy version/hash。
 
-补齐当前存在但尚未接线的 `RunPolicySnapshot` 持久化能力：
+- [ ] **Step 4: 删除正式装配路径中的 `price_config` 常量注入**
 
-- `RunSnapshotRepository.replace()` 接收通用的 policy pins，并与 Tool/Skill/Source
-  快照在同一事务整体替换；增加按 `run_id` 读取 policy snapshot 的方法；
-- `RunFactory` 接收 Runtime 通用值对象 `PolicySnapshotPin(policy_key,
-  version_id, config_hash)`，不得 import 商品模块；
-- `ProductApplication.start()` 把已加载的 `product-pricing` 精确版本与 hash 传入
-  `RunFactory`；
-- `tests/runtime/capabilities/test_assembly.py` 直接查询 `RunPolicySnapshot`，证明
-  Run 创建后行已落库、重复 replace 不增行、其它 Run/Workspace 不受影响。
+测试/Eval 可以通过显式 Provisioner fixture 创建策略版本；正式 `build_product_application` 只消费已发布快照。
 
-本任务**不新建迁移**：`run_policy_snapshots`、复合外键和
-`business_policy_versions` 已存在；如果实现者发现模型与数据库不一致，应先验证现有
-Alembic 历史，禁止再建同义表。
-
-- [x] **Step 4: 把策略修订绑定到确认与写前状态**
-
-`RunPolicySnapshot` 只解决审计，不会自动进入确认指纹。为避免“策略更新后仍接受旧确认”：
-
-- Runtime `PolicyDecision` 新增可选的通用 `policy_revision: int | None`，
-  `PreToolContext` 保留允许决策的 revision，`ConfirmationSpec.policy_version` 使用该值；
-- `AgentLoop._handle_require_confirmation()` 把 `ConfirmationSpec.policy_version` 传入
-  `ConfirmationService.create()`；验收必须证明 revision 变化后旧确认失效；
-- Pricing 的 `PublishedPricingPolicy` 同时注入 PreTool policy 与执行 Handler；
-  `PreparedSetPrice.expected_state()` 记录 `policy_version_id`、`policy_revision` 和
-  `policy_config_hash`，使 Operation 能解释写前究竟校验了哪份规则；
-- Runtime 只搬运 revision，不理解价格字段或 `product-pricing` stable key。
-
-- [x] **Step 5: 删除正式装配路径中的 `price_config` 常量注入**
-
-测试/Eval/E2E 通过显式 Provisioner 参数创建策略版本；所有现有调用点
-（`tests/agents/product_operations/conftest.py`、`eval/fixtures.py`、
-`apps/worker/e2e.py`）必须把原来的 `PricePolicyConfig` 改传给
-`ProductOperationsProvisioner.provision(..., pricing_policy=...)`。正式
-`build_product_application` 删除 `price_config` 参数，只根据
-`capabilities.pricing_policy_version_id` 读取一次已发布配置，再把同一个
-`PublishedPricingPolicy` 注入 PreTool 与 Handler。不得从 Prompt、环境变量或模块常量
-回退配置。
-
-- [x] **Step 6: 运行配置与 Runtime 快照测试并提交**
+- [ ] **Step 5: 运行配置测试并提交**
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/composition/test_product_operations_provisioning.py tests/runtime/capabilities/test_assembly.py tests/runtime/execution/test_pretool_pipeline.py tests/runtime/orchestration/test_agent_loop.py tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py -q
-git add agents/product_operations/pricing/configuration.py agents/product_operations/pricing/policy.py agents/product_operations/pricing/service.py agents/product_operations/policy/models.py agents/product_operations/policy/price_pretool.py composition/provisioning/product_operations.py composition/product_operations.py runtime/capabilities/run_factory.py runtime/persistence/repositories/run_snapshots.py runtime/execution/pretool/decisions.py runtime/execution/pretool/pipeline.py runtime/orchestration/agent_loop.py apps/worker/e2e.py eval/fixtures.py tests/agents/product_operations/conftest.py tests/agents/product_operations/pricing/test_configuration.py tests/composition/test_product_operations_provisioning.py tests/runtime/capabilities/conftest.py tests/runtime/capabilities/test_assembly.py tests/runtime/execution/test_pretool_pipeline.py tests/runtime/orchestration/test_agent_loop.py
+.venv\Scripts\python.exe -m pytest tests/agents/product_operations/pricing/test_configuration.py tests/composition/test_product_operations_provisioning.py -q
+git add agents/product_operations/pricing/configuration.py composition/provisioning/product_operations.py composition/product_operations.py runtime/capabilities/run_factory.py tests/agents/product_operations/pricing/test_configuration.py tests/composition/test_product_operations_provisioning.py
 git commit -m "feat: publish workspace pricing policy configuration"
 ```
 
-Expected: PASS；装配缺少/错 Workspace/非发布/坏 hash 的策略均失败闭合；Run 的
-PolicySnapshot 可查询；旧确认在策略 revision 变化后不可复用；提交成功。
-
-**实际实现**（与计划的差异均已记录）：
-
-1. **发布载荷修复了一个真实缺陷**：`PricePolicyConfig` 不做 Decimal 尺度归一，
-   `Decimal("50.00") == Decimal("50.000")` 为真但 `str()` 不同——直接落库会让
-   "数值相同的配置"算出不同 hash，幂等发布失效。`canonical_pricing_policy_payload`
-   经 `_canonical_decimal_text`（`normalize()` + 定点格式）渲染成尺度无关文本。
-   RED 证据：把归一化临时退回 `str(value)`，`test_configuration.py` 的尺度无关
-   断言变红；恢复后通过。
-2. **policy revision 进确认指纹**：`ConfirmationService.verify()` 把调用方传入的
-   **当前** revision 与存储指纹重算比对（`_Unset` 哨兵区分"未提供"与"显式 None"），
-   revision 变化即 `CONFIRMATION_STALE`；`AcceptedConfirmationLookup` 协议与组合根
-   实现同步扩展 `policy_version` 参数；`PreToolContext` 保留允许决策的 revision 供
-   确认阶段复用。RED 证据：临时让 verify 忽略当前 revision，新增漂移测试变红。
-3. **测试改动**：`tests/runtime/orchestration/test_agent_loop.py`、
-   `agents/product_operations/pricing/policy.py`、`policy/models.py` 无需改动
-   （revision 经既有 `ConfirmationSpec` 透传，`PricePolicyConfig` 本身不动）；
-   新增 `tests/agents/product_operations/pricing/test_configuration.py`、
-   `test_assembly.py` 的 `test_run_pins_published_policy_versions`、组合层 6 个
-   策略发布/加载用例，以及管线层 revision 透传用例。
-4. **修复合并运行的跨套件污染**：组合层 provisioning 会提交全局能力目录行
-   （`agents.stable_key` 全局唯一）且不回收，capabilities 套件随后种子同名行即撞
-   `uq_agents_stable_key`。`tests/runtime/capabilities/conftest.py` 的
-   `capability_catalog` 改为插入前先删同名残留（agent/skill/tool 及其版本行），
-   删除在本 Session 事务内、随 rollback 还原。RED 证据：修复前三测试在合并运行
-   ERROR（`UniqueViolationError`），修复后同组合全绿。
-5. `.gitignore` 补 `.workbuddy/`、`docs/审计/`、`reports/`（协议规定永不入库，
-   此前未 ignore 导致 ruff 扫到备份目录）。
-
-**实际结果**：Task 10 门禁
-`tests/agents/product_operations + tests/composition/test_product_operations_provisioning.py
-+ tests/runtime/capabilities/test_assembly.py + tests/runtime/execution/test_pretool_pipeline.py
-+ tests/runtime/orchestration/test_agent_loop.py + tests/runtime/interaction
-+ tests/apps/api/test_e2e_product_flow.py + tests/apps/worker/test_worker_lifecycle.py`
-→ **423 passed**；`ruff check .` 通过；`mypy runtime agents adapters apps eval
-composition` → **249 source files 零错误**。
-
-> 执行中断说明：Task 10 门禁通过前本机 `.git` 曾因误删进入回收站而损坏
-> （packfile + refs 丢失）。已从回收站恢复全部对象（SHA1 逐一校验），两条中断的
-> 提交链用 `git replace --graft` 重新接通（`62aa521`→`f1e3427`、`b491561`→`564b458`，
-> 完全可逆）；3 个 tip 期被改文件的 blob 中 2 个按编辑记录逐字节重建并通过 SHA
-> 校验，`tests/agents/product_operations/conftest.py` 的 tip 版 blob 无法唯一复原
-> （不影响任何后续提交与新树，reflog 已归档至 `.workbuddy/backup-20261014/`）。
-> 另：门禁期间 Postgres 容器未随会话恢复，已重启并等待 healthy 后重跑。
+Expected: PASS，提交成功。
 
 ---
 
 ### Task 11: 发布 ProductOperations Agent 与兼容版本
-
-执行本任务前必须完整阅读
-`docs/架构/ADR-001-Skill能力模型.md`。本任务只发布与新 Tool 集合匹配的兼容
-`SkillVersion`，不得把 ADR 中尚未实施的目标设计描述为当前事实，也不得删除
-`required_skill_keys`、强制迁移 Skill 加载模型或修改已经固化的简历正文。
 
 **Files:**
 - Modify: `agents/product_operations/agent.py`
@@ -2487,7 +1721,6 @@ class ProductOperationsCapabilities:
     compatibility_tool_version_ids: Mapping[str, tuple[UUID, ...]]
     model_config_version_id: UUID
     pricing_policy_version_id: UUID
-    pricing_policy_config_hash: str
 ```
 
 Workspace 新绑定切换到 `product-operations`；旧版本行不删除。
@@ -2569,17 +1802,12 @@ Expected: PASS，提交成功。
 - Create: `eval/capability_manifest.py`
 - Modify: `eval/config.py`
 - Modify: `eval/fixtures.py`
-- Modify: `eval/runner.py`
-- Modify: `eval/schema.py`
 - Modify: `eval/product_suite.py`
 - Modify: `eval/reporting/json_report.py`
 - Modify: `eval/reporting/markdown_report.py`
 - Modify: `eval/datasets/product_operations/*.yaml`
 - Modify: `eval/datasets/product_operations/manifest.json`
-- Modify: `tests/eval/conftest.py`
 - Create: `tests/eval/test_capability_manifest.py`
-- Modify: `tests/eval/test_schema.py`
-- Modify: `tests/eval/test_dataset_partitions.py`
 - Modify: `tests/eval/test_runner_isolation.py`
 - Modify: `tests/eval/test_reporting.py`
 
@@ -2589,90 +1817,38 @@ Expected: PASS，提交成功。
 async def test_eval_manifest_is_frozen_before_cases_run(eval_fixture) -> None:
     manifest = await build_eval_capability_manifest(eval_fixture.capabilities)
     await eval_fixture.publish_new_tool_version("set_listing_price")
-    case = await eval_fixture.create_case_environment(manifest=manifest)
-    assert case.capability_fingerprint == manifest.capability_fingerprint
+    assert await build_case_config(manifest).tool_version_ids == manifest.tool_version_ids
 ```
-
-再加一条反例：隔离环境实际发布的 Tool/Policy hash 与 manifest 不一致时，必须在模型
-调用前返回 `CAPABILITY_MANIFEST_MISMATCH`；不得静默改用“当前最新版”。
 
 - [ ] **Step 2: 定义 EvalCapabilityManifest**
 
-Eval 每个 case/repetition 都创建独立 Workspace，Workspace 级 Model/Policy Version ID
-天然不同；因此 Manifest 冻结的是**逻辑能力身份**（stable key + version + 内容 hash），
-而不是把某个临时 Workspace 的 UUID 错当成跨 case 身份。Run 内仍继续使用真实 Version
-ID 快照，两层语义不能混淆。
-
 ```python
-class CapabilityVersionRef(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    stable_key: str
-    version: int
-    content_hash: str
-
-
 class EvalCapabilityManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str
-    agent: CapabilityVersionRef
+    agent_version_id: UUID
     prompt_version: str
-    skills: dict[str, CapabilityVersionRef]
-    tools: dict[str, CapabilityVersionRef]
-    model_snapshot: dict[str, JsonValue]
-    policies: dict[str, CapabilityVersionRef]
-    dataset_hashes: dict[str, str]
+    skill_version_ids: dict[str, UUID]
+    tool_version_ids: dict[str, UUID]
+    model_config_version_id: UUID
+    model_snapshot: str
+    policy_version_ids: dict[str, UUID]
+    dataset_hash: str
     scorer_version: str
-    capability_fingerprint: str
 ```
-
-`content_hash` 对 Tool 使用 schema/implementation 契约 hash，对 Agent/Skill 使用已发布
-内容 hash，对 Policy 使用 `config_hash`。`dataset_hashes` 固定五个分区；
-`capability_fingerprint` 是除自身外全部字段的 canonical JSON SHA-256。
 
 - [ ] **Step 3: 删除 Eval 中复制的能力版本常量**
 
-删除 `_FIXED_AGENT_VERSION`、`_FIXED_PROMPT_VERSION`、`_FIXED_SKILL_VERSIONS`、
-`_FIXED_TOOL_VERSIONS`。`EvalConfig` 只保留 Provider、采样参数、repetitions 与
-scorer version；`eval/schema.py` 的 system/protocol fingerprint 显式接收 Manifest，
-不得继续从 `EvalConfig` 读取一份重复的能力版本。Provider 配置仍只负责模型连接和固定
-采样参数；Manifest 由 Provisioner 返回的已发布行与数据集文件派生。
+删除 `_FIXED_AGENT_VERSION`、`_FIXED_PROMPT_VERSION`、`_FIXED_SKILL_VERSIONS`、`_FIXED_TOOL_VERSIONS`。Provider 配置仍只负责模型连接和固定采样参数；能力版本来自 Provisioner 返回的精确快照。
 
-- [ ] **Step 4: 让隔离环境验证 Manifest，而不是重新选择最新版**
-
-`EvalRunner` 在整轮开始前只接收一个不可变 Manifest，并传给每个
-`IsolatedEnvironment.create()`。每个隔离 Workspace 仍独立发布自己的 Model/Policy
-行，但必须校验 stable key、version、hash 与 Manifest 一致；Agent/Skill/Tool 也按
-Manifest 指定版本解析。任何新版本在评测期间发布，都不能改变已开始的这一轮。
-
-`IsolatedEnvironment.cleanup()` 可以删除 case 自己的 Workspace 级行，但不得让下一
-case 因重新生成 UUID 而改变 Manifest；全局能力的比较以 stable key/version/hash 为准，
-并保持现有数据库隔离与清理能力。
-
-- [ ] **Step 5: 更新数据集 Tool 名称但不更新成绩**
+- [ ] **Step 4: 更新数据集 Tool 名称但不更新成绩**
 
 将用例中的旧 Tool 断言迁移到八个新 stable key；库存和刊登各增加核心正常任务、安全拒绝和恢复案例。更新 dataset hash。不要在本任务生成或手工修改任务完成率。
 
-- [ ] **Step 6: 提供一次生成、五次复用的 Manifest 文件入口**
-
-`eval.capability_manifest` 提供 CLI，把最终发布能力与五个数据集 hash 解析成一个 JSON
-文件；`eval.product_suite` 新增必填 `--capability-manifest`，只读取该文件并在任何模型
-请求前验证 fingerprint 与当前隔离环境。五个 split 不允许各自重新生成 Manifest。
-
-CLI 在临时 Eval Workspace 中调用正式 `ProductOperationsProvisioner`，从已发布数据库行
-读取 version/hash 后生成 Manifest，随后按外键逆序清理该临时 Workspace；不能直接从
-Python 常量拼一份“看起来一致”的 JSON。临时 Workspace/Version UUID 不进入 Manifest。
-
-```powershell
-.venv\Scripts\python.exe -m eval.capability_manifest --output reports/product-operations-p1-manifest.json
-```
-
-Manifest 文件不含 API Key、数据库 URL、内部 Actor/Workspace ID 或临时 Version UUID。
-
-- [ ] **Step 7: 报告写入 Manifest**
+- [ ] **Step 5: 报告写入 Manifest**
 
 JSON 和 Markdown 报告必须记录完整 manifest 与协议指纹，确保两次成绩可以追溯到同一能力快照。
 
-- [ ] **Step 8: 运行 Eval 单元测试并提交**
+- [ ] **Step 6: 运行 Eval 单元测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/eval -q
@@ -2684,7 +1860,7 @@ Expected: PASS，提交成功。
 
 ---
 
-### Task 14: 完成端到端闭环、文档收口、全量验收和真实模型复测
+### Task 14: 完成端到端闭环、文档收口和全量验收
 
 **Files:**
 - Modify: `tests/apps/api/test_e2e_product_flow.py`
@@ -2746,41 +1922,7 @@ Expected: 命中只允许出现在明确标注的 legacy compatibility、历史�
 
 只有全部门禁通过后，才将 ADR-002 状态改为“P0/P1 已实施，P2 待实施”，记录实际提交号、最终测试数量和验证命令。README 只描述已实现能力，不宣称接入真实第三方平台。
 
-- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**
-
-先检查三个环境变量，只允许从当前进程环境读取 Secret，不把 Key 写入仓库、命令历史、
-报告或日志：
-
-```powershell
-if (-not $env:EVAL_API_KEY) { throw "缺少 EVAL_API_KEY" }
-$env:EVAL_BASE_URL = "https://api.deepseek.com"
-$env:EVAL_MODEL = "deepseek-flash"
-```
-
-使用 Task 13 生成并冻结的 `EvalCapabilityManifest` 依次运行五个分区；不得在运行期间
-修改 Prompt、Skill、Tool Schema、数据集或 Scorer：
-
-```powershell
-.venv\Scripts\python.exe -m eval.capability_manifest --output reports/product-operations-p1-manifest.json
-$manifest = "reports/product-operations-p1-manifest.json"
-.venv\Scripts\python.exe -m eval.product_suite --split core --capability-manifest $manifest --output reports/product-operations-p1-core.json
-.venv\Scripts\python.exe -m eval.product_suite --split clarification --capability-manifest $manifest --output reports/product-operations-p1-clarification.json
-.venv\Scripts\python.exe -m eval.product_suite --split regression --capability-manifest $manifest --output reports/product-operations-p1-regression.json
-.venv\Scripts\python.exe -m eval.product_suite --split safety --capability-manifest $manifest --output reports/product-operations-p1-safety.json
-.venv\Scripts\python.exe -m eval.product_suite --split blind --capability-manifest $manifest --output reports/product-operations-p1-blind.json
-```
-
-判定规则：
-
-- Provider 认证、网络或限流失败记为 `INFRASTRUCTURE_ERROR`，保留报告并在最终交付中
-  单列，不计入任务完成率，也不得通过修改用例来“修复”；
-- 产品用例失败保留真实分母和轨迹，禁止手工改分；
-- 新报告使用新文件名，不覆盖 `docs/评测/首版报告.md` 或历史基线；
-- 每份报告的 `capability_fingerprint` 必须与 `$manifest` 完全相同；只有五个分区都
-  基于同一个 Manifest 完成，才允许比较新的任务完成率；安全分区单独报告越权拦截和
-  误拒，不能混进业务任务完成率。
-
-- [ ] **Step 8: 提交验收文档与测试**
+- [ ] **Step 7: 提交验收文档与测试**
 
 ```powershell
 git add tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py tests/agents/product_operations/test_p1_safety_matrix.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md README.md
@@ -2801,14 +1943,9 @@ git commit -m "test: close product operations p1"
   预算耗尽后 ToolCall 落 `FAILED`（实现于 Runtime，Pricing 只做验收）；
 - [ ] `unpublish_listing` 不删除 Product、Listing 或库存；
 - [ ] PricePolicyConfig 来自已发布 Workspace 配置；
-- [ ] Run 创建时持久化 `product-pricing` 的 Version ID 与 config hash，确认指纹绑定
-  Policy revision，Operation.expected_state 可追溯该策略；
-- [ ] Task 8.2 的结构测试能杀死“仅靠字段取值域不相交”的旧幂等实现；
-- [ ] Eval 五个分区使用同一个 `EvalCapabilityManifest.capability_fingerprint`，隔离
-  Workspace 通过 stable key/version/hash 校验真实能力，不伪冻结临时 UUID；
+- [ ] Eval 报告使用冻结的真实能力版本；
 - [ ] Runtime 不导入 `agents.product_operations` 或 `adapters.commerce`；
 - [ ] 组合根不包含领域规则和按 Tool 业务分支；
 - [ ] Skill 只完成兼容版本更新，ADR-001 目标模型仍标记为未实施；
 - [ ] 全量 pytest、ruff、mypy 通过；
-- [ ] P1 完成后重新运行真实模型评测；若缺凭据/Provider 不可用，代码交付仍完成，但
-  最终报告必须明确标记外部阻塞，不得编造或沿用旧成绩。
+- [ ] P1 完成后重新运行真实模型评测，再决定是否更新评测报告。
