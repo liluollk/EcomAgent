@@ -760,9 +760,20 @@ Expected: PASS，提交成功。
 - Modify: `agents/product_operations/domain/models.py`
 - Modify: `agents/product_operations/persistence/models.py`
 - Modify: `agents/product_operations/persistence/repository.py`
+- Modify: `agents/product_operations/tools/search_products.py`
+- Modify: `agents/product_operations/policy/price_policy.py`
 - Modify: `tests/persistence/test_migrations.py`
-- Modify: `tests/agents/product_operations/test_domain_schema.py`
+- Modify: `tests/agents/product_operations/test_domain_schema.py`、
+  `tests/agents/product_operations/test_read_tools.py`、
+  `tests/agents/product_operations/test_price_policy.py`、
+  `tests/agents/product_operations/conftest.py`
 - Modify: `tests/fixtures/product_operations.py`
+- Modify: `tests/apps/api/test_e2e_product_flow.py`（清理顺序）
+- Modify: `eval/fixtures.py`、`eval/recovery_suite.py`、`eval/runtime_suite.py`
+- Modify: `tests/eval/conftest.py`、`tests/eval/test_runner_isolation.py`、
+  `tests/eval/test_scorers.py`
+- Modify: `eval/datasets/product_operations/*.yaml`、
+  `eval/datasets/product_operations/manifest.json`
 
 - [ ] **Step 1: 写 Schema 失败测试**
 
@@ -873,6 +884,50 @@ git add migrations/versions/0004_product_operations_p1.py agents/product_operati
 git commit -m "feat: add inventory levels and listing publication state"
 ```
 
+**实现补充（落地时发现，超出原文件清单）**
+
+`ListingStatus` 从 `ACTIVE/INACTIVE` 迁移为 `PUBLISHED/UNPUBLISHED` 会扩散到所有
+引用该枚举的读写路径与评测数据集，以下一并修改（否则 `pytest` 门禁无法保持绿）：
+
+- `agents/product_operations/tools/search_products.py`、`policy/price_policy.py`：
+  兼容实现里的 `ListingStatus.ACTIVE` 比较改为 `PUBLISHED`（行为不变：已发布
+  Listing 才是可读/可写对象）；legacy 错误码 `LISTING_NOT_ACTIVE` 保留不改，属
+  兼容契约，由 Task 6 的 `pricing/policy.py` 取代；
+- `tests/agents/product_operations/{test_read_tools,test_price_policy,conftest}.py`：
+  断言与清理语句同步；清理顺序补 `inventory_levels`、`fulfillment_locations`
+  （新表对 `products`/`stores` 有外键，原顺序会触发 FK 违约）；
+- `eval/fixtures.py`、`eval/recovery_suite.py`、`eval/runtime_suite.py`、
+  `tests/eval/{conftest,test_runner_isolation,test_scorers}.py`：Listing 状态字面量
+  与默认值改为 `PUBLISHED`；
+- `eval/datasets/product_operations/*.yaml`：100 处 `status: ACTIVE` → `PUBLISHED`，
+  并同步更新 `manifest.json` 的 `core_sha256` / `blind_sha256`（数据集内容变更，
+  冻结摘要必须一致；正式的成绩冻结与数据集改造仍归 Task 13）。
+
+迁移 DDL 的两个必要细节（计划原文未覆盖）：
+
+- `listings.status` 在 0002 由非原生枚举生成 `VARCHAR(8)`，装不下
+  `PUBLISHED`(9)/`UNPUBLISHED`(11)：0004 先扩列到 `VARCHAR(11)` 并把
+  `server_default` 改为 `'PUBLISHED'`，再映射历史值、重建 CHECK；`downgrade()`
+  反向操作。若只改 CHECK 不扩列，`UPDATE` 直接 `StringDataRightTruncation`；
+- 历史映射用显式 `UPDATE ... WHERE status='ACTIVE'`，不静默丢弃（设计 §7）。
+
+**验收条件**
+
+- [x] 迁移 0004 建出 `fulfillment_locations` / `inventory_levels`；
+  `ck_listings_status` 只允许 `PUBLISHED/UNPUBLISHED`（不含旧值）；
+  `ck_inventory_levels_available_quantity` 为 `available_quantity >= 0`
+  （`tests/persistence/test_migrations.py`）；
+- [x] `ListingStatus` 只含 `PUBLISHED/UNPUBLISHED`；`FulfillmentLocation` /
+  `InventoryLevel` 同 Workspace 唯一约束与非负库存 CHECK 生效
+  （`tests/agents/product_operations/test_domain_schema.py`）；
+- [x] `adjust_inventory`：正确 CAS 递增 version；过期版本 / 跨 Workspace /
+  调整后为负三种情形均不命中返回 `None`；
+  `set_listing_publication_state`：CAS 迁移发布状态、过期版本不命中；
+- [x] 种子夹具提供 `fulfillment_location` 与 `inventory_level`
+  （`available_quantity=20`、`version=1`）；
+- [x] 全量门禁：`pytest` 889 passed、`ruff check .` 通过、`mypy runtime agents
+  adapters composition apps eval` 通过（222 files）。
+
 ---
 
 ### Task 5: 迁移 Catalog 与 Listing 查询能力
@@ -886,7 +941,9 @@ git commit -m "feat: add inventory levels and listing publication state"
 - Create: `agents/product_operations/listing/models.py`
 - Create: `agents/product_operations/listing/service.py`
 - Create: `agents/product_operations/listing/tools.py`
+- Create: `agents/product_operations/input/references.py`（店铺引用解析，见下）
 - Modify: `agents/product_operations/input/profiles.py`
+- Modify: `agents/product_operations/shared/errors.py`、`shared/__init__.py`
 - Create: `tests/agents/product_operations/catalog/test_catalog_tools.py`
 - Create: `tests/agents/product_operations/listing/test_listing_query.py`
 
@@ -955,6 +1012,194 @@ git commit -m "refactor: split catalog and listing query modules"
 ```
 
 Expected: PASS，提交成功。
+
+**实现补充与偏差（落地时明确）**
+
+1. **店铺引用解析的位置**：计划只说“Service 使用授权的 `StoreReferenceResolver`”，
+   未定位置。实现放在 `agents/product_operations/input/references.py`——与既有
+   “模型输入 → 可信内部值”解析（`input/requirements.py` 的别名 → ID）同层，
+   避免把跨能力的引用解析塞进 `shared/`（`shared` 只放规范错误码、写回执不变量
+   与 Reconciler 注册表）；
+2. **新增规范错误码 `AMBIGUOUS_STORE_REFERENCE`**：店铺名称/别名可能撞车，与既有
+   `AMBIGUOUS_LOCATION` 同类，故并入 `shared/errors.py` 与 `shared/__init__.py`；
+3. **字段集合按版本区分**：新 `search_products`(v3) 与旧版(v2) 共用 stable key
+   但字段不同（`store_refs` vs `store_ids`），因此 `P1_TOOL_ARGUMENT_FIELDS` /
+   `p1_fields_for` 独立于旧的 `TOOL_ARGUMENT_FIELDS` / `fields_for`，旧映射不改，
+   旧 Run 归一化行为不变；
+4. **错误通道固定两类**：授权与资源范围拒绝沿用既有读路径的 `ToolAccessError`
+   （PreToolUse 管线已识别），领域查找失败用 `ProductOperationError` 的规范码
+   （`NOT_FOUND` / `AMBIGUOUS_STORE_REFERENCE`）。两类的边界在模块 docstring 写明；
+5. **输出只给模型可见引用**：`ProductSearchItem.stores[].store_ref` 用店铺名、
+   `ListingSnapshot.store_ref` 用店铺名，不返回内部 UUID；`search_products` 输出
+   不含成本价。
+6. **店铺级授权在 Service 内强制**：PreTool 的 `AuthorizationResourceResolver`
+   只看 arguments，无法把名称/别名解析成 UUID，因此两个新 Tool 的
+   `resource_mode="WORKSPACE"`，店铺范围由 `StoreReferenceResolver` 逐条校验并
+   以 `RESOURCE_SCOPE_DENIED` 拒绝（不做静默收窄）。
+7. **本任务不接线**：`SEARCH_PRODUCTS_DEFINITION`(v3) 与 `GET_LISTING_DEFINITION`
+   (v1) 尚未进入 Agent/组合根装配；发布与装配属 Task 11/12。
+
+**验收条件**
+
+- [x] `SEARCH_PRODUCTS_DEFINITION` 输入 Schema 属性集合 == `{query, store_refs}`；
+  `GET_LISTING_DEFINITION` == `{store_ref, sku}`——新 Tool 不暴露内部 ID；
+- [x] `search_products` 只返回授权店铺内的 PUBLISHED Listing，按关键词过滤，
+  引用支持名称与别名，输出不含成本价与内部 UUID，未发布 Listing 被排除；
+- [x] `search_products`：越权引用 → `RESOURCE_SCOPE_DENIED`；未知引用 →
+  `NOT_FOUND`；缺 `product.read` → `PERMISSION_DENIED`；无授权店铺 → 空结果；
+- [x] `get_listing` 返回规范发布状态；未发布 Listing 仍可读；
+  未知/歧义/越权引用与缺权限各自确定性失败；禁用商品以 `issues` 表达；
+- [x] 全量门禁：`pytest` 908 passed、`ruff check .` 通过、`mypy runtime agents
+  adapters composition apps eval` 通过（231 files）。
+
+---
+
+### Task 6 前置: Runtime 写入重试预算（Task 6 验收依赖）
+
+**Files:**
+- Modify: `runtime/orchestration/limits.py`
+- Modify: `runtime/execution/reconciliation.py`
+- Modify: `composition/product_operations.py`
+- Modify: `agents/product_operations/agent.py`
+- Modify: `tests/runtime/orchestration/test_limits.py`
+- Modify: `tests/runtime/execution/test_reconciliation.py`
+- Create: `tests/agents/product_operations/pricing/test_price_reconciliation.py`
+  （与 Task 6 共用，见下方 Task 6 Step 4）
+
+**背景（Task 2.3 评审结论）**
+
+Task 2.3 已把"确定性执行失败"的重排收口为显式 `retryable` 契约，但
+Reconciliation 的 `NOT_APPLIED → VALIDATING` 仍是**独立的、无上界**的重排入口：
+`ReconciliationService.apply_result` 对 `ReconcileResult.NOT_APPLIED` 无条件把
+ToolCall 回 `VALIDATING`，Run 回 `QUEUED`，模型可再次确认并再次执行同一
+Operation。回查预算 `reconcile_budget` 只约束 `UNKNOWN` 的**回查次数**，不约束
+写入**执行次数**，因此"外部写入反复 NOT_APPLIED"仍可无限重排。
+
+本轮必须把该上界实现于**通用 Runtime**（不得写进 Pricing 业务模块），Task 6
+只负责用价格恢复场景验收。
+
+**锁定的规则**
+
+- **预算来源**：`RunLimits` 新增 `write_retry_budget`（保守默认值，非法/非正回落
+  默认，与既有 `_positive_int` 一致），经 `LoopBudget.write_retry_budget` 暴露，
+  由组合根注入 `ReconciliationService`；
+- **计数依据是持久化事实**：按 `OperationAttempt.kind == EXECUTE` 统计同一
+  Operation 已发生的执行次数（`_count_execute_attempts`），不从内存计数推断，
+  使恢复重入沿用同一预算；
+- **`NOT_APPLIED` 由预算裁决**：`execute_attempt_count < write_retry_budget` 时
+  才把 ToolCall 回 `VALIDATING`（仍必须重走完整 PreToolUse，`direct_execute`
+  恒 False）；否则 ToolCall 落 `FAILED` 终态，Run 回 `QUEUED` 让模型看到失败并
+  收尾——不得再创建可重排的 `VALIDATING`；
+- **`UNKNOWN` 与 `APPLIED` 分支不变**：回查预算语义、UNKNOWN 保持权威事实、
+  APPLIED → SUCCEEDED 均不受影响。
+
+- [ ] **Step 1: 写 Runtime 预算失败测试**
+
+`tests/runtime/orchestration/test_limits.py`：
+
+```python
+def test_write_retry_budget_is_exposed() -> None:
+    budget = LoopBudget(RunLimits(write_retry_budget=1))
+    assert budget.write_retry_budget == 1
+
+
+def test_write_retry_budget_falls_back_on_invalid_override() -> None:
+    limits = RunLimits.from_definition({"write_retry_budget": 0})
+    assert limits.write_retry_budget >= 1
+```
+
+`tests/runtime/execution/test_reconciliation.py`：
+
+```python
+async def test_not_applied_returns_to_validating_only_within_budget(...) -> None:
+    # 该 Operation 已有 0 个 EXECUTE Attempt(< 预算 1)→ ToolCall VALIDATING
+    ...
+    assert outcome.tool_call_status is ToolCallStatus.VALIDATING
+
+
+async def test_not_applied_fails_tool_call_when_write_budget_exhausted(...) -> None:
+    # 该 Operation 已有 1 个 EXECUTE Attempt(>= 预算 1)→ ToolCall FAILED
+    ...
+    assert outcome.tool_call_status is ToolCallStatus.FAILED
+    assert outcome.next_job_kind is RunJobKind.ADVANCE_RUN
+```
+
+- [x] **Step 2: 运行测试并确认失败**
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/runtime/orchestration/test_limits.py tests/runtime/execution/test_reconciliation.py -q
+```
+
+Expected: FAIL，`RunLimits` 无 `write_retry_budget`，`NOT_APPLIED` 恒回 `VALIDATING`。
+
+- [ ] **Step 3: 实现预算记账与 `NOT_APPLIED` 裁决**
+
+`runtime/orchestration/limits.py`：
+
+```python
+@dataclass(frozen=True)
+class RunLimits:
+    ...
+    write_retry_budget: int = 1
+
+    @classmethod
+    def from_definition(cls, loop_limits):
+        ...
+        write_retry_budget=_positive_int(overrides, "write_retry_budget", 1),
+```
+
+```python
+@dataclass
+class LoopBudget:
+    @property
+    def write_retry_budget(self) -> int:
+        return self.limits.write_retry_budget
+```
+
+`runtime/execution/reconciliation.py`：构造参数新增 `write_retry_budget: int`，
+新增 `_count_execute_attempts(operation_row_id)`（`kind == EXECUTE` 计数），在
+`ReconcileResult.NOT_APPLIED` 分支中：
+
+```python
+elif result is ReconcileResult.NOT_APPLIED:
+    operation_status = OperationStatus.NOT_APPLIED
+    executed = await self._count_execute_attempts(operation_row.id)
+    tool_call_status = (
+        ToolCallStatus.VALIDATING
+        if executed < self._write_retry_budget
+        else ToolCallStatus.FAILED
+    )
+```
+
+ToolCall `FAILED` 时 Run 仍走 `WAITING_RECONCILIATION → QUEUED`（返回
+`ADVANCE_RUN`），模型据失败结果收尾；`FAILED` 不写入 `ToolCall` 重排入口。
+
+`composition/product_operations.py` 注入 `write_retry_budget=self._run_limits.write_retry_budget`；
+`agents/product_operations/agent.py` 的 `P1_LOOP_LIMITS` 增
+`"write_retry_budget": 1`（Task 11 定稿时同步）。
+
+- [x] **Step 4: 定点回归**
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/runtime/orchestration/test_limits.py tests/runtime/execution/test_reconciliation.py tests/runtime/execution/test_operations.py -q
+```
+
+Expected: PASS。
+
+**验收条件**
+
+- [ ] `RunLimits.write_retry_budget` 存在、非法覆盖回落默认、经 `LoopBudget` 暴露；
+- [ ] `ReconciliationService` 按 `OperationAttempt(kind=EXECUTE)` 持久化次数裁决
+  `NOT_APPLIED` 分支：预算未耗尽 → ToolCall `VALIDATING`；预算耗尽 → ToolCall
+  `FAILED`（终态），Run 仍回 `QUEUED` 且 `next_job_kind=ADVANCE_RUN`；
+- [ ] 预算耗尽后**不再产生可重排的 `VALIDATING`**，同一 Operation 不会无限重排；
+- [ ] 预算实现位于 `runtime/`，Pricing 模块**不含**任何重试计数逻辑；
+- [ ] `tests/agents/product_operations/pricing/test_price_reconciliation.py`
+  （Task 6 Step 4 建立）用价格恢复场景证明：连续 `UNKNOWN → NOT_APPLIED` 到预算
+  耗尽后 ToolCall 落 `FAILED`、Adapter 写入次数不超过预算、`direct_execute` 恒
+  False；
+- [x] 全量门禁：`pytest` 全绿、`ruff check .` 通过、`mypy runtime agents adapters
+  composition apps eval` 通过。
 
 ---
 
@@ -1591,6 +1836,8 @@ git commit -m "test: close product operations p1"
 - [ ] Operation.expected_state 在外部写入前持久化；
 - [ ] Pricing、Inventory、Listing 写操作都有 Reconciler；
 - [ ] 增量库存响应丢失后不会重复扣减或增加；
+- [ ] Runtime 写入重试预算上界生效：同一 Operation 的 `NOT_APPLIED` 重排不超过预算，
+  预算耗尽后 ToolCall 落 `FAILED`（实现于 Runtime，Pricing 只做验收）；
 - [ ] `unpublish_listing` 不删除 Product、Listing 或库存；
 - [ ] PricePolicyConfig 来自已发布 Workspace 配置；
 - [ ] Eval 报告使用冻结的真实能力版本；

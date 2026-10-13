@@ -119,7 +119,7 @@ class Listing(ProductOperationsBase, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[ListingStatus] = mapped_column(
         db_enum(ListingStatus, "ck_listings_status"),
         nullable=False,
-        server_default="ACTIVE",
+        server_default="PUBLISHED",
     )
     version: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default=sa.text("1"))
 
@@ -129,6 +129,83 @@ class Listing(ProductOperationsBase, UUIDPrimaryKeyMixin, TimestampMixin):
             "store_id",
             "product_id",
             name="uq_listings_workspace_store_product",
+        ),
+    )
+
+
+class FulfillmentLocation(ProductOperationsBase, UUIDPrimaryKeyMixin, TimestampMixin):
+    """履约位置;(workspace_id, store_id, external_location_ref) 唯一。"""
+
+    __tablename__ = "fulfillment_locations"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "product_operations.stores.id", name="fk_fulfillment_locations_store_id"
+        ),
+        nullable=False,
+    )
+    external_location_ref: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    aliases: Mapped[list[str]] = mapped_column(
+        postgresql.JSONB,
+        nullable=False,
+        default=list,
+        server_default=sa.text("'[]'::jsonb"),
+    )
+    status: Mapped[StoreStatus] = mapped_column(
+        db_enum(StoreStatus, "ck_fulfillment_locations_status"),
+        nullable=False,
+        server_default="ACTIVE",
+    )
+    version: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default=sa.text("1"))
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "workspace_id",
+            "store_id",
+            "external_location_ref",
+            name="uq_fulfillment_locations_workspace_store_ref",
+        ),
+    )
+
+
+class InventoryLevel(ProductOperationsBase, UUIDPrimaryKeyMixin, TimestampMixin):
+    """位置-商品可用库存;(workspace_id, location_id, product_id) 唯一。
+
+    ``available_quantity >= 0`` 由数据库 CHECK 兜底:应用层 CAS 已排除负结果,
+    但绕过 ORM 的写入也必须被拒绝。
+    """
+
+    __tablename__ = "inventory_levels"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    location_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "product_operations.fulfillment_locations.id",
+            name="fk_inventory_levels_location_id",
+        ),
+        nullable=False,
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("product_operations.products.id", name="fk_inventory_levels_product_id"),
+        nullable=False,
+    )
+    available_quantity: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    version: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default=sa.text("1"))
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "available_quantity >= 0", name="ck_inventory_levels_available_quantity"
+        ),
+        sa.UniqueConstraint(
+            "workspace_id",
+            "location_id",
+            "product_id",
+            name="uq_inventory_levels_workspace_location_product",
         ),
     )
 
@@ -166,6 +243,8 @@ class PriceLock(ProductOperationsBase, UUIDPrimaryKeyMixin, CreatedAtMixin):
 
 
 __all__ = [
+    "FulfillmentLocation",
+    "InventoryLevel",
     "Listing",
     "PriceLock",
     "Product",

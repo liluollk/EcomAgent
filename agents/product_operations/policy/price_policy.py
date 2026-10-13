@@ -70,7 +70,7 @@ class PricePolicy:
         listing = await self._resolve_listing(request)
         if listing is None:
             return self._deny(request, LISTING_NOT_FOUND)
-        if listing.status is not ListingStatus.ACTIVE:
+        if listing.status is not ListingStatus.PUBLISHED:
             return self._deny(request, LISTING_NOT_ACTIVE, listing=listing)
 
         price_issue = self._check_price_amount(request, listing)

@@ -323,3 +323,43 @@ async def test_same_run_cannot_have_two_active_jobs(engine) -> None:
             },
         )
         await connection.rollback()
+
+
+async def test_p1_migration_creates_inventory_location_tables(engine) -> None:
+    """P1 迁移新增 fulfillment_locations 与 inventory_levels 两张表。"""
+    async with engine.connect() as connection:
+        tables = await connection.run_sync(
+            lambda sync_conn: set(
+                sa.inspect(sync_conn).get_table_names(schema="product_operations")
+            )
+        )
+    assert {"fulfillment_locations", "inventory_levels"} <= tables
+
+
+async def test_p1_migration_migrates_listing_status_constraint(engine) -> None:
+    """ck_listings_status 只允许 PUBLISHED/UNPUBLISHED,第一版 ACTIVE/INACTIVE 已移除。"""
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            sa.text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_listings_status'"
+            )
+        )
+        definition = result.scalar_one()
+    assert "PUBLISHED" in definition
+    assert "UNPUBLISHED" in definition
+    assert "ACTIVE" not in definition
+    assert "INACTIVE" not in definition
+
+
+async def test_p1_migration_inventory_levels_enforces_non_negative_quantity(engine) -> None:
+    """inventory_levels 的 available_quantity >= 0 由数据库 CHECK 兜底。"""
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            sa.text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_inventory_levels_available_quantity'"
+            )
+        )
+        definition = result.scalar_one()
+    assert "available_quantity >= 0" in definition
