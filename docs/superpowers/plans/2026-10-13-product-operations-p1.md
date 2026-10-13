@@ -1400,7 +1400,7 @@ Expected: 960 passed（943 + 17 新增），ruff/mypy 全绿，提交成功。
 - Create: `tests/agents/product_operations/inventory/test_inventory_policy.py`
 - Create: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
 
-- [ ] **Step 1: 写位置解析和幂等失败测试**
+- [x] **Step 1: 写位置解析和幂等失败测试**
 
 ```python
 async def test_missing_location_is_resolved_only_when_one_active_location(service) -> None:
@@ -1423,7 +1423,7 @@ async def test_same_operation_does_not_apply_delta_twice(adapter, command) -> No
     assert await adapter.count_logical_writes(command.operation_id) == 1
 ```
 
-- [ ] **Step 2: 定义 Tool 和 Gateway**
+- [x] **Step 2: 定义 Tool 和 Gateway**
 
 ```python
 STABLE_KEY_GET_INVENTORY_LEVEL = "get_inventory_level"
@@ -1435,7 +1435,7 @@ class InventoryGateway(Protocol):
     async def reconcile_inventory(self, command: ReconcileInventoryCommand) -> ReconcileResult: ...
 ```
 
-- [ ] **Step 3: 实现 InventoryPolicy**
+- [x] **Step 3: 实现 InventoryPolicy**
 
 规则必须覆盖：`delta != 0`、调整后数量非负、位置属于店铺、原因属于受控枚举、资源版本未变化。原因枚举固定为：
 
@@ -1447,15 +1447,15 @@ class InventoryAdjustmentReason(str, enum.Enum):
     RETURN = "RETURN"
 ```
 
-- [ ] **Step 4: 实现 prepare/execute 和 expected_state**
+- [x] **Step 4: 实现 prepare/execute 和 expected_state**
 
 库存 `expected_state` 必须包含 `quantity_before`、`delta`、`expected_quantity_after`、`expected_version`、位置和原因。Adapter 回执丢失后禁止直接重放 `delta`。
 
-- [ ] **Step 5: 实现 Mock Adapter 与 Reconciler**
+- [x] **Step 5: 实现 Mock Adapter 与 Reconciler**
 
 Mock Adapter 按 operation_id 去重，用 CAS 更新数量。Reconciler 同时验证操作记录和预期调整后数量；无法区分并发变化时返回 `UNKNOWN`，不得猜测 `APPLIED`。
 
-- [ ] **Step 6: 运行库存测试并提交**
+- [x] **Step 6: 运行库存测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations/inventory -q
@@ -1464,6 +1464,145 @@ git commit -m "feat: add inventory adjustment capability"
 ```
 
 Expected: PASS，提交成功。
+
+**实现说明(与计划原文的偏差):**
+- `operation_type` 取 `ADJUST_INVENTORY`;新增权限 `product.inventory.write`(与
+  `product.price.write` 对称)。`P1_TOOL_ARGUMENT_FIELDS` 已预置两个 Inventory
+  key 的字段集,未改动。
+- 位置引用解析 `resolve_location_for_store` 放在 `inventory/service.py`(与
+  `pricing/policy.py` 的 `resolve_listing_for_sku` 同构):候选为店铺内 ACTIVE
+  位置,未给出且唯一则自动解析,多位置 → `AmbiguousLocationError`(规范码
+  `AMBIGUOUS_LOCATION`)。
+- 类型化拒绝沿用 Task 6.1 的 `_Rejection`:缺 Listing/位置 → `NOT_FOUND`,歧义
+  店铺/位置 → `AMBIGUOUS_STORE_REFERENCE`/`AMBIGUOUS_LOCATION`,越权 →
+  `RESOURCE_SCOPE_DENIED`,策略拒绝 → `VERSION_CONFLICT` 或
+  `VALIDATION_FAILED + rule_code`(`ZERO_DELTA`/`NEGATIVE_RESULT`/... )。
+- 计划外的小改动:`ProductRepository` 新增 `get_fulfillment_location` 与
+  `get_inventory_level` 两个只读 getter(Mock Adapter 读库存/校验所必需);
+  库存 side 的 reason 码 `INVENTORY_NOT_FOUND` 定义在 `inventory/gateway.py`,
+  不改 `adapters/commerce/protocol.py`。
+- 测试新增 `tests/agents/product_operations/inventory/_support.py`(共享种子/
+  Actor/测试 Gateway)与 `conftest.py`(`inventory_env` 夹具);放在 `_support`
+  而非 conftest 是为了让 mypy 与 pytest 都能按目录解析导入,避免多层
+  `conftest` 同名冲突。
+- **Adapter 就地刷新坑**:`ProductRepository` 的 CAS 走 `populate_existing` /
+  `RETURNING`,会把身份映射中的 `InventoryLevel` 就地刷成写后值,测试必须在
+  调用前捕获 `quantity_before`/`version` 标量,不能事后读 `env.level`。
+- 按计划 Task 11/12 才把能力接入 Product Agent 与组合根,本任务不接线。
+
+
+---
+
+### Task 7.1: 收口 P1 写目标来源守卫与库存回查绑定（Task 8 复用前置）
+
+Task 7 门禁全绿（993 passed），但复评发现 2 个 P1，且指向同一类问题：**写目标的
+"来源"从未进入守卫，只证明了"存在且有权"**。Task 8 的上下架操作同样使用
+`store_ref`，继续复制会扩大问题，因此先做一个不回滚既有提交的独立收口。
+
+**缺陷与证据（复评原文）：**
+
+- [P1] **新写 Tool 的业务目标没有进入 Provenance 守卫**：`profiles.py` 仍只守卫
+  `store_id`、`sku`，但 P1 写 Tool 已改用 `store_ref`，库存还增加了 `location_ref`。
+  模型自行补一个已授权的 `store_ref` 可能通过；多仓场景下模型自行补一个合法
+  `location_ref` 会绕过"多位置必须补充输入"。Handler 的授权与解析只能证明"这个
+  店/仓存在且有权操作"，不能证明"这是用户选择的写入目标"。
+- [P1] **库存回查没有验证 Operation 与原资源完全绑定**：`_OperationRecord` 已保存
+  `workspace_id`/`location_id`，但回查只比较 `applied_quantity`，也没有记录
+  `product_id`。同一个 `operation_id` 被错误地拿去回查另一个库存资源时，只要目标
+  数量碰巧相同就可能被判成 `APPLIED`。恢复契约应能抵御装配错误、错路由与脏数据，
+  不能依赖"上游肯定不会传错"。
+
+**Files:**
+- Modify: `agents/product_operations/input/profiles.py`
+- Modify: `agents/product_operations/input/provenance.py`
+- Modify: `agents/product_operations/input/requirements.py`
+- Modify: `adapters/commerce/mock_adapter.py`
+- Modify: `adapters/commerce/protocol.py`（新增 `IDEMPOTENCY_KEY_REUSED` 原因码）
+- Modify: `tests/agents/product_operations/test_argument_provenance.py`
+- Modify: `tests/adapters/commerce/test_mock_adapter.py`
+- Modify: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
+- Create: `tests/agents/product_operations/inventory/test_inventory_write_guard.py`
+
+- [x] **Step 1: 证据引擎识别 `store_ref` / `location_ref`**
+
+`provenance.py` 新增 `LocationCandidate`（`location_id`/`store_id`/`name`/`aliases`），
+`EvidenceResolver.resolve` 增加 `locations` 入参，并复用/新增两个判定：
+
+```python
+field_sources["store_ref"] = self._resolve_store(field="store_ref", ...)  # 只取来源等级
+field_sources["location_ref"] = self._resolve_location(...)               # 缺省不参与判定
+```
+
+`store_ref` 与 `store_id` 同规则（USER_EXPLICIT / USER_CONFIRMED，其余 UNTRUSTED）；
+**`store_ref` 不做规范化改写**——`StoreReferenceResolver` 只接受名称/别名，不接受
+内部 UUID，因此证据引擎只回传来源等级，不回填 `str(store.id)`。
+
+- [x] **Step 2: 只有"模型实际提供"的写目标才要求来源证明**
+
+`requirements.py` 的 `untrusted` 计算拆成两段：`key_fields`（`store_id`/`sku`/
+`target_price`，缺失即要求补充，沿用旧契约）与 `provided_provenance`
+（`store_ref`/`location_ref`，**仅在 `field in normalized` 时**参与）。
+
+```python
+provided_provenance = tuple(
+    field for field in fields
+    if field in _P1_PROVENANCE_FIELDS and field in normalized
+)
+```
+
+这样"唯一启用位置由 Service 确定性解析"与"多位置由 Service 要求补充"不被守卫破坏；
+`_build_requirement` 额外给出 `store_ref` 候选项（值为店铺**名称**，可被
+`store_ref` 解析，而非内部 UUID）。
+
+- [x] **Step 3: 守卫字段集合纳入 P1 写目标**
+
+```python
+PROVENANCE_GUARD_FIELDS: Final = ("store_id", "store_ref", "sku", "location_ref")
+```
+
+`ProductPreToolProfileFactory` 已按 `field in self._fields` 过滤，故各 Tool 只守卫
+自身字段集合内的写目标；管线守卫 `_apply_provenance_guard` 本就只对"已提供"
+（`field in arguments`）生效。
+
+- [x] **Step 4: 写 / 回查两条路径都绑定完整资源身份**
+
+`_OperationRecord` 增加 `resource_identity`（规范化资源元组）与 `product_id`：
+
+- **回查路径**：`_reconcile_price` 匹配 `workspace_id + listing_id`，
+  `_reconcile_inventory` 匹配 `workspace_id + location_id + product_id +
+  applied_quantity`；错 Workspace、错资源、数量/价格恰好相同一律 `NOT_APPLIED`
+  （不猜 `APPLIED`）；
+- **写路径**：同一 `operation_id` 被用于**另一个资源**时确定失败
+  （`IDEMPOTENCY_KEY_REUSED`，新增于 `adapters/commerce/protocol.py`，
+  非可重试），不回放旧回执；资源身份一致才按平台幂等契约回放。
+
+判定只看**资源身份**，不看 `expected_version` / `target_price` / `delta` 等会随
+首次写入自然变化的载荷字段——否则同一次重复提交（重读后 `expected_version` 已 +1）
+会被误判成冲突，破坏 safety matrix 的 `duplicate_submit` 契约。首版曾用"整条命令
+指纹"判定，正是因此触发 `duplicate_submit` 红灯，已收窄为资源身份。
+
+- [x] **Step 5: 回归测试与门禁**
+
+- 域证据：`test_argument_provenance.py` 6 例（store_ref 无证据→Input、消息点名→
+  USER_EXPLICIT、回答→USER_CONFIRMED、location_ref 无证据→Input、点名→
+  USER_EXPLICIT、缺省不要求）；
+- 管线守卫：`test_inventory_write_guard.py` 4 例（守卫字段集合；无证据 store_ref →
+  `REQUIRE_INPUT` 且 Adapter 调用为 0；无证据 location_ref 同理；可信目标放行至
+  `REQUIRE_CONFIRMATION`）；
+- Adapter 回查反例：`test_inventory_recovery.py` 4 例（错位置 / 错商品 / 错 Workspace
+  且数量相同 → `NOT_APPLIED`，同目标对照 → `APPLIED`）与 `test_mock_adapter.py`
+  1 例（错 Listing 且价格相同 → `NOT_APPLIED`）；
+- Adapter 写路径冲突：`test_inventory_recovery.py`
+  `test_reused_operation_id_on_another_location_fails_closed` 与
+  `test_mock_adapter.py` `test_reused_operation_id_on_another_listing_fails_closed`
+  2 例（同 `operation_id` 换资源 → `FAILED` + `IDEMPOTENCY_KEY_REUSED`，逻辑写不增）。
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce -q
+```
+
+Expected: PASS。全量 1010 passed（993 + 17 新增）/ ruff 通过 / mypy 源包 245 files。
+
 
 ---
 

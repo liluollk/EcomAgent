@@ -142,7 +142,7 @@ async def test_agent_prompt_and_skill_do_not_leak_policy_numbers(
     product_application,
 ) -> None:
     """Prompt/Skill 不复制代码 Policy 数字(最低允许价、变动阈值、种子现价)。"""
-    config = product_application.price_config
+    config = product_application.pricing_policy.config
     forbidden_numbers = (
         str(config.min_allowed_price),
         str(config.max_price_change),

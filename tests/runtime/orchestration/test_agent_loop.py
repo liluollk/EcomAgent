@@ -511,6 +511,20 @@ async def _load_run(db_session: AsyncSession, run: Run) -> Run:
 def _require_input_decision() -> PreToolDecision:
     return require_input(
         input_requirement=InputRequirement(
+            field_paths=("store_id",),
+            question="Which store?",
+            options={"store_id": ({"value": "s-1", "label": "旗舰店"},)},
+        ),
+        schema_diagnostic=SchemaDiagnostic(
+            field_paths=("store_id",), message="store id missing"
+        ),
+    )
+
+
+def _require_input_decision_without_options() -> PreToolDecision:
+    """无服务端候选项的 Input Request(纯 Schema 缺失场景)。"""
+    return require_input(
+        input_requirement=InputRequirement(
             field_paths=("store_id",), question="Which store?"
         ),
         schema_diagnostic=SchemaDiagnostic(
@@ -547,6 +561,69 @@ async def test_multiple_tool_calls_stop_at_first_waiting_input(
     assert [call.ordinal for call in calls] == [0, 1]
     assert calls[0].status is ToolCallStatus.WAITING_INPUT
     assert calls[1].status is ToolCallStatus.PROPOSED
+
+
+async def _load_input_requests(
+    db_session: AsyncSession, run: Run
+) -> list[InputRequest]:
+    stmt = (
+        select(InputRequest)
+        .where(InputRequest.workspace_id == run.workspace_id)
+        .order_by(InputRequest.created_at, InputRequest.id)
+        .execution_options(populate_existing=True)
+    )
+    return list((await db_session.scalars(stmt)).all())
+
+
+async def test_waiting_input_persists_server_options(
+    make_agent_loop, run_with_two_tool_calls, db_session: AsyncSession
+) -> None:
+    """REQUIRE_INPUT 的服务端候选项随 Request 持久化。
+
+    Workbench/API 直接读取持久化的候选项,不再各自按领域规则重算;否则位置这类
+    新候选永远无法呈现给用户。
+    """
+    scenario = run_with_two_tool_calls
+    loop = make_agent_loop(
+        backend=scenario.backend,
+        pipeline=ScriptedPipeline([_require_input_decision()]),
+    )
+
+    result = await loop.advance(scenario.run.id)
+    assert result.run_status == RunStatus.WAITING_INPUT
+
+    requests = await _load_input_requests(db_session, scenario.run)
+    assert len(requests) == 1
+    stored = requests[0].options_json
+    assert stored is not None
+    assert [option["value"] for option in stored["store_id"]] == ["s-1"]
+    assert [option["label"] for option in stored["store_id"]] == ["旗舰店"]
+
+
+async def test_waiting_input_without_options_persists_none(
+    make_agent_loop, seeded_run: Run, db_session: AsyncSession
+) -> None:
+    """无候选项时持久化为 NULL,而不是空字典——保持"服务端未给候选"的语义。"""
+    backend = SequencedBackend(
+        [
+            [
+                ToolCallCompleted(
+                    call_id="c0", name=READ_TOOL_KEY, arguments={"listing_id": "L1"}
+                ),
+                BackendCompleted(finish_reason="tool_calls"),
+            ]
+        ]
+    )
+    loop = make_agent_loop(
+        backend=backend,
+        pipeline=ScriptedPipeline([_require_input_decision_without_options()]),
+    )
+
+    await loop.advance(seeded_run.id)
+
+    requests = await _load_input_requests(db_session, seeded_run)
+    assert len(requests) == 1
+    assert requests[0].options_json is None
 
 
 async def test_loop_limit_fails_deterministically(
