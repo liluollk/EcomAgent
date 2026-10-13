@@ -95,7 +95,7 @@ def price_case(
             await db_session.delete(product_seed.price_lock)
             await db_session.flush()
         if case == "listing_inactive":
-            listing.status = ListingStatus.INACTIVE
+            listing.status = ListingStatus.UNPUBLISHED
             await db_session.flush()
         if case == "currency_mismatch":
             listing.currency = "USD"

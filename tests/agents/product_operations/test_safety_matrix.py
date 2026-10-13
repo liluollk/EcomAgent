@@ -371,15 +371,19 @@ async def _drive_duplicate_submit(runner: SafetyCaseRunner) -> RunView:
     assert snapshot is not None
     operation_id = snapshot.operation_id
     assert operation_id is not None
-    replay = await runner.application.write_handler.execute(
-        tool_call_id=uuid.uuid4(),
-        operation_id=operation_id,
-        idempotency_key=f"op:{operation_id}",
+    handler = runner.application.write_handler
+    prepared = await handler.prepare(
         normalized_arguments={
             "store_id": str(runner.application.seed_ids.store_id),
             "sku": "SKU-001",
             "target_price": 99,
-        },
+        }
+    )
+    replay = await handler.execute_prepared(
+        tool_call_id=uuid.uuid4(),
+        operation_id=operation_id,
+        idempotency_key=f"op:{operation_id}",
+        prepared=prepared,
     )
     assert replay.status == "APPLIED"
     return run

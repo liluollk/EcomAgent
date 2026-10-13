@@ -187,7 +187,11 @@ async def build_e2e_application(
     """
     capabilities = await ProductOperationsProvisioner(
         lambda: AsyncSession(engine, expire_on_commit=False)
-    ).provision(workspace_id=workspace_id, model=E2E_MODEL_SPEC)
+    ).provision(
+        workspace_id=workspace_id,
+        model=E2E_MODEL_SPEC,
+        pricing_policy=E2E_PRICE_CONFIG,
+    )
     return await build_product_application(
         engine,
         capabilities=capabilities,
@@ -195,7 +199,6 @@ async def build_e2e_application(
         workspace_id=workspace_id,
         actor_id=actor_id,
         membership_id=membership_id,
-        price_config=E2E_PRICE_CONFIG,
         worker_id=worker_id,
     )
 
