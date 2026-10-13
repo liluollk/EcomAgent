@@ -31,6 +31,7 @@ from agents.product_operations.input.normalizer import (
     normalize_amount,
     normalize_arguments,
 )
+from agents.product_operations.input.profiles import p1_fields_for
 from agents.product_operations.input.provenance import ArgumentTrustLevel
 from agents.product_operations.input.requirements import (
     ProductInputRequirementResolver,
@@ -53,16 +54,21 @@ from runtime.persistence.models.identity import Workspace
 
 @dataclass(frozen=True)
 class InputCatalog:
-    """一个 Workspace 内的确定性种子:淘宝/豆音两店与两个商品。"""
+    """一个 Workspace 内的确定性种子:淘宝/豆音两店、两个商品与一个履约位置。"""
 
     workspace: Workspace
     taobao: Any
     douyin: Any
     products: dict[str, Any]
+    location: Any
 
 
 async def _seed_input_catalog(session: AsyncSession) -> InputCatalog:
-    from agents.product_operations.persistence.models import Product, Store
+    from agents.product_operations.persistence.models import (
+        FulfillmentLocation,
+        Product,
+        Store,
+    )
 
     workspace = Workspace(id=uuid.uuid4(), name=f"ws-{uuid.uuid4()}")
     taobao = Store(
@@ -99,11 +105,22 @@ async def _seed_input_catalog(session: AsyncSession) -> InputCatalog:
     await session.flush()
     session.add_all((taobao, douyin, *products.values()))
     await session.flush()
+    location = FulfillmentLocation(
+        id=uuid.uuid4(),
+        workspace_id=workspace.id,
+        store_id=taobao.id,
+        external_location_ref=f"loc-{uuid.uuid4()}",
+        name="默认仓",
+        aliases=["默认仓"],
+    )
+    session.add(location)
+    await session.flush()
     return InputCatalog(
         workspace=workspace,
         taobao=taobao,
         douyin=douyin,
         products=products,
+        location=location,
     )
 
 
@@ -137,6 +154,14 @@ def actor_with_all_stores(catalog: InputCatalog) -> ActorContext:
     return _actor(
         workspace_id=catalog.workspace.id,
         store_ids=frozenset({str(catalog.taobao.id), str(catalog.douyin.id)}),
+    )
+
+
+def actor_with_douyin_only(catalog: InputCatalog) -> ActorContext:
+    """只授权豆音店的运营者(用于"目标店铺越权"的对照)。"""
+    return _actor(
+        workspace_id=catalog.workspace.id,
+        store_ids=frozenset({str(catalog.douyin.id)}),
     )
 
 
@@ -303,7 +328,7 @@ async def test_answered_request_store_is_user_confirmed(
 ) -> None:
     """已处理 Input Request 的结构化回答是合法证据;越权回答仍被拒绝。"""
     actor = actor_with_taobao_only(input_catalog)
-    base = {
+    base: dict[str, Any] = {
         "user_message": "把 SKU-001 改成 99 元",
         "arguments": {
             "store_id": str(input_catalog.taobao.id),
@@ -324,6 +349,346 @@ async def test_answered_request_store_is_user_confirmed(
     assert out_of_scope.provenance["store_id"] == ArgumentTrustLevel.UNTRUSTED
     assert out_of_scope.requirement is not None
     assert "store_id" in out_of_scope.requirement.field_paths
+
+
+# ---- P1 写目标的来源守卫:store_ref / location_ref ----
+
+
+async def test_model_supplied_store_ref_without_evidence_requires_input(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    """P1 写 Tool 用 store_ref;模型自行补的店铺引用必须有用户证据。"""
+    result = await input_resolver.resolve(
+        user_message="把 SKU-001 改成 99 元",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "target_price": "99.00",
+        },
+        actor=actor_with_taobao_only(input_catalog),
+        fields=p1_fields_for("set_listing_price"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert result.requirement is not None
+    assert "store_ref" in result.requirement.field_paths
+    # store_ref 的规范值不被改写:Service 只接受名称/别名,不接受内部 UUID。
+    assert result.normalized_arguments["store_ref"] == "淘宝旗舰店"
+
+
+async def test_store_ref_named_in_message_is_user_explicit(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店的 SKU-001 改成 99 元",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "target_price": "99.00",
+        },
+        actor=actor_with_taobao_only(input_catalog),
+        fields=p1_fields_for("set_listing_price"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.requirement is None
+
+
+async def test_answered_store_ref_is_user_confirmed(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    """已处理的 Input Request 回答(store_ref 名称)可作证据;越权回答仍被拒。"""
+    base: dict[str, Any] = {
+        "user_message": "把 SKU-001 改成 99 元",
+        "arguments": {
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "target_price": "99.00",
+        },
+        "actor": actor_with_taobao_only(input_catalog),
+        "fields": p1_fields_for("set_listing_price"),
+    }
+    confirmed = await input_resolver.resolve(
+        **base, answered={"store_ref": "淘宝旗舰店"}
+    )
+    assert confirmed.provenance["store_ref"] == ArgumentTrustLevel.USER_CONFIRMED
+    assert confirmed.requirement is None
+
+    # 回答指向本 Workspace 不存在的店铺 → 不构成证据。
+    bogus = await input_resolver.resolve(**base, answered={"store_ref": "查无此店"})
+    assert bogus.provenance["store_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert bogus.requirement is not None
+
+
+async def test_provided_location_ref_without_evidence_requires_input(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    """多仓场景:模型自行补一个合法 location_ref 不等于用户选择,必须回到 Input。"""
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "location_ref": "默认仓",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_taobao_only(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.provenance["location_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert result.requirement is not None
+    assert result.requirement.field_paths == ("location_ref",)
+
+
+async def test_location_ref_named_in_message_is_user_explicit(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店默认仓的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "location_ref": "默认仓",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_taobao_only(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert result.provenance["location_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.requirement is None
+
+
+async def test_absent_location_ref_is_not_required(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+) -> None:
+    """缺省 location_ref 不进守卫:唯一启用位置仍由 Service 确定性解析。"""
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_taobao_only(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert "location_ref" not in result.normalized_arguments
+    assert result.requirement is None
+
+
+async def _add_location(
+    session: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    store_id: uuid.UUID,
+    name: str,
+) -> None:
+    """为指定店铺追加一个启用履约位置(证据作用域测试用)。"""
+    from agents.product_operations.persistence.models import FulfillmentLocation
+
+    session.add(
+        FulfillmentLocation(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            store_id=store_id,
+            external_location_ref=f"loc-{uuid.uuid4()}",
+            name=name,
+            aliases=[name],
+        )
+    )
+    await session.flush()
+
+
+async def test_location_evidence_is_scoped_to_resolved_store(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    db_session: AsyncSession,
+) -> None:
+    """两个店铺都有同名"默认仓"时,已明确的"店铺 + 仓库"仍是 USER_EXPLICIT。
+
+    位置证据必须先按 ``store_ref`` 解析出的规范 ``store_id`` 收窄候选;否则跨店铺
+    同名仓会被判成歧义,把用户已经点明的目标错误降级为 UNTRUSTED。
+    """
+    await _add_location(
+        db_session,
+        workspace_id=input_catalog.workspace.id,
+        store_id=input_catalog.douyin.id,
+        name="默认仓",
+    )
+
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店默认仓的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "location_ref": "默认仓",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_all_stores(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.provenance["location_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.requirement is None
+
+
+async def test_location_evidence_without_store_scope_stays_ambiguous(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    db_session: AsyncSession,
+) -> None:
+    """店铺证据缺失时不收窄作用域:跨店铺同名仓仍按歧义处理(对照组)。"""
+    await _add_location(
+        db_session,
+        workspace_id=input_catalog.workspace.id,
+        store_id=input_catalog.douyin.id,
+        name="默认仓",
+    )
+
+    result = await input_resolver.resolve(
+        user_message="把 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "location_ref": "默认仓",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_all_stores(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert result.provenance["location_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert result.requirement is not None
+    assert "location_ref" in result.requirement.field_paths
+
+
+async def test_multiple_locations_without_location_ref_requires_choice(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    db_session: AsyncSession,
+) -> None:
+    """目标店铺已确定、有多个启用位置、又未给出 location_ref → 要求补充。
+
+    这正是"多位置要求用户补充":PreToolUse 阶段就产生 InputRequest,而不是进入
+    Handler 后才得到确定性失败。候选项限定在目标店铺内。
+    """
+    await _add_location(
+        db_session,
+        workspace_id=input_catalog.workspace.id,
+        store_id=input_catalog.taobao.id,
+        name="备用仓",
+    )
+
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_all_stores(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.requirement is not None
+    assert result.requirement.field_paths == ("location_ref",)
+    options = result.requirement.options["location_ref"]
+    assert {option["value"] for option in options} == {"默认仓", "备用仓"}
+
+
+async def test_out_of_scope_store_does_not_require_location_choice(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    db_session: AsyncSession,
+) -> None:
+    """越权店铺即使多位置也不生成位置需求:交由 Access Control 确定性拒绝。
+
+    位置证据取自 Workspace 全量别名表,越权店铺的用户显式证据仍会产生
+    ``USER_EXPLICIT``;但"多位置必须补充输入"属于业务前提,只应在 Actor 有权
+    操作的店铺上提出,否则等于向用户追问一个无权操作的目标。
+    """
+    await _add_location(
+        db_session,
+        workspace_id=input_catalog.workspace.id,
+        store_id=input_catalog.taobao.id,
+        name="备用仓",
+    )
+
+    result = await input_resolver.resolve(
+        user_message="把淘宝旗舰店的 SKU-001 加 5 件",
+        arguments={
+            "store_ref": "淘宝旗舰店",
+            "sku": "SKU-001",
+            "delta": 5,
+            "reason": "RECEIPT",
+        },
+        actor=actor_with_douyin_only(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+
+    assert result.provenance["store_ref"] == ArgumentTrustLevel.USER_EXPLICIT
+    assert result.requirement is None
+
+
+async def test_out_of_scope_store_leaks_no_location_candidates(
+    input_resolver: ProductInputRequirementResolver,
+    input_catalog: InputCatalog,
+    db_session: AsyncSession,
+) -> None:
+    """location_ref 已提供但不可信 + 目标店铺越权 → 不返回该店铺的位置候选。
+
+    候选项在 Access Control **之前**生成,因此位置候选必须以授权店铺为界;
+    否则越权店铺的仓库名称会经由 Input Request 泄露。
+    """
+    await _add_location(
+        db_session,
+        workspace_id=input_catalog.workspace.id,
+        store_id=input_catalog.taobao.id,
+        name="备用仓",
+    )
+    arguments = {
+        "store_ref": "淘宝旗舰店",
+        "sku": "SKU-001",
+        "location_ref": "默认仓",
+        "delta": 5,
+        "reason": "RECEIPT",
+    }
+    # 消息点明店铺但不含位置证据,因此 location_ref 只能来自模型自补。
+    user_message = "把淘宝旗舰店的 SKU-001 加 5 件"
+
+    scoped = await input_resolver.resolve(
+        user_message=user_message,
+        arguments=arguments,
+        actor=actor_with_douyin_only(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert scoped.provenance["location_ref"] == ArgumentTrustLevel.UNTRUSTED
+    assert scoped.requirement is not None
+    assert scoped.requirement.field_paths == ("location_ref",)
+    assert "location_ref" not in scoped.requirement.options
+
+    # 对照面:同一请求在授权店铺的 Actor 下正常给出店铺内位置候选。
+    authorized = await input_resolver.resolve(
+        user_message=user_message,
+        arguments=arguments,
+        actor=actor_with_all_stores(input_catalog),
+        fields=p1_fields_for("adjust_inventory_quantity"),
+    )
+    assert authorized.requirement is not None
+    assert {
+        option["value"] for option in authorized.requirement.options["location_ref"]
+    } == {"默认仓", "备用仓"}
 
 
 # ---- 明确不受信的证据来源 ----
@@ -477,7 +842,8 @@ async def test_pretool_adapters_conform_to_injection_protocol(
         input_resolver, actor=actor
     )
     requirement = await requirement_resolver.resolve(
-        diagnostic=SchemaDiagnostic(field_paths=("store_id",), message="缺少店铺")
+        diagnostic=SchemaDiagnostic(field_paths=("store_id",), message="缺少店铺"),
+        arguments={},
     )
     assert requirement is not None
     assert requirement.field_paths == ("store_id",)

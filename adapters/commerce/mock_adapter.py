@@ -30,7 +30,7 @@ P1 起本 Adapter 实现 :class:`PricingGateway`(``get_price`` / ``set_price`` /
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +48,15 @@ from adapters.commerce.protocol import (
     UpdatePriceCommand,
     is_retryable_reason_code,
 )
+from agents.product_operations.inventory.gateway import (
+    REASON_INVENTORY_NOT_FOUND,
+    AdjustInventoryCommand,
+    InventoryLevelSnapshot,
+    InventoryQuery,
+    InventoryUnavailable,
+    InventoryWriteReceipt,
+    ReconcileInventoryCommand,
+)
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
 from agents.product_operations.pricing.gateway import (
@@ -64,23 +73,35 @@ from runtime.execution.reconciliation import ReconcileResult
 
 @dataclass(frozen=True)
 class _OperationRecord:
-    """operation_id 幂等记录:上次回执与逻辑写事实。"""
+    """operation_id 幂等记录:上次回执与逻辑写事实。
 
-    receipt: PriceWriteReceipt
+    价格与库存共享同一张按 ``operation_id`` 去重的表:``listing_id`` 与
+    ``applied_price`` 供改价回放/回查,``location_id`` 与 ``applied_quantity``
+    供库存调整回放/回查;未用到的字段为 ``None``。
+    """
+
+    receipt: PriceWriteReceipt | InventoryWriteReceipt
     workspace_id: uuid.UUID
-    listing_id: uuid.UUID
     logical_writes: int
     committed: bool
-    applied_price: Decimal | None
+    listing_id: uuid.UUID | None = None
+    location_id: uuid.UUID | None = None
+    applied_price: Decimal | None = None
+    applied_quantity: int | None = None
 
 
 class MockCommerceAdapter:
-    """确定性 Mock 平台;结构化实现 :class:`PricingGateway` 协议。
+    """确定性 Mock 平台;结构化实现 :class:`PricingGateway` 与 :class:`InventoryGateway`。
 
     幂等去重表为内存状态:仅在请求到达平台写路径(第 4 步之后)时创建记录;
     写前超时(UNKNOWN)与持续失败(FAILED)都不产生记录。但"不产生记录"不等于
     "值得重试":两者都带固定 ``reason_code``,重排队只会得到同一结论——按
     Runtime 的确定失败语义,它们的 ToolCall 都落终态,而非自动重试。
+
+    库存调整(``adjust_inventory``)与改价同构:按 ``operation_id`` 幂等去重、
+    以 ``version`` CAS 更新数量并保证调整后非负;``reconcile_inventory`` 同时
+    校验操作记录与预期调整后数量,权威数量与预期不一致(疑似并发变更)时返回
+    ``UNKNOWN``,绝不猜测 ``APPLIED``。
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -129,6 +150,36 @@ class MockCommerceAdapter:
         async with self._session.begin():
             return await self._reconcile_price(command)
 
+    # ---- InventoryGateway ----
+
+    async def get_inventory(self, query: InventoryQuery) -> InventoryLevelSnapshot:
+        """读取平台侧权威库存;库存记录缺失即不可读。"""
+        if self._session.in_transaction():
+            return await self._get_inventory(query)
+        async with self._session.begin():
+            return await self._get_inventory(query)
+
+    async def adjust_inventory(self, command: AdjustInventoryCommand) -> InventoryWriteReceipt:
+        """按确定性顺序执行库存写命令;独立模拟平台事务只覆盖数据库操作。"""
+        if self._session.in_transaction():
+            return await self._adjust_inventory(command)
+        async with self._session.begin():
+            return await self._adjust_inventory(command)
+
+    async def reconcile_inventory(
+        self, command: ReconcileInventoryCommand
+    ) -> ReconcileResult:
+        """以权威状态回答库存是否生效;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
+
+        幂等记录不存在或未提交 → 确定未应用;已提交且本操作应用数量与预期一致,
+        再重读权威库存:数量仍等于预期 → APPLIED,数量已被并发改动 → UNKNOWN
+        (无法区分是本操作还是并发变更所致,绝不猜测 APPLIED)。
+        """
+        if self._session.in_transaction():
+            return await self._reconcile_inventory(command)
+        async with self._session.begin():
+            return await self._reconcile_inventory(command)
+
     # ---- 兼容包装(历史 ToolVersion 的 Run 恢复) ----
 
     async def execute(self, command: UpdatePriceCommand) -> ExecutionReceipt:
@@ -172,7 +223,7 @@ class MockCommerceAdapter:
         # 2. 幂等去重:已见 operation_id 直接回放上次回执,不再写。
         record = self._operations.get(command.operation_id)
         if record is not None:
-            return record.receipt
+            return cast("PriceWriteReceipt", record.receipt)
 
         # 3. 平台逻辑不可用:确定失败(非 UNKNOWN);未达写路径,不建记录。
         if self.faults.should_fail_permanently():
@@ -291,6 +342,161 @@ class MockCommerceAdapter:
             return ReconcileResult.APPLIED
         return ReconcileResult.NOT_APPLIED
 
+    async def _get_inventory(self, query: InventoryQuery) -> InventoryLevelSnapshot:
+        level = await self._repository.get_inventory_level(
+            query.workspace_id, query.location_id, query.product_id
+        )
+        if level is None:
+            raise InventoryUnavailable("inventory level is not readable on the platform")
+        return InventoryLevelSnapshot(
+            available_quantity=level.available_quantity,
+            inventory_version=level.version,
+            external_ref=query.external_location_ref,
+        )
+
+    async def _adjust_inventory(self, command: AdjustInventoryCommand) -> InventoryWriteReceipt:
+        """执行数据库 Mock 平台逻辑(不发起网络请求),顺序与改价一致。"""
+        # 1. 写前超时:请求未达平台逻辑(含去重层),无任何状态变更。
+        if self.faults.should_timeout_before_write():
+            return _inventory_receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.UNKNOWN,
+                reason_code=REASON_TIMEOUT_BEFORE_WRITE,
+            )
+
+        # 2. 幂等去重:已见 operation_id 直接回放上次回执,不再写。
+        record = self._operations.get(command.operation_id)
+        if record is not None:
+            return cast("InventoryWriteReceipt", record.receipt)
+
+        # 3. 平台逻辑不可用:确定失败(非 UNKNOWN);未达写路径,不建记录。
+        if self.faults.should_fail_permanently():
+            return _inventory_receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.FAILED,
+                reason_code=REASON_PLATFORM_FAILURE,
+            )
+
+        # 4. 平台侧命令校验:该 (位置, 商品) 的库存记录必须存在。
+        level = await self._repository.get_inventory_level(
+            command.workspace_id, command.location_id, command.product_id
+        )
+        if level is None:
+            return self._record_inventory(
+                command,
+                _inventory_receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
+                    reason_code=REASON_INVENTORY_NOT_FOUND,
+                ),
+                logical_writes=0,
+                committed=False,
+                applied_quantity=None,
+            )
+
+        before_quantity = level.available_quantity
+
+        # 5. expected_version CAS 写入;仓库层同时保证调整后数量非负。
+        adjusted = await self._repository.adjust_inventory(
+            workspace_id=command.workspace_id,
+            inventory_level_id=level.id,
+            delta=command.delta,
+            expected_version=command.expected_version,
+        )
+        if adjusted is None:
+            return self._record_inventory(
+                command,
+                _inventory_receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
+                    reason_code=REASON_VERSION_CONFLICT,
+                ),
+                logical_writes=0,
+                committed=False,
+                applied_quantity=None,
+            )
+
+        # 6. 写后重读,回执携带观测到的数量与版本。
+        reread = await self._repository.get_inventory_level(
+            command.workspace_id, command.location_id, command.product_id
+        )
+        observed = reread if reread is not None else adjusted
+        receipt = InventoryWriteReceipt(
+            operation_id=command.operation_id,
+            idempotency_key=command.idempotency_key,
+            status=WriteStatus.APPLIED,
+            before_quantity=before_quantity,
+            after_quantity=observed.available_quantity,
+            resource_version=observed.version,
+            external_ref=command.external_location_ref,
+            changed=True,
+        )
+        self._operations[command.operation_id] = _OperationRecord(
+            receipt=receipt,
+            workspace_id=command.workspace_id,
+            logical_writes=1,
+            committed=True,
+            location_id=command.location_id,
+            applied_quantity=command.expected_quantity_after,
+        )
+
+        # 7. 响应丢失:写入已生效,调用方只能得到 UNKNOWN,回查恢复。
+        if self.faults.should_lose_response_after_commit():
+            return _inventory_receipt(
+                command.operation_id,
+                command.idempotency_key,
+                WriteStatus.UNKNOWN,
+                reason_code=REASON_RESPONSE_LOST_AFTER_COMMIT,
+            )
+        return receipt
+
+    async def _reconcile_inventory(
+        self, command: ReconcileInventoryCommand
+    ) -> ReconcileResult:
+        if self.faults.consume_reconcile_unknown():
+            return ReconcileResult.UNKNOWN
+
+        record = self._operations.get(command.operation_id)
+        if record is None or not record.committed:
+            return ReconcileResult.NOT_APPLIED
+        # 记录应证明本操作应用的就是预期的调整后数量;否则它属于其他目标。
+        if record.applied_quantity != command.expected_quantity_after:
+            return ReconcileResult.NOT_APPLIED
+
+        level = await self._repository.get_inventory_level(
+            command.workspace_id, command.location_id, command.product_id
+        )
+        if level is None:
+            return ReconcileResult.NOT_APPLIED
+        if level.available_quantity != command.expected_quantity_after:
+            # 权威数量与预期不一致:无法区分是本操作还是并发变更所致。
+            return ReconcileResult.UNKNOWN
+        return ReconcileResult.APPLIED
+
+    def _record_inventory(
+        self,
+        command: AdjustInventoryCommand,
+        receipt: InventoryWriteReceipt,
+        *,
+        logical_writes: int,
+        committed: bool,
+        applied_quantity: int | None,
+    ) -> InventoryWriteReceipt:
+        """登记库存幂等记录并返回回执(回执与记录所见一致,供回放)。"""
+        self._operations[command.operation_id] = _OperationRecord(
+            receipt=receipt,
+            workspace_id=command.workspace_id,
+            logical_writes=logical_writes,
+            committed=committed,
+            location_id=command.location_id,
+            applied_quantity=applied_quantity,
+        )
+        return receipt
+
     def _record(
         self,
         command: SetListingPriceCommand,
@@ -321,6 +527,22 @@ def _receipt(
 ) -> PriceWriteReceipt:
     """构造无观测的价格回执(UNKNOWN/FAILED 只带 reason_code)。"""
     return PriceWriteReceipt(
+        operation_id=operation_id,
+        idempotency_key=idempotency_key,
+        status=status,
+        reason_code=reason_code,
+    )
+
+
+def _inventory_receipt(
+    operation_id: str,
+    idempotency_key: str,
+    status: WriteStatus,
+    *,
+    reason_code: str,
+) -> InventoryWriteReceipt:
+    """构造无观测的库存回执(UNKNOWN/FAILED 只带 reason_code)。"""
+    return InventoryWriteReceipt(
         operation_id=operation_id,
         idempotency_key=idempotency_key,
         status=status,
@@ -364,10 +586,12 @@ def _to_execution_receipt(
 
 if TYPE_CHECKING:
     from adapters.commerce.protocol import CommerceAdapter
+    from agents.product_operations.inventory.gateway import InventoryGateway
     from agents.product_operations.pricing.gateway import PricingGateway
 
     _protocol_conformance: type[CommerceAdapter] = MockCommerceAdapter
     _pricing_conformance: type[PricingGateway] = MockCommerceAdapter
+    _inventory_conformance: type[InventoryGateway] = MockCommerceAdapter
 
 
 __all__ = ["MockCommerceAdapter"]

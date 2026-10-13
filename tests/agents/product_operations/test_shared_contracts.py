@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -29,6 +30,7 @@ from agents.product_operations.shared.errors import (
 from agents.product_operations.shared.reconciliation import (
     OperationReconcilerRegistry,
     ProductOperationReconciler,
+    resolve_persisted_workspace_id,
 )
 from agents.product_operations.shared.write_contracts import WriteReceipt, WriteStatus
 from runtime.execution.reconciliation import ReconcileResult
@@ -140,3 +142,35 @@ async def test_reconciler_registry_dispatches_by_operation_type() -> None:
     assert await resolved.reconcile({"operation_type": OPERATION_TYPE}) is (
         ReconcileResult.NOT_APPLIED
     )
+
+
+# ---- 持久化 Workspace 绑定 ----
+def test_resolve_persisted_workspace_id_accepts_matching_workspace() -> None:
+    workspace_id = uuid.uuid4()
+    resolved = resolve_persisted_workspace_id(
+        {"workspace_id": str(workspace_id)}, current_workspace_id=workspace_id
+    )
+    assert resolved == workspace_id
+
+
+def test_resolve_persisted_workspace_id_rejects_mismatch() -> None:
+    """持久化 Workspace 与当前 Workspace 不一致 → fail closed(不得改用当前值)。"""
+    with pytest.raises(ProductOperationError) as exc:
+        resolve_persisted_workspace_id(
+            {"workspace_id": str(uuid.uuid4())}, current_workspace_id=uuid.uuid4()
+        )
+    assert exc.value.code == VALIDATION_FAILED
+
+
+def test_resolve_persisted_workspace_id_rejects_missing() -> None:
+    with pytest.raises(ProductOperationError) as exc:
+        resolve_persisted_workspace_id({}, current_workspace_id=uuid.uuid4())
+    assert exc.value.code == VALIDATION_FAILED
+
+
+def test_resolve_persisted_workspace_id_rejects_unparsable() -> None:
+    with pytest.raises(ProductOperationError) as exc:
+        resolve_persisted_workspace_id(
+            {"workspace_id": "not-a-uuid"}, current_workspace_id=uuid.uuid4()
+        )
+    assert exc.value.code == VALIDATION_FAILED

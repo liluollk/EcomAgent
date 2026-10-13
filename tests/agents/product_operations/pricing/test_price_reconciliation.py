@@ -143,6 +143,18 @@ def test_build_reconcile_price_command_rejects_foreign_operation_type() -> None:
     assert exc.value.code == VALIDATION_FAILED
 
 
+def test_build_reconcile_price_command_rejects_workspace_mismatch() -> None:
+    """持久化 Workspace 与当前 Workspace 不一致 → fail closed,不得改用当前值回查。"""
+    expected_state = _expected_state()
+    with pytest.raises(ProductOperationError) as exc:
+        build_reconcile_price_command(
+            operation_id="op-1",
+            expected_state=expected_state,
+            workspace_id=uuid.uuid4(),
+        )
+    assert exc.value.code == VALIDATION_FAILED
+
+
 async def test_price_reconciler_delegates_target_price_from_expected_state() -> None:
     gateway = _FixedGateway(ReconcileResult.NOT_APPLIED)
     expected_state = _expected_state()
