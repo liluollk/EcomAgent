@@ -7,7 +7,7 @@ schema_version: 2
 # expected_final_state(权威最终状态:平台价格 + Run 终态)。
 #
 # 覆盖七类故障点:模型超时、Tool 调用前退出、写入已生效响应丢失、确认后
-# Worker 重启、平台暂时不可用、回查暂时不一致、重复提交。其中
+# Worker 重启、平台持续不可用、回查暂时不一致、重复提交。其中
 # response_lost_after_commit / permanent_failure / temporary_reconcile_unknown
 # 与 adapters.commerce.faults.FaultInjector 的命名故障一一对应;其余四类由
 # crash-harness 模式(真实 LeaseService/LeaseSweeper/ScriptedBackend 注入)
@@ -66,19 +66,20 @@ cases:
       price: "99.00"
       run_status: COMPLETED
 
-  - id: platform-temporarily-unavailable
+  - id: platform-persistent-failure
     category: platform_failure
     risk_level: high
     fault: permanent_failure
     expectation: >-
-      平台暂时不可用:回执确定 FAILED(不 UNKNOWN、不盲目重试),Operation
-      NOT_APPLIED、ToolCall 回 VALIDATING 等待重走完整 PreToolUse,
-      权威状态不变、零写入,Run 回 QUEUED。
+      平台持续不可用:回执确定 FAILED(不 UNKNOWN)且不声明可重试,Operation
+      NOT_APPLIED、ToolCall 落 FAILED 终态,失败随 Tool Result 返回模型——Run 不
+      重排队、不再自动重试同一个 ToolCall。权威状态不变、零逻辑写,不产生 UNKNOWN
+      回查。(持续故障与"暂时不可用"是两种语义:后者需要独立的原因码与重试预算。)
     expected_reconcile_path: []
     max_logical_writes: 0
     expected_final_state:
       price: "128.00"
-      run_status: QUEUED
+      run_status: COMPLETED
 
   - id: reconcile-temporarily-inconsistent
     category: recovery_reconciliation
