@@ -2,8 +2,13 @@
 
 Run 创建时把实际解析的 Agent/Skill/Tool/Source 版本固定为精确 Version ID,
 写入 ``runs`` 与 ``run_skill_versions`` / ``run_tool_versions`` /
-``run_source_versions``;恢复使用这些版本,但权限、Execution Mode、
-Business Policy 与资源状态仍在写前读当前值(见 ``write_service``)。
+``run_source_versions``;``policy_pins`` 额外把调用方已发布的业务策略版本写入
+``run_policy_snapshots``,让"这次运行读的是哪一版规则"可事后精确追溯。恢复使用
+这些版本,但权限、Execution Mode、Business Policy 与资源状态仍在写前读当前值
+(见 ``write_service``)。
+
+``policy_pins`` 的类型是 Runtime 通用值对象 :class:`PolicySnapshotPin`:本模块
+**不 import 任何商品模块**,业务语义由组合根翻译成 pin 后传入。
 
 本服务在调用方事务内执行(与 ``ActorContextBuilder`` 相同约定),不自行
 提交;组合根可在 UnitOfWork 上下文中传入其 Session。
@@ -15,6 +20,7 @@ Business Policy 与资源状态仍在写前读当前值(见 ``write_service``)�
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -24,7 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from runtime.access.actor import ActorContextBuilder
 from runtime.capabilities.assembly import ResolvedVersions, RuntimeAssembly
 from runtime.persistence.models.execution import Run
-from runtime.persistence.repositories.run_snapshots import RunSnapshotRepository
+from runtime.persistence.repositories.run_snapshots import (
+    PolicySnapshotPin,
+    RunSnapshotRepository,
+)
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -37,6 +46,7 @@ class PinnedRun(BaseModel):
     run: Run
     resolved: ResolvedVersions
     permission_snapshot: dict[str, Any]
+    policy_pins: tuple[PolicySnapshotPin, ...] = ()
 
     @property
     def id(self) -> UUID:
@@ -83,6 +93,7 @@ class RunFactory:
         actor_id: UUID,
         membership_id: UUID,
         model_config_version_id: UUID,
+        policy_pins: Iterable[PolicySnapshotPin] = (),
     ) -> None:
         self._session = session
         self._assembly = assembly
@@ -90,6 +101,7 @@ class RunFactory:
         self._actor_id = actor_id
         self._membership_id = membership_id
         self._model_config_version_id = model_config_version_id
+        self._policy_pins = tuple(policy_pins)
 
     async def create(self, *, agent_key: str) -> PinnedRun:
         """解析并钉住 ``agent_key`` 的版本集合,创建 Session 与 Run。"""
@@ -127,12 +139,14 @@ class RunFactory:
             tool_version_ids=resolved.tool_version_ids,
             skill_version_ids=resolved.skill_version_ids,
             source_version_ids=resolved.source_version_ids,
+            policy_pins=self._policy_pins,
         )
         return PinnedRun(
             run=run,
             resolved=resolved,
             permission_snapshot=permission_snapshot,
+            policy_pins=self._policy_pins,
         )
 
 
-__all__ = ["PinnedRun", "RunFactory"]
+__all__ = ["PinnedRun", "PolicySnapshotPin", "RunFactory"]

@@ -1,12 +1,13 @@
 """RunLimits 与 LoopBudget:Agent Loop 的硬限制预算(计划 02 Task 9;架构文档 §8)。
 
 每个 AgentVersion 配置硬限制:最大模型轮次、最大 ToolCall 数、单次 Tool 超时、
-Run 总时限、模型重试次数、Reconciliation 次数。达到限制时 Run 以明确错误码
-失败,不能继续自动循环。
+Run 总时限、模型重试次数、Reconciliation 次数、写入重试次数。达到限制时 Run 以
+明确错误码失败,不能继续自动循环。
 
 - :class:`RunLimits` 冻结值对象,带保守默认值;``from_definition`` 从
   AgentDefinition 的 ``loop_limits`` 组装视图读取覆盖,非法/非正值回落默认
-  (fail closed,不放宽);
+  (fail closed,不放宽);``reconcile_budget`` 约束 UNKNOWN 回查次数,
+  ``write_retry_budget`` 约束同一 Operation 的 EXECUTE 次数上界;
 - :class:`LoopBudget` 是一次推进内的记账器:模型轮次与 ToolCall 数向上计数,
   Run Deadline 与单 Tool 超时按注入时钟判定;超限抛
   :class:`LoopLimitExceeded`(携带确定性 ``failure_code``)。
@@ -65,6 +66,7 @@ class RunLimits:
     run_deadline_seconds: float = 900.0
     backend_retries: int = 2
     reconcile_budget: int = 3
+    write_retry_budget: int = 1
 
     @classmethod
     def from_definition(cls, loop_limits: Mapping[str, Any] | None) -> RunLimits:
@@ -81,6 +83,7 @@ class RunLimits:
             ),
             backend_retries=_positive_int(overrides, "backend_retries", 2),
             reconcile_budget=_positive_int(overrides, "reconcile_budget", 3),
+            write_retry_budget=_positive_int(overrides, "write_retry_budget", 1),
         )
 
 
@@ -113,6 +116,11 @@ class LoopBudget:
     @property
     def reconcile_budget(self) -> int:
         return self.limits.reconcile_budget
+
+    @property
+    def write_retry_budget(self) -> int:
+        """写入重试预算:同一 Operation 允许的 EXECUTE 次数上界(含首次)。"""
+        return self.limits.write_retry_budget
 
     def record_model_round(self) -> None:
         """记一次模型轮次;超过上限抛 ``LOOP_LIMIT_EXCEEDED``。"""

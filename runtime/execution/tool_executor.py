@@ -8,7 +8,8 @@
    (服务端命令 + 可回放 ``expected_state``);该阶段不得产生外部副作用。
    ``prepare`` 返回确定性 ``rejection`` 时**不进入执行边界**:直接落
    ``NOT_APPLIED``,不写 ``EXECUTING``、不写执行允许审计、不调用 Adapter,
-   因此不存在"可能已执行"的窗口;
+   因此不存在"可能已执行"的窗口;拒绝一律不可重试,ToolCall 直接进终态而
+   不再重排队;
 2. **短事务 begin**::meth:`OperationService.begin` 幂等创建/读取稳定
    Operation,收敛状态机并写入 ``expected_state``(``EXECUTING`` 与 EXECUTE
    Attempt);调用方在该事务提交后才发出外部调用——崩溃后恢复可凭 Operation
@@ -71,6 +72,11 @@ class PreparedWriteRejection:
     ``context`` 是最小审计上下文(模型输入与策略版本这类不再臆测资源侧字段的
     信息),只写进 ``last_receipt``;拒绝不存在可回查的业务目标,因此它绝不
     参与 Reconciliation。
+
+    **没有可重试字段**:确定性准备拒绝与自动重试语义冲突——同一资源状态/策略
+    下重排队通常得到同一拒绝。因此拒绝一律让 ToolCall 落 ``FAILED`` 终态,把
+    错误返回模型;暂时性基础设施故障走独立的 retryable 回执契约,资源版本变化
+    则应产生新的 ToolCall/Operation,都不得借拒绝路径复用旧目标与旧确认。
     """
 
     status: Literal["FAILED"]
@@ -85,19 +91,34 @@ class PreparedToolWrite:
 
     ``command`` 只在当前进程的 prepare→execute 短链路中使用;恢复只读取已
     持久化的 ``expected_state``。``request_fingerprint`` 是 ``expected_state``
-    的规范化指纹,随 Attempt 一起留痕。
+    的规范化指纹,随 Attempt 与拒绝审计一起留痕。
 
-    两态互斥:
+    两态互斥,由 ``__post_init__`` 强制:
     - 可执行准备:``command`` 与 ``expected_state`` 均非空、``rejection`` 为
       None;``expected_state`` 是完整、可回查的业务目标;
     - 被拒绝准备:``rejection`` 非空、``command`` 与 ``expected_state`` 均为
       None;审计上下文由 ``rejection.context`` 承载,不伪造 ``expected_state``。
+
+    混合状态(既给 rejection 又给命令,或两者都缺)是编排错误,必须在构造时
+    失败,而不是留给下游按字段是否为 None 猜分支。
     """
 
     command: object | None
     expected_state: Mapping[str, Any] | None
     request_fingerprint: str
     rejection: PreparedWriteRejection | None = None
+
+    def __post_init__(self) -> None:
+        if self.rejection is not None:
+            if self.command is not None or self.expected_state is not None:
+                raise ValueError(
+                    "rejected prepared write must not carry command or expected_state"
+                )
+            return
+        if self.command is None or self.expected_state is None:
+            raise ValueError(
+                "executable prepared write requires both command and expected_state"
+            )
 
 
 class WriteToolHandler(Protocol):
@@ -179,15 +200,14 @@ class ToolExecutor:
         """
         prepared = await self._handler.prepare(normalized_arguments=normalized_arguments)
         if prepared.rejection is not None:
-            return await self._record_rejection(tool_call_id, prepared.rejection)
-        if prepared.expected_state is None:
-            raise ValueError("prepared write expected_state is required")
-        if prepared.command is None:
-            raise ValueError("prepared write command is required")
+            return await self._record_rejection(tool_call_id, prepared)
+        # 两态互斥由 PreparedToolWrite.__post_init__ 保证;此处显式收敛类型。
+        expected_target = prepared.expected_state
+        assert expected_target is not None
         begun = await self._operations.begin(
             tool_call_id,
             adapter_key=self._execution_profile.adapter_key,
-            expected_state=prepared.expected_state,
+            expected_state=expected_target,
             supports_native_idempotency=(
                 self._execution_profile.supports_native_idempotency
             ),
@@ -221,9 +241,16 @@ class ToolExecutor:
         )
 
     async def _record_rejection(
-        self, tool_call_id: uuid.UUID, rejection: PreparedWriteRejection
+        self, tool_call_id: uuid.UUID, prepared: PreparedToolWrite
     ) -> ExecutedToolCall:
-        """确定性拒绝:不 begin、不调用 Adapter,直接落 NOT_APPLIED。"""
+        """确定性拒绝:不 begin、不调用 Adapter,直接落 NOT_APPLIED。
+
+        拒绝一律不可重试(ToolCall 直接 ``FAILED``):确定性拒绝重排队只会再次
+        走到同一拒绝。拒绝的 ``request_fingerprint`` 随只追加审计事件留痕:
+        ``last_receipt`` 是会被后续结果覆盖的最新诊断快照,不能当作不可变证据。
+        """
+        rejection = prepared.rejection
+        assert rejection is not None
         if rejection.status != REJECTION_STATUS:
             raise ValueError("invalid prepared write rejection")
         processed = await self._processor.process(
@@ -245,6 +272,7 @@ class ToolExecutor:
             adapter_key=self._execution_profile.adapter_key,
             rejection_context=rejection.context,
             error_code=rejection.error_code,
+            request_fingerprint=prepared.request_fingerprint,
             supports_native_idempotency=(
                 self._execution_profile.supports_native_idempotency
             ),

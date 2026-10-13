@@ -1,10 +1,11 @@
-"""商品域 Repository(计划 03 Task 1)。
+"""商品域 Repository(计划 03 Task 1;P1 Task 4 扩展库存与发布状态)。
 
 约定:
 - 只 flush 与条件更新,不提交事务(事务边界归调用方/Runtime);
-- 价格写入使用 Listing ``version`` CAS:WHERE 命中零行(版本过期、跨
-  Workspace 越权或行不存在)返回 ``None``;
-- 读取一律携带 ``workspace_id``,错误 Workspace 不可见。
+- 写入使用行 ``version`` CAS:WHERE 命中零行(版本过期、跨 Workspace 越权或行
+  不存在)返回 ``None``;
+- 读取一律携带 ``workspace_id``,错误 Workspace 不可见;
+- 库存 CAS 额外保证 ``available_quantity + delta >= 0``,负结果不命中而不报错。
 """
 
 import uuid
@@ -15,7 +16,13 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agents.product_operations.persistence.models import Listing, PriceLock
+from agents.product_operations.domain.models import ListingStatus
+from agents.product_operations.persistence.models import (
+    FulfillmentLocation,
+    InventoryLevel,
+    Listing,
+    PriceLock,
+)
 
 
 class ProductRepository:
@@ -64,6 +71,100 @@ class ProductRepository:
             )
             .values(
                 current_price=target_price,
+                version=Listing.version + 1,
+                updated_at=sa.text("clock_timestamp()"),
+            )
+            .returning(Listing)
+        )
+        updated: Listing | None = (await self._session.scalars(stmt)).one_or_none()
+        return updated
+
+    async def get_fulfillment_location(
+        self, workspace_id: uuid.UUID, location_id: uuid.UUID
+    ) -> FulfillmentLocation | None:
+        """按 (workspace_id, location_id) 读取履约位置;错误 Workspace 返回 None。"""
+        stmt = (
+            select(FulfillmentLocation)
+            .where(
+                FulfillmentLocation.workspace_id == workspace_id,
+                FulfillmentLocation.id == location_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.scalars(stmt)).one_or_none()
+
+    async def get_inventory_level(
+        self, workspace_id: uuid.UUID, location_id: uuid.UUID, product_id: uuid.UUID
+    ) -> InventoryLevel | None:
+        """按 (workspace_id, location_id, product_id) 读取库存;越权返回 None。
+
+        ``populate_existing`` 绕过身份映射,避免 CAS 后读到过期的 ``version``。
+        """
+        stmt = (
+            select(InventoryLevel)
+            .where(
+                InventoryLevel.workspace_id == workspace_id,
+                InventoryLevel.location_id == location_id,
+                InventoryLevel.product_id == product_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.scalars(stmt)).one_or_none()
+
+    async def adjust_inventory(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        inventory_level_id: uuid.UUID,
+        delta: int,
+        expected_version: int,
+    ) -> InventoryLevel | None:
+        """增量调整库存(P1 设计 §7);CAS + 非负双重条件。
+
+        WHERE 同时包含 workspace、ID、``version = expected_version`` 与
+        ``available_quantity + delta >= 0``:版本过期、跨 Workspace、行不存在或
+        调整后为负都不命中,返回 ``None``(不抛异常,由上层判定失败语义)。
+        """
+        stmt = (
+            sa.update(InventoryLevel)
+            .where(
+                InventoryLevel.id == inventory_level_id,
+                InventoryLevel.workspace_id == workspace_id,
+                InventoryLevel.version == expected_version,
+                InventoryLevel.available_quantity + delta >= 0,
+            )
+            .values(
+                available_quantity=InventoryLevel.available_quantity + delta,
+                version=InventoryLevel.version + 1,
+                updated_at=sa.text("clock_timestamp()"),
+            )
+            .returning(InventoryLevel)
+        )
+        adjusted: InventoryLevel | None = (await self._session.scalars(stmt)).one_or_none()
+        return adjusted
+
+    async def set_listing_publication_state(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        listing_id: uuid.UUID,
+        target_state: ListingStatus,
+        expected_version: int,
+    ) -> Listing | None:
+        """CAS 迁移 Listing 发布状态(P1 设计 §5.3/§7)。
+
+        ``target_state`` 是服务端已校验的目标状态;WHERE 命中零行(版本过期、
+        跨 Workspace 或行不存在)返回 ``None``。
+        """
+        stmt = (
+            sa.update(Listing)
+            .where(
+                Listing.id == listing_id,
+                Listing.workspace_id == workspace_id,
+                Listing.version == expected_version,
+            )
+            .values(
+                status=target_state,
                 version=Listing.version + 1,
                 updated_at=sa.text("clock_timestamp()"),
             )

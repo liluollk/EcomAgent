@@ -941,7 +941,7 @@ Expected: PASS。
 - rg -n "_LIMITS" composition/product_operations.py 无命中；
 - ArgumentTrustLevel 只在 Runtime 定义一次；
 
-- [ ] **Step 6: 更新 ADR 状态**
+- [x] **Step 6: 更新 ADR 状态**
 
 仅当 Task 1-11 与兄弟 Provisioning P0 计划全部通过后，把 ADR-002 的状态从“已接受，尚未实施”更新为“P0 已实施，P1/P2 待实施”，并在文档记录实际提交号和验证命令。
 

@@ -75,6 +75,7 @@ from runtime.execution.reconciliation import (
     ReconciliationService,
 )
 from runtime.execution.run_service import RunService
+from runtime.execution.tool_executor import PreparedToolWrite
 from runtime.execution.tool_result_processor import (
     ToolExecutionReceipt,
     ToolResultProcessor,
@@ -161,6 +162,8 @@ _TEST_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
 }
 
 _EVAL_ADAPTER_KEY: Final = "eval-adapter"
+
+_STALE_LEASE_EXPECTED_STATE: Final[dict[str, Any]] = {"operation_type": "TEST_WRITE"}
 """评测 harness 写 Tool 的执行 Profile Adapter Key(与历史 Operation 行一致)。"""
 
 _TEST_LIMITS: Final = RunLimits(
@@ -627,16 +630,25 @@ class _RecordingWriteHandler:
         self.crash_point: str | None = None
         self.receipt_status = "APPLIED"
         self.receipt_payload: Any = {"result": "written"}
+        self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
-    async def execute(
+    async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
+        del normalized_arguments
+        return PreparedToolWrite(
+            command={"kind": "recording"},
+            expected_state=dict(self.expected_state),
+            request_fingerprint="recording-write-fingerprint",
+        )
+
+    async def execute_prepared(
         self,
         *,
         tool_call_id: uuid.UUID,
         operation_id: uuid.UUID,
         idempotency_key: str,
-        normalized_arguments: Mapping[str, Any],
+        prepared: PreparedToolWrite,
     ) -> ToolExecutionReceipt:
-        del idempotency_key, normalized_arguments
+        del idempotency_key, prepared
         # 进入 handler 即视为外部写入已生效(受控外部世界语义)。
         self.write_count += 1
         if self.crash_point == _AFTER_EXTERNAL_WRITE_BEFORE_RESULT:
@@ -791,6 +803,7 @@ class _RuntimeHarness:
                     lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=_TEST_LIMITS.reconcile_budget,
+                    write_retry_budget=_TEST_LIMITS.write_retry_budget,
                 )
                 outcome = await service.apply_result(verdict)
                 if not await LeaseService(session).complete(job.id, lease.lease_token):
@@ -1000,7 +1013,7 @@ def _price_scenario(case_id: str) -> Scenario:
                         "sku": "SKU-001",
                         "price": "128.00",
                         "currency": "CNY",
-                        "status": "ACTIVE",
+                        "status": "PUBLISHED",
                     }
                 ]
             },
@@ -1230,6 +1243,7 @@ async def _begin_operation(
             return await service.begin(
                 tool_call_id,
                 adapter_key=_EVAL_ADAPTER_KEY,
+                expected_state=dict(_STALE_LEASE_EXPECTED_STATE),
                 supports_reconciliation=True,
             )
     finally:

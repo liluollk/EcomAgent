@@ -41,7 +41,7 @@
 
 - Create: tests/composition/test_product_operations_provisioning.py
 
-- [ ] **Step 1: 编写发布幂等测试**
+- [x] **Step 1: 编写发布幂等测试**
 
 同一个 workspace、同一版本规范连续发布两次，返回相同 Version ID，配置表行数不增长：
 
@@ -59,7 +59,7 @@ assert second == first
 assert await configuration_counts(session, workspace_id) == expected_counts
 ```
 
-- [ ] **Step 2: 编写普通装配只读测试**
+- [x] **Step 2: 编写普通装配只读测试**
 
 ```python
 before = await configuration_snapshot(session, workspace_id)
@@ -78,11 +78,11 @@ assert after == before
 await application.aclose()
 ```
 
-- [ ] **Step 3: 编写未发布快照拒绝测试**
+- [x] **Step 3: 编写未发布快照拒绝测试**
 
 给 build_product_application 传入不存在的 Version ID，断言抛出 AssemblyError，且数据库没有自动创建任何配置行。
 
-- [ ] **Step 4: 运行测试并确认失败**
+- [x] **Step 4: 运行测试并确认失败**
 
 Run:
 
@@ -92,7 +92,7 @@ pytest tests/composition/test_product_operations_provisioning.py -q
 
 Expected: FAIL，因为 _bootstrap_capabilities 仍在普通组合根中执行写入，Provisioner 尚不存在。
 
-- [ ] **Step 5: 提交失败测试**
+- [x] **Step 5: 提交失败测试**
 
 ```powershell
 git add tests/composition/test_product_operations_provisioning.py
@@ -108,7 +108,7 @@ git commit -m "test: define product provisioning boundary"
 - Modify: composition/product_operations.py
 - Modify: tests/composition/test_product_operations_provisioning.py
 
-- [ ] **Step 1: 定义发布输入与输出值对象**
+- [x] **Step 1: 定义发布输入与输出值对象**
 
 ```python
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ class ProductOperationsCapabilities:
     model_config_version_id: UUID
 ```
 
-- [ ] **Step 2: 移动现有发布逻辑**
+- [x] **Step 2: 移动现有发布逻辑**
 
 把 composition/product_operations.py 中 _bootstrap_capabilities 的完整数据库写入移动到 ProductOperationsProvisioner。按以下四个私有方法拆分，但不改变查询条件、版本号、状态或幂等语义：
 
@@ -166,11 +166,11 @@ class ProductOperationsProvisioner:
 
 四个私有方法直接接收 session；不得在方法内部再次开启事务或创建 Session。
 
-- [ ] **Step 3: 删除 Provisioner 中的 scripted 默认值**
+- [x] **Step 3: 删除 Provisioner 中的 scripted 默认值**
 
 base_url、model、backend_type 和 non_secret_options 只能来自 ModelConnectionProvisioningSpec。Provisioner 不提供 product-scripted 或 scripted.model.invalid 默认值。
 
-- [ ] **Step 4: 运行发布测试**
+- [x] **Step 4: 运行发布测试**
 
 Run:
 
@@ -180,7 +180,7 @@ pytest tests/composition/test_product_operations_provisioning.py -k provision -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add composition/provisioning composition/product_operations.py tests/composition/test_product_operations_provisioning.py
@@ -197,7 +197,7 @@ git commit -m "refactor: extract product capability provisioner"
 - Modify: tests/agents/product_operations/conftest.py
 - Modify: tests/composition/test_product_operations_provisioning.py
 
-- [ ] **Step 1: 修改 build_product_application 签名**
+- [x] **Step 1: 修改 build_product_application 签名**
 
 增加必填参数：
 
@@ -207,7 +207,7 @@ capabilities: ProductOperationsCapabilities
 
 删除内部 _bootstrap_capabilities 调用。现有 capability 字典访问全部改成 ProductOperationsCapabilities 字段访问。
 
-- [ ] **Step 2: 在 E2E 入口显式发布 scripted 配置**
+- [x] **Step 2: 在 E2E 入口显式发布 scripted 配置**
 
 apps/worker/e2e.py 定义唯一测试规范：
 
@@ -223,15 +223,15 @@ E2E_MODEL_SPEC = ModelConnectionProvisioningSpec(
 
 build_e2e_application 先调用 Provisioner，再把快照传给 build_product_application。
 
-- [ ] **Step 3: 修改 Eval 与测试 fixture**
+- [x] **Step 3: 修改 Eval 与测试 fixture**
 
 eval/fixtures.py 和 tests/agents/product_operations/conftest.py 各自在环境初始化阶段显式 provision 一次；单个 Run 或单次 advance 不重复发布。
 
-- [ ] **Step 4: 删除组合根的数据库写入依赖**
+- [x] **Step 4: 删除组合根的数据库写入依赖**
 
 composition/product_operations.py 不再 import Agent、AgentVersion、Skill、SkillVersion、ToolDefinitionRow、ToolVersionRow、ModelConnection 或 ModelConfigVersion 等配置持久化实体。
 
-- [ ] **Step 5: 运行闭环测试**
+- [x] **Step 5: 运行闭环测试**
 
 Run:
 
@@ -241,7 +241,7 @@ pytest tests/composition/test_product_operations_provisioning.py tests/agents/pr
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add composition/product_operations.py apps/worker/e2e.py eval/fixtures.py tests/agents/product_operations/conftest.py tests/composition/test_product_operations_provisioning.py
@@ -255,7 +255,7 @@ git commit -m "refactor: make product composition read only"
 - Modify: tests/architecture/test_dependency_boundaries.py
 - Modify: docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md
 
-- [ ] **Step 1: 增加静态边界测试**
+- [x] **Step 1: 增加静态边界测试**
 
 断言：
 
@@ -264,7 +264,7 @@ git commit -m "refactor: make product composition read only"
 - scripted.model.invalid 只允许出现在 apps/worker/e2e.py、eval 或 tests；
 - Provisioner 不导入 Runtime、AgentLoop 或 ToolExecutor。
 
-- [ ] **Step 2: 运行目标测试**
+- [x] **Step 2: 运行目标测试**
 
 Run:
 
@@ -274,7 +274,7 @@ pytest tests/composition tests/architecture tests/agents/product_operations test
 
 Expected: PASS。
 
-- [ ] **Step 3: 运行静态检查**
+- [x] **Step 3: 运行静态检查**
 
 Run:
 
@@ -285,7 +285,7 @@ mypy composition apps/worker eval
 
 Expected: 两条命令均退出 0。
 
-- [ ] **Step 4: 运行全量测试**
+- [x] **Step 4: 运行全量测试**
 
 Run:
 
@@ -295,11 +295,11 @@ pytest -q
 
 Expected: PASS。
 
-- [ ] **Step 5: 更新 ADR 状态**
+- [x] **Step 5: 更新 ADR 状态**
 
 只有本计划和 runtime-tool-binding-p0 计划都完成后，才把 ADR-002 更新为“P0 已实施，P1/P2 待实施”。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add tests/architecture/test_dependency_boundaries.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md

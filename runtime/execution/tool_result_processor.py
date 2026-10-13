@@ -16,6 +16,11 @@
 6. **ContextProjection**:经 :mod:`runtime.execution.context_projection` 按
    字段/数组/字符串上限确定性裁剪,带 truncated/content_hash。
 
+``retry_allowed`` 是显式回执契约而不是结果分类的副产物:``NOT_APPLIED`` 只说明
+"这次没有生效",不说明"再试一次值得"。因此仅当回执显式声明
+``ToolExecutionReceipt.retryable=True`` 时才允许在重新通过完整 PreToolUse 后
+再次执行;缺省一律为 False(确定性失败直接落终态,不再重排队)。
+
 返回 :class:`ProcessedToolResult`:权威结果、模型投影与前端安全视图三者分离,
 模型可分别读取。本模块为纯逻辑(不触达数据库、不写事件),状态迁移由
 OperationService 在结果事务中完成。
@@ -64,6 +69,9 @@ class ToolExecutionReceipt(BaseModel):
 
     ``payload`` 类型为 ``Any``:协议校验(必须是 JSON 对象或 None)是管线的
     第一阶段,非法形状不得在模型层被拒绝,而要产生 ``INVALID_TOOL_RESULT``。
+
+    ``retryable`` 是执行端对"这次失败是否值得重试"的显式声明,默认 False:
+    只有确定未生效、且重新通过完整 PreToolUse 后重试可能成功的失败才可置 True。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -73,6 +81,7 @@ class ToolExecutionReceipt(BaseModel):
     payload: Any = None
     external_reference: str | None = None
     error_code: str | None = None
+    retryable: bool = False
 
 
 class ProcessedToolResult(BaseModel):
@@ -156,9 +165,9 @@ class ToolResultProcessor:
             "content_hash": projection.content_hash,
             "data": projection.structured_data,
         }
-        # retry_allowed 仅对 NOT_APPLIED 为 True:允许在重新通过完整 PreToolUse
-        # 后再次执行;APPLIED 无需重试,UNKNOWN 禁止盲目重试。
-        retry_allowed = outcome is OperationOutcome.NOT_APPLIED
+        # retry_allowed 只由回执显式声明驱动:NOT_APPLIED 说明"未生效",但不等于
+        # "值得重试";缺省不可重试,避免 AgentLoop 对确定性失败反复重排队。
+        retry_allowed = outcome is OperationOutcome.NOT_APPLIED and receipt.retryable
         return ProcessedToolResult(
             tool_call_id=receipt.tool_call_id,
             operation_outcome=outcome,
