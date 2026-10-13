@@ -41,6 +41,27 @@ REASON_TIMEOUT_BEFORE_WRITE: Final = "TIMEOUT_BEFORE_WRITE"
 REASON_RESPONSE_LOST_AFTER_COMMIT: Final = "RESPONSE_LOST_AFTER_COMMIT"
 """回执 ``reason_code``:不参与状态迁移,供 Runtime 记录与诊断。"""
 
+RETRYABLE_REASON_CODES: Final[frozenset[str]] = frozenset()
+"""可安全重试的确定失败原因;当前为空。
+
+"确定失败"只说明这次没生效,不说明再试一次值得:同一 ``operation_id`` /
+``expected_version`` 下,任何确定失败重试都只会得到同一回执。
+
+- ``PLATFORM_FAILURE`` 由持续不可用(``permanent_failure``)产生,重试仍会失败;
+- ``VERSION_CONFLICT`` 不能在同一 ``operation_id`` 上改写 ``expected_version``,
+  且平台已按该 ``operation_id`` 记录失败回执、重复提交只会回放旧结论。正确做法
+  是把失败返回模型,重新读取资源后创建**新的** ToolCall/Operation(必要时重新确认)。
+
+因此当前集合为空:任何确定失败都落 ToolCall 终态。若将来需要自动重试,应新增
+独立原因码(如 ``PLATFORM_UNAVAILABLE`` / ``RATE_LIMITED``)并以持久化的重试预算
+与退避约束,而不是复用这些"重试必然同结果"的码值。
+"""
+
+
+def is_retryable_reason_code(reason_code: str | None) -> bool:
+    """确定性失败是否允许在重新通过完整 PreToolUse 后再次执行。"""
+    return reason_code in RETRYABLE_REASON_CODES
+
 
 @dataclass(frozen=True)
 class UpdatePriceCommand:
@@ -73,6 +94,9 @@ class ExecutionReceipt:
 
     ``status`` 为 UNKNOWN 时观测字段一律为 ``None``——调用方未收到响应,
     不得从回执臆测写入结果,只能调度 ``reconcile``。
+
+    ``retryable`` 是执行端对"这次失败是否值得重试"的显式声明,默认 False;
+    Runtime 只有在它为 True 时才允许该 ToolCall 重走完整 PreToolUse 后再次执行。
     """
 
     operation_id: str
@@ -83,6 +107,7 @@ class ExecutionReceipt:
     listing_version: int | None = None
     external_ref: str | None = None
     reason_code: str | None = None
+    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,10 +144,12 @@ __all__ = [
     "REASON_RESPONSE_LOST_AFTER_COMMIT",
     "REASON_TIMEOUT_BEFORE_WRITE",
     "REASON_VERSION_CONFLICT",
+    "RETRYABLE_REASON_CODES",
     "CommerceAdapter",
     "ExecutionReceipt",
     "ExecutionStatus",
     "ReconcileResult",
     "ReconciliationCommand",
     "UpdatePriceCommand",
+    "is_retryable_reason_code",
 ]

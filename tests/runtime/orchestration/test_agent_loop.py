@@ -43,7 +43,7 @@ from runtime.execution.pretool.decisions import (
 from runtime.execution.pretool.pipeline import ToolCallRequest
 from runtime.execution.reconciliation import ReconcileResult, ReconciliationService
 from runtime.execution.run_service import RunService
-from runtime.execution.tool_executor import PreparedToolWrite
+from runtime.execution.tool_executor import PreparedToolWrite, PreparedWriteRejection
 from runtime.execution.tool_result_processor import (
     ToolExecutionReceipt,
     ToolResultProcessor,
@@ -255,14 +255,38 @@ class FakeReadHandler:
 
 
 class FakeWriteHandler:
-    """写 Tool 执行替身;``fail=True`` 模拟响应丢失。"""
+    """写 Tool 执行替身。
 
-    def __init__(self, *, fail: bool = False) -> None:
+    ``fail=True`` 模拟响应丢失(UNKNOWN);``rejection`` 模拟 prepare 阶段的确定性
+    拒绝;``execution_status``/``execution_retryable`` 模拟适配器回执及其显式
+    可重试声明。
+    """
+
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        rejection: PreparedWriteRejection | None = None,
+        execution_status: str = "APPLIED",
+        execution_retryable: bool = False,
+    ) -> None:
         self.fail = fail
+        self.rejection = rejection
+        self.execution_status = execution_status
+        self.execution_retryable = execution_retryable
         self.calls: list[dict[str, Any]] = []
+        self.prepare_calls = 0
         self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
     async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
+        self.prepare_calls += 1
+        if self.rejection is not None:
+            return PreparedToolWrite(
+                command=None,
+                expected_state=None,
+                request_fingerprint="rejected-fingerprint",
+                rejection=self.rejection,
+            )
         return PreparedToolWrite(
             command={"arguments": dict(normalized_arguments)},
             expected_state=dict(self.expected_state),
@@ -287,11 +311,13 @@ class FakeWriteHandler:
         )
         if self.fail:
             raise RuntimeError("connection lost")
+        applied = self.execution_status == "APPLIED"
         return ToolExecutionReceipt(
             tool_call_id=tool_call_id,
-            status="APPLIED",
-            payload={"result": "written"},
-            external_reference="ext-1",
+            status=self.execution_status,
+            payload={"result": "written"} if applied else None,
+            external_reference="ext-1" if applied else None,
+            retryable=self.execution_retryable,
         )
 
 
@@ -1130,6 +1156,160 @@ async def test_require_confirmation_assigns_operation_id_and_resumes_after_accep
     assert len(write_handler.calls) == 1
     # 复用确认前分配的稳定 operation_id(不重新生成)。
     assert write_handler.calls[0]["operation_id"] == operation_id
+
+
+async def _drive_write_to_confirmation_and_accept(
+    *,
+    make_agent_loop,
+    db_session: AsyncSession,
+    run: Run,
+    run_service: RunService,
+    actor_id: uuid.UUID,
+    write_handler: FakeWriteHandler,
+) -> Lease:
+    """驱动写 Tool 到人工确认并接受,返回恢复推进的租约。"""
+    spec = ConfirmationSpec(
+        tool_name=WRITE_TOOL_KEY,
+        normalized_arguments={"listing_id": "L1"},
+        resource_versions={"listing": "v1"},
+    )
+    lease = await _claim_advance_job(db_session, run)
+    first = await make_agent_loop(
+        backend=SequencedBackend([_write_round()]),
+        pipeline=ScriptedPipeline([require_confirmation(confirmation_spec=spec)]),
+        write_handler=write_handler,
+    ).advance(run.id, lease_token=lease.lease_token)
+    assert first.run_status is RunStatus.WAITING_CONFIRMATION
+
+    confirmation = (
+        await db_session.scalars(
+            select(ConfirmationRequest).where(
+                ConfirmationRequest.workspace_id == run.workspace_id,
+                ConfirmationRequest.run_id == run.id,
+            )
+        )
+    ).one()
+    assert await LeaseService(db_session).complete(lease.job_id, lease.lease_token)
+    accepted = await ConfirmationService(
+        db_session, workspace_id=run.workspace_id, actor_id=actor_id
+    ).accept(confirmation.id, now=fake_clock_now())
+    assert accepted.status.value == "ACCEPTED"
+    await run_service.transition_run(
+        run_id=run.id,
+        target_status=RunStatus.QUEUED,
+        event_kind="RUN_RESUMED",
+        event_payload={"reason": "CONFIRMATION_ACCEPTED"},
+        expected_status=RunStatus.WAITING_CONFIRMATION,
+    )
+    return await _claim_advance_job(db_session, run)
+
+
+async def test_deterministic_rejection_is_executed_once_without_requeue(
+    make_agent_loop,
+    seeded_run: Run,
+    db_session: AsyncSession,
+    seeded_workspace,
+    run_service: RunService,
+) -> None:
+    """确定性拒绝只执行一次:ToolCall 落 FAILED,不再产生 ADVANCE_RUN 重排队。
+
+    NOT_APPLIED 不等于"值得重试":把两者画等号会让同一个 ToolCall 反复经
+    PreToolUse → prepare → 拒绝,永远走不到终态。
+    """
+    run = seeded_run
+    write_handler = FakeWriteHandler(
+        rejection=PreparedWriteRejection(
+            status="FAILED", error_code="RESOURCE_CHANGED", context={"listing_id": "L1"}
+        )
+    )
+    recovery = await _drive_write_to_confirmation_and_accept(
+        make_agent_loop=make_agent_loop,
+        db_session=db_session,
+        run=run,
+        run_service=run_service,
+        actor_id=seeded_workspace.user.id,
+        write_handler=write_handler,
+    )
+    second = await make_agent_loop(
+        backend=SequencedBackend([]),
+        pipeline=ScriptedPipeline([allow()]),
+        write_handler=write_handler,
+    ).advance(run.id, lease_token=recovery.lease_token)
+
+    # 模型拿到失败 Tool Result 后收尾:Run 直接完成,不重新排队。
+    assert second.run_status is RunStatus.COMPLETED
+    assert second.next_job_kind is None
+    calls = await _load_tool_calls(db_session, run)
+    assert calls[0].status is ToolCallStatus.FAILED
+    assert calls[0].failure_code == "RESOURCE_CHANGED"
+    assert write_handler.prepare_calls == 1
+    assert write_handler.calls == []
+
+
+async def test_explicitly_retryable_write_failure_requeues_for_revalidation(
+    make_agent_loop,
+    seeded_run: Run,
+    db_session: AsyncSession,
+    seeded_workspace,
+    run_service: RunService,
+) -> None:
+    """回执显式声明可重试时才重排队:ToolCall 回 VALIDATING + ADVANCE_RUN。"""
+    run = seeded_run
+    write_handler = FakeWriteHandler(
+        execution_status="FAILED", execution_retryable=True
+    )
+    recovery = await _drive_write_to_confirmation_and_accept(
+        make_agent_loop=make_agent_loop,
+        db_session=db_session,
+        run=run,
+        run_service=run_service,
+        actor_id=seeded_workspace.user.id,
+        write_handler=write_handler,
+    )
+    second = await make_agent_loop(
+        backend=SequencedBackend([]),
+        pipeline=ScriptedPipeline([allow()]),
+        write_handler=write_handler,
+    ).advance(run.id, lease_token=recovery.lease_token)
+
+    assert second.run_status is RunStatus.RUNNING
+    assert second.next_job_kind is RunJobKind.ADVANCE_RUN
+    calls = await _load_tool_calls(db_session, run)
+    assert calls[0].status is ToolCallStatus.VALIDATING
+    assert len(write_handler.calls) == 1
+
+
+async def test_deterministic_adapter_failure_is_not_requeued(
+    make_agent_loop,
+    seeded_run: Run,
+    db_session: AsyncSession,
+    seeded_workspace,
+    run_service: RunService,
+) -> None:
+    """适配器确定失败且未声明可重试:ToolCall FAILED,Run 继续由模型收尾。"""
+    run = seeded_run
+    write_handler = FakeWriteHandler(execution_status="FAILED")
+    recovery = await _drive_write_to_confirmation_and_accept(
+        make_agent_loop=make_agent_loop,
+        db_session=db_session,
+        run=run,
+        run_service=run_service,
+        actor_id=seeded_workspace.user.id,
+        write_handler=write_handler,
+    )
+    second = await make_agent_loop(
+        backend=SequencedBackend([]),
+        pipeline=ScriptedPipeline([allow()]),
+        write_handler=write_handler,
+    ).advance(run.id, lease_token=recovery.lease_token)
+
+    assert second.run_status is RunStatus.COMPLETED
+    assert second.next_job_kind is None
+    calls = await _load_tool_calls(db_session, run)
+    assert calls[0].status is ToolCallStatus.FAILED
+    # 外部调用只发生过一次:不重排队就不会有第二次 Adapter 调用。
+    assert len(write_handler.calls) == 1
+    assert write_handler.prepare_calls == 1
 
 
 # ---------------------------------------------------------------------------

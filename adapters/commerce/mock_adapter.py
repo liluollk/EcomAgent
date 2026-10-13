@@ -42,6 +42,7 @@ from adapters.commerce.protocol import (
     ExecutionStatus,
     ReconciliationCommand,
     UpdatePriceCommand,
+    is_retryable_reason_code,
 )
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
@@ -232,11 +233,13 @@ class MockCommerceAdapter:
         *,
         reason_code: str,
     ) -> ExecutionReceipt:
+        """构造回执;可重试性由 ``reason_code`` 的受控集合确定性给出。"""
         return ExecutionReceipt(
             operation_id=command.operation_id,
             idempotency_key=command.idempotency_key,
             status=status,
             reason_code=reason_code,
+            retryable=is_retryable_reason_code(reason_code),
         )
 
     def _record(

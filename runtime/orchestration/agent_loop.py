@@ -19,13 +19,15 @@
   WAITING_CONFIRMATION,停止后续调用;
 - 执行结果 ``UNKNOWN``:Run 已由 OperationService 迁移 WAITING_RECONCILIATION,
   Loop 停止后续并把 ``next_job_kind=RECONCILE_OPERATION`` 暴露在结果里;
-  ``NOT_APPLIED``(retry_allowed)ToolCall 回 VALIDATING,Loop 停止并把
-  ``next_job_kind=ADVANCE_RUN`` 暴露给编排层重新排队,恢复后重走 PreToolUse。
+  ``NOT_APPLIED`` 且回执显式声明可重试时 ToolCall 回 VALIDATING,Loop 停止并把
+  ``next_job_kind=ADVANCE_RUN`` 暴露给编排层重新排队,恢复后重走 PreToolUse;
+  不可重试的确定失败(含 prepare 阶段拒绝)ToolCall 直接 FAILED,ToolResult
+  回填后由模型决定下一步,不再重排队。
 
 预算(:class:`~runtime.orchestration.limits.RunLimits`):每轮模型调用前记账
 模型轮次,每个新 ToolCall 处理前记账 ToolCall 数;轮次开始前检查 Run
 Deadline;读 Tool 执行后检查单 Tool 超时(写 Tool 的不确定性由两阶段执行与
-回查语义覆盖);ueconciliation 次数由 Task 8 的 ReconciliationService 预算
+回查语义覆盖);reconciliation 次数由 Task 8 的 ReconciliationService 预算
 执行,Loop 只传递。超限抛
 :class:`~runtime.orchestration.limits.LoopLimitExceeded`,Run 以对应错误码
 FAILED,不能继续自动循环。可重试 BackendFailed 重启流并创建新 RunAttempt;
@@ -935,8 +937,11 @@ class AgentLoop:
                 next_job_kind=recorded.next_job_kind,
             )
         if recorded.tool_call_status is ToolCallStatus.VALIDATING:
-            # NOT_APPLIED(retry_allowed):重新排队,恢复后重走完整 PreToolUse。
+            # NOT_APPLIED + retry_allowed:重新排队,恢复后重走完整 PreToolUse。
             return _Stop(RunStatus.RUNNING, next_job_kind=RunJobKind.ADVANCE_RUN)
+        # APPLIED 与不可重试的确定失败都回填 Tool Result 让模型决定下一步:
+        # NOT_APPLIED 且 retry_allowed=False 时 ToolCall 已是 FAILED 终态,
+        # 不会再次进入 PreToolUse(确定性拒绝只执行一次)。
         await self._append_tool_message(
             run,
             call_id=str(call.id),
@@ -1099,7 +1104,8 @@ class AgentLoop:
         ``tool_calls.operation_id`` 对 operations 表有复合外键,因此同时创建
         PREPARED Operation 行(代表已分配 ID,不代表已发起外部写入);执行
         边界 ``OperationService.begin`` 幂等复用同一行并推进 EXECUTING。
-        Adapter Key 来自该写 Tool 自己的执行 Profile。
+        Adapter Key 与完整的幂等/回查能力都来自该写 Tool 自己的执行 Profile:
+        预约阶段就落库完整能力,执行边界只做一致性校验,不接管能力写入。
         """
         self._session.add(
             Operation(
@@ -1108,6 +1114,10 @@ class AgentLoop:
                 operation_id=operation_id,
                 idempotency_key=f"op:{operation_id}",
                 adapter_key=execution_profile.adapter_key,
+                supports_native_idempotency=(
+                    execution_profile.supports_native_idempotency
+                ),
+                supports_reconciliation=execution_profile.supports_reconciliation,
                 status=OperationStatus.PREPARED,
             )
         )
@@ -1145,9 +1155,15 @@ class AgentLoop:
 
 
 def _projection_content(processed: ProcessedToolResult) -> str:
-    """模型可见的脱敏投影序列化为 ToolResult 内容。"""
+    """模型可见的脱敏投影序列化为 ToolResult 内容。
+
+    除数据本体外固定带上 ``operation_outcome`` 与 ``error_code``:写入确定失败
+    后模型必须能看到"为什么没成功",否则只能收到空 ``{}`` 而无法决定下一步。
+    """
     return json.dumps(
         {
+            "operation_outcome": processed.operation_outcome.value,
+            "error_code": processed.tool_call_error,
             "data": dict(processed.context_projection.structured_data),
             "text": processed.context_projection.text,
             "truncated": processed.context_projection.truncated,

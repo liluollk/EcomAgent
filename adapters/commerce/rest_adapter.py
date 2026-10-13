@@ -18,6 +18,7 @@ from adapters.commerce.protocol import (
     ExecutionStatus,
     ReconciliationCommand,
     UpdatePriceCommand,
+    is_retryable_reason_code,
 )
 from runtime.execution.reconciliation import ReconcileResult
 
@@ -225,11 +226,13 @@ class RestCommerceAdapter:
 
     @staticmethod
     def _failed(command: UpdatePriceCommand, reason_code: str) -> ExecutionReceipt:
+        """确定失败回执;可重试性由 ``reason_code`` 的受控集合确定性给出。"""
         return ExecutionReceipt(
             operation_id=command.operation_id,
             idempotency_key=command.idempotency_key,
             status=ExecutionStatus.FAILED,
             reason_code=reason_code,
+            retryable=is_retryable_reason_code(reason_code),
         )
 
 

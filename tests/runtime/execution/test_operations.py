@@ -246,7 +246,7 @@ async def test_record_result_not_applied_returns_to_validation(
     seeded_write_tool_call: ToolCall,
     operation_service: OperationService,
 ) -> None:
-    """NOT_APPLIED:ToolCall 回 VALIDATING(重走 PreToolUse),Operation NOT_APPLIED。"""
+    """NOT_APPLIED + retry_allowed:ToolCall 回 VALIDATING,Operation NOT_APPLIED。"""
     begun = await operation_service.begin(
         seeded_write_tool_call.id,
         adapter_key="test-adapter",
@@ -257,13 +257,49 @@ async def test_record_result_not_applied_returns_to_validation(
             tool_call_id=begun.tool_call_id,
             outcome=OperationOutcome.NOT_APPLIED,
             payload={"result": "not_found"},
+            retry_allowed=True,
         )
     )
     assert result.tool_call_status == ToolCallStatus.VALIDATING
+    assert result.retry_allowed is True
     tool_call = await fresh_tool_call(
         db_session, seeded_run.workspace_id, seeded_write_tool_call.id
     )
     assert tool_call.status == ToolCallStatus.VALIDATING
+    run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
+    assert run.status == PersistenceRunStatus.RUNNING
+
+
+async def test_record_result_not_applied_without_retry_is_terminal(
+    db_session: AsyncSession,
+    seeded_run: Run,
+    seeded_write_tool_call: ToolCall,
+    operation_service: OperationService,
+) -> None:
+    """NOT_APPLIED 且未声明可重试:ToolCall 直接 FAILED,不回到 VALIDATING。
+
+    这条路径是"确定性失败"与"值得重试"的分界:混为一谈会让 AgentLoop 对同一个
+    ToolCall 反复重排队。
+    """
+    begun = await operation_service.begin(
+        seeded_write_tool_call.id,
+        adapter_key="test-adapter",
+        expected_state=TEST_EXPECTED_STATE,
+    )
+    result = await operation_service.record_result(
+        OperationResultRecord(
+            tool_call_id=begun.tool_call_id,
+            outcome=OperationOutcome.NOT_APPLIED,
+            error_code="LISTING_NOT_FOUND",
+        )
+    )
+    assert result.tool_call_status == ToolCallStatus.FAILED
+    assert result.retry_allowed is False
+    tool_call = await fresh_tool_call(
+        db_session, seeded_run.workspace_id, seeded_write_tool_call.id
+    )
+    assert tool_call.status == ToolCallStatus.FAILED
+    assert tool_call.failure_code == "LISTING_NOT_FOUND"
     run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
     assert run.status == PersistenceRunStatus.RUNNING
 
