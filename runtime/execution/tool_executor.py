@@ -8,8 +8,8 @@
    (服务端命令 + 可回放 ``expected_state``);该阶段不得产生外部副作用。
    ``prepare`` 返回确定性 ``rejection`` 时**不进入执行边界**:直接落
    ``NOT_APPLIED``,不写 ``EXECUTING``、不写执行允许审计、不调用 Adapter,
-   因此不存在"可能已执行"的窗口;拒绝默认不可重试(``retryable=False``),
-   ToolCall 直接进终态而不再重排队;
+   因此不存在"可能已执行"的窗口;拒绝一律不可重试,ToolCall 直接进终态而
+   不再重排队;
 2. **短事务 begin**::meth:`OperationService.begin` 幂等创建/读取稳定
    Operation,收敛状态机并写入 ``expected_state``(``EXECUTING`` 与 EXECUTE
    Attempt);调用方在该事务提交后才发出外部调用——崩溃后恢复可凭 Operation
@@ -73,15 +73,16 @@ class PreparedWriteRejection:
     信息),只写进 ``last_receipt``;拒绝不存在可回查的业务目标,因此它绝不
     参与 Reconciliation。
 
-    ``retryable`` 默认 False:确定性拒绝往往由资源状态或策略决定,重排队通常
-    会再次走到同一拒绝;只有确知"再次 prepare 可能成功"时才显式置 True。
+    **没有可重试字段**:确定性准备拒绝与自动重试语义冲突——同一资源状态/策略
+    下重排队通常得到同一拒绝。因此拒绝一律让 ToolCall 落 ``FAILED`` 终态,把
+    错误返回模型;暂时性基础设施故障走独立的 retryable 回执契约,资源版本变化
+    则应产生新的 ToolCall/Operation,都不得借拒绝路径复用旧目标与旧确认。
     """
 
     status: Literal["FAILED"]
     error_code: str
     context: Mapping[str, Any]
     payload: Mapping[str, Any] | None = None
-    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,9 +245,9 @@ class ToolExecutor:
     ) -> ExecutedToolCall:
         """确定性拒绝:不 begin、不调用 Adapter,直接落 NOT_APPLIED。
 
-        可重试性只由 ``rejection.retryable`` 决定(默认不可重试),拒绝的
-        ``request_fingerprint`` 随只追加审计事件留痕:``last_receipt`` 是会被
-        后续结果覆盖的最新诊断快照,不能当作不可变证据。
+        拒绝一律不可重试(ToolCall 直接 ``FAILED``):确定性拒绝重排队只会再次
+        走到同一拒绝。拒绝的 ``request_fingerprint`` 随只追加审计事件留痕:
+        ``last_receipt`` 是会被后续结果覆盖的最新诊断快照,不能当作不可变证据。
         """
         rejection = prepared.rejection
         assert rejection is not None
@@ -258,7 +259,6 @@ class ToolExecutor:
                 status=rejection.status,
                 payload=rejection.payload,
                 error_code=rejection.error_code,
-                retryable=rejection.retryable,
             ),
             output_schema=self._output_schema,
         )
@@ -273,7 +273,6 @@ class ToolExecutor:
             rejection_context=rejection.context,
             error_code=rejection.error_code,
             request_fingerprint=prepared.request_fingerprint,
-            retryable=rejection.retryable,
             supports_native_idempotency=(
                 self._execution_profile.supports_native_idempotency
             ),

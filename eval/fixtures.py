@@ -116,8 +116,10 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM run_policy_snapshots WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM runs WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM sessions WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM product_operations.inventory_levels WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.price_locks WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.listings WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM product_operations.fulfillment_locations WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.products WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.stores WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_permissions WHERE workspace_id = :ws", "ws"),
@@ -178,7 +180,7 @@ async def _seed_listing(
         current_price=price,
         cost_price=_DEFAULT_COST_PRICE,
         status=(
-            ListingStatus(status.upper()) if status is not None else ListingStatus.ACTIVE
+            ListingStatus(status.upper()) if status is not None else ListingStatus.PUBLISHED
         ),
     )
     session.add(listing)

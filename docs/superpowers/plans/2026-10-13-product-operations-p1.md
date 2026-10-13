@@ -527,12 +527,16 @@ Batch 1 架构验收通过；上述验收条件里与状态机相关的用例是
   单点定义（`PLATFORM_FAILURE`、`VERSION_CONFLICT`），随 `ExecutionReceipt.
   retryable` → `UpdatePriceWriteReceipt.retryable` → `ToolExecutionReceipt`
   透传；
+  > **Task 2.3 修正**：该集合已清空（两项都不是可重试语义），
+  > `PreparedWriteRejection.retryable` 已删除。以 Task 2.3 为准。
 - **确认预约即持久化完整执行能力**：`_assign_operation_id` 写入
   `supports_native_idempotency` / `supports_reconciliation`，`begin` 的全部
   复用路径（含 NULL 分支）统一比较能力，不再因 `expected_state is NULL` 覆盖；
 - **受控来源标记**：`record_rejected_preparation` 写
   `last_receipt.stage="PREPARATION"` 与 `kind="DETERMINISTIC_REJECTION"`；
   只有 `NOT_APPLIED + NULL + DETERMINISTIC_REJECTION` 允许重新绑定目标；
+  > **Task 2.3 修正**：还需**不存在 EXECUTE Attempt**；且该标记不再覆盖已有
+  > 执行回执的 `NOT_APPLIED`。
 - **只追加证据**：`request_fingerprint` 写进 `TOOL_WRITE_REJECTED` 审计事件
   （`last_receipt` 是会被后续结果覆盖的最新诊断快照，不作不可变证据）；
 - **模型可见结果**：ToolResult 内容固定带 `operation_outcome` 与 `error_code`，
@@ -552,6 +556,8 @@ PreToolUse"语义不经过 execute 回执，因此不受本次 `retry_allowed` �
 - [x] 覆盖 NULL 分支能力不一致 → `OperationConflictError` 且不覆盖已落库能力；
 - [x] 覆盖拒绝路径 ToolCall 落 `FAILED`（默认不可重试）、`retry_allowed=True`
   时才回 `VALIDATING`；
+  > **Task 2.3 修正**：拒绝不再有可重试开关，一律落 `FAILED`；可重试性只属于
+  > **执行回执**（`ToolExecutionReceipt.retryable`）。
 - [x] 覆盖适配器确定失败的可重试/不可重试两条终态；
 - [x] 覆盖拒绝的 `request_fingerprint` 出现在 `TOOL_WRITE_REJECTED` 审计 payload；
 - [x] `test_tool_result_processor.py` 覆盖：`NOT_APPLIED` 缺省不可重试，仅
@@ -567,6 +573,81 @@ PreToolUse"语义不经过 execute 回执，因此不受本次 `retry_allowed` �
 
 **注意**：`retry_allowed=True` 的失败仍会重新排队；其上界由 Run 预算
 （`max_tool_calls`、Run Deadline、单 Tool 超时）承担，本次不再新增重试计数。
+
+---
+
+### Task 2.3: 移除错误的重试语义并保护执行来源
+
+**Files:**
+- Modify: `adapters/commerce/protocol.py`
+- Modify: `runtime/execution/operations.py`
+- Modify: `runtime/execution/tool_executor.py`
+- Modify: `eval/datasets/recovery/faults.yaml`、`eval/recovery_suite.py`
+- Modify: `tests/adapters/commerce/test_mock_adapter.py`、
+  `tests/runtime/execution/test_prepared_writes.py`、
+  `tests/runtime/orchestration/test_agent_loop.py`、
+  `tests/eval/test_recovery_suite.py`
+
+**背景（Task 2.2 三处决策的复评结论）**
+
+Task 2.2 的 `a283598` 主链路正确，但三项决策里只有"拒绝上下文放
+`last_receipt`"可保留，另两处需要收紧——不为了保住现有 Eval 预期而保留错误的
+**生产**语义：
+
+1. **可重试集合与真实状态机冲突**。`PLATFORM_FAILURE` 由
+   `permanent_failure`（持续不可用）产生，包装成"暂时不可用"只是让 Eval 通过，
+   会导致持续重排；`VERSION_CONFLICT` 也无法在同一 `operation_id` 下更新
+   `expected_version`，且平台已按该 `operation_id` 记录失败回执，重试只会回放
+   旧结论。两者都会把 ToolCall 带入**没有成功出口的重排循环**。
+2. **最新拒绝会覆盖外部执行来源**。允许已有 `NOT_APPLIED` Operation 记录
+   prepare 拒绝，并把 `last_receipt` 覆盖为
+   `PREPARATION/DETERMINISTIC_REJECTION`——若该行此前已有 EXECUTE Attempt，
+   这个标记就不再能证明"从未外部执行"，还能据此获得空目标重绑资格。
+3. **`PreparedWriteRejection.retryable` 是危险逃生口**。商品域没有调用方，且
+   "确定性 prepare 拒绝"与"自动重试"语义相冲突，保留只会给后续 Inventory /
+   Pricing 留下误用空间。
+
+**锁定的规则**
+
+- `RETRYABLE_REASON_CODES` **当前为空**：任何确定失败都落 ToolCall 终态。将来若
+  需自动重试，新增独立原因码（如 `PLATFORM_UNAVAILABLE` / `RATE_LIMITED`）并
+  同时引入**持久化重试预算与退避**，而不是复用"重试必然同结果"的码值；
+- **删除 `PreparedWriteRejection.retryable`**：确定性拒绝让当前 ToolCall 终止、
+  把错误返回模型；暂时性基础设施故障走独立的 retryable failure 契约；资源版本
+  变化应产生新的 ToolCall/Operation，不得复用旧确认与旧目标；
+- **不覆盖执行来源**：`record_rejected_preparation` 仅对
+  `PREPARED`／上一次也是 prepare 拒绝的行改写 `last_receipt` 标记；已有执行历史
+  （存在 EXECUTE Attempt 或 `last_receipt.stage=EXECUTION`）的 `NOT_APPLIED`
+  保留原执行回执与完整 `expected_state`，新拒绝只写追加式
+  `TOOL_WRITE_REJECTED` 审计；
+- **空目标重绑双重前提**：`NOT_APPLIED + NULL + DETERMINISTIC_REJECTION` 之外，
+  还必须**不存在 EXECUTE Attempt**；因此不支持把拒绝限制为"仅 `PREPARED`"——同一
+  ToolCall 只有一行 Operation，重新校验后必须能在同一行重绑——但必须保护执行历史；
+- **Eval 口径**：`platform-temporarily-unavailable` 改为
+  `platform-persistent-failure`（持续故障不是"暂时不可用"，不能用 `permanent_failure`
+  模拟临时故障），期望改为确定 `NOT_APPLIED` + ToolCall `FAILED` 终态 + 零写 +
+  不产生 UNKNOWN，Run 由模型收尾 COMPLETED；
+- **Reconciliation 的 `NOT_APPLIED → VALIDATING`** 作为独立契约保持不变；它仍
+  缺少跨轮次写重试预算，不阻塞 Task 4/5，但 **Task 6 的 Pricing 恢复验收必须补上
+  该边界**。
+
+**验收条件**
+
+- [x] `test_prepared_writes.py` 覆盖：`PreparedWriteRejection` 无可重试字段；
+- [x] 覆盖"已到过执行边界的 `NOT_APPLIED` 不被后续拒绝改写来源标记"（保留
+  EXECUTION 回执与 `expected_state`，新拒绝只追加审计）；
+- [x] 覆盖"带标记但存在 EXECUTE Attempt 的 `NOT_APPLIED + NULL` → fail closed，
+  Adapter 零调用、目标保持 NULL"；
+- [x] `test_agent_loop.py` 覆盖：`VERSION_CONFLICT` 不重排、ToolCall `FAILED`、
+  失败返回模型（prepare 恰好一次、Adapter 一次）；
+- [x] `test_mock_adapter.py` 覆盖：`PLATFORM_FAILURE` / `VERSION_CONFLICT` 回执
+  `retryable is False`，`is_retryable_reason_code` 对全部确定失败码返回 False；
+- [x] `test_recovery_suite.py` / `faults.yaml` 使用新用例 id 与期望并通过；
+- [x] 全量门禁：`pytest` 875 passed、`ruff check .` 通过、`mypy runtime agents
+  adapters composition apps eval` 通过。
+
+**注意**：现有 Eval 预期为迁就错误语义而写成"回执显式声明 retryable → 回
+VALIDATING"，Task 2.3 后该预期不再成立；用例改为验证**持续故障的确定语义**。
 
 ---
 

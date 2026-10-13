@@ -258,8 +258,8 @@ class FakeWriteHandler:
     """写 Tool 执行替身。
 
     ``fail=True`` 模拟响应丢失(UNKNOWN);``rejection`` 模拟 prepare 阶段的确定性
-    拒绝;``execution_status``/``execution_retryable`` 模拟适配器回执及其显式
-    可重试声明。
+    拒绝;``execution_status``/``execution_retryable``/``execution_error_code``
+    模拟适配器回执及其显式可重试声明与诊断码。
     """
 
     def __init__(
@@ -269,11 +269,13 @@ class FakeWriteHandler:
         rejection: PreparedWriteRejection | None = None,
         execution_status: str = "APPLIED",
         execution_retryable: bool = False,
+        execution_error_code: str | None = None,
     ) -> None:
         self.fail = fail
         self.rejection = rejection
         self.execution_status = execution_status
         self.execution_retryable = execution_retryable
+        self.execution_error_code = execution_error_code
         self.calls: list[dict[str, Any]] = []
         self.prepare_calls = 0
         self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
@@ -317,6 +319,7 @@ class FakeWriteHandler:
             status=self.execution_status,
             payload={"result": "written"} if applied else None,
             external_reference="ext-1" if applied else None,
+            error_code=self.execution_error_code,
             retryable=self.execution_retryable,
         )
 
@@ -1308,6 +1311,47 @@ async def test_deterministic_adapter_failure_is_not_requeued(
     calls = await _load_tool_calls(db_session, run)
     assert calls[0].status is ToolCallStatus.FAILED
     # 外部调用只发生过一次:不重排队就不会有第二次 Adapter 调用。
+    assert len(write_handler.calls) == 1
+    assert write_handler.prepare_calls == 1
+
+
+async def test_version_conflict_failure_is_terminal_and_returned_to_model(
+    make_agent_loop,
+    seeded_run: Run,
+    db_session: AsyncSession,
+    seeded_workspace,
+    run_service: RunService,
+) -> None:
+    """``VERSION_CONFLICT`` 不重排同一个 ToolCall:失败返回模型。
+
+    同一 ``operation_id`` 下 ``expected_version`` 不允许改写,平台也已按该
+    ``operation_id`` 记录失败回执——重复提交只会回放旧结论。因此必须把失败
+    返回模型(重新读取资源后创建新的 ToolCall/Operation),而不是把 ToolCall
+    重排队回 VALIDATING。
+    """
+    run = seeded_run
+    write_handler = FakeWriteHandler(
+        execution_status="FAILED", execution_error_code="VERSION_CONFLICT"
+    )
+    recovery = await _drive_write_to_confirmation_and_accept(
+        make_agent_loop=make_agent_loop,
+        db_session=db_session,
+        run=run,
+        run_service=run_service,
+        actor_id=seeded_workspace.user.id,
+        write_handler=write_handler,
+    )
+    second = await make_agent_loop(
+        backend=SequencedBackend([]),
+        pipeline=ScriptedPipeline([allow()]),
+        write_handler=write_handler,
+    ).advance(run.id, lease_token=recovery.lease_token)
+
+    assert second.run_status is RunStatus.COMPLETED
+    assert second.next_job_kind is None
+    calls = await _load_tool_calls(db_session, run)
+    assert calls[0].status is ToolCallStatus.FAILED
+    assert calls[0].failure_code == "VERSION_CONFLICT"
     assert len(write_handler.calls) == 1
     assert write_handler.prepare_calls == 1
 

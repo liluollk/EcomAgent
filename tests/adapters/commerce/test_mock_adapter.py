@@ -19,20 +19,29 @@ import dataclasses
 import uuid
 from decimal import Decimal
 
-from fixtures.product_operations import ProductOperationsSeeder
+from fixtures.product_operations import ProductOperationsSeed, ProductOperationsSeeder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.commerce.faults import FaultInjector
 from adapters.commerce.mock_adapter import MockCommerceAdapter
 from adapters.commerce.protocol import (
+    REASON_CURRENCY_MISMATCH,
+    REASON_LISTING_NOT_FOUND,
+    REASON_PLATFORM_FAILURE,
+    REASON_VERSION_CONFLICT,
     CommerceAdapter,
     ExecutionStatus,
     ReconciliationCommand,
     UpdatePriceCommand,
+    is_retryable_reason_code,
 )
-from agents.product_operations.persistence.models import Listing
+from agents.product_operations.persistence.models import Listing, Product
 from agents.product_operations.persistence.repository import ProductRepository
 from runtime.execution.reconciliation import ReconcileResult
+
+
+#: 用例默认目标价,与 ``update_command`` 的默认值保持一致。
+TARGET_PRICE = Decimal("99.00")
 
 
 async def test_logical_write_count_is_test_observation_not_adapter_contract(
@@ -121,12 +130,70 @@ async def test_duplicate_submit_writes_listing_version_only_once(
     assert row.version == previous_version + 1
 
 
+async def test_reconcile_rejects_other_listing_with_same_price(
+    mock_adapter: MockCommerceAdapter,
+    product_seed: ProductOperationsSeed,
+    product_repository: ProductRepository,
+    db_session: AsyncSession,
+) -> None:
+    """错 Listing 但价格恰好相同 → 不得判定 APPLIED(回查绑定资源身份)。"""
+    first = await mock_adapter.execute(
+        update_command(product_seed.listing, operation_id="op-1")
+    )
+    assert first.status == ExecutionStatus.APPLIED
+    assert first.after_price == TARGET_PRICE
+
+    # 同一 Workspace/店铺下的另一 Listing,价格恰等于目标价(陷阱)。
+    twin_product = Product(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        sku=f"SKU-{uuid.uuid4()}",
+        title="twin-product",
+    )
+    db_session.add(twin_product)
+    await db_session.flush()
+    twin_listing = Listing(
+        id=uuid.uuid4(),
+        workspace_id=product_seed.workspace.id,
+        store_id=product_seed.store.id,
+        product_id=twin_product.id,
+        external_product_ref=f"item-{uuid.uuid4()}",
+        currency="CNY",
+        current_price=TARGET_PRICE,
+        cost_price=Decimal("88.00"),
+    )
+    db_session.add(twin_listing)
+    await db_session.flush()
+
+    # 自证陷阱有效:另一个 Listing 的价格确实等于目标价,只看价格的旧实现会被骗过。
+    twin = await product_repository.get_listing(
+        product_seed.workspace.id, twin_listing.id
+    )
+    assert twin is not None and twin.current_price == TARGET_PRICE
+
+    misrouted = ReconciliationCommand(
+        operation_id="op-1",
+        workspace_id=product_seed.workspace.id,
+        store_id=product_seed.store.id,
+        listing_id=twin_listing.id,
+        external_store_ref=str(product_seed.store.id),
+        external_product_ref=twin_listing.external_product_ref,
+        expected_price=TARGET_PRICE,
+        currency="CNY",
+    )
+    assert await mock_adapter.reconcile(misrouted) is ReconcileResult.NOT_APPLIED
+
+
 async def test_cas_version_conflict_rejects_write_without_logical_write(
     mock_adapter: MockCommerceAdapter,
     listing: Listing,
     product_repository: ProductRepository,
 ) -> None:
-    """expected_version 过期:确定失败(非 UNKNOWN),权威状态不被覆盖。"""
+    """expected_version 过期:确定失败(非 UNKNOWN),权威状态不被覆盖。
+
+    同 ``operation_id`` 下 ``expected_version`` 不允许改写,平台也按该
+    ``operation_id`` 记录了失败回执,因此该失败**不可重试**(重试只会回放旧结论)。
+    """
     receipt = await mock_adapter.execute(
         update_command(
             listing, operation_id="op-stale", expected_version=listing.version + 1
@@ -134,13 +201,31 @@ async def test_cas_version_conflict_rejects_write_without_logical_write(
     )
 
     assert receipt.status == ExecutionStatus.FAILED
-    assert receipt.reason_code == "VERSION_CONFLICT"
+    assert receipt.reason_code == REASON_VERSION_CONFLICT
+    assert receipt.retryable is False
     assert await mock_adapter.count_logical_writes("op-stale") == 0
 
     row = await product_repository.get_listing(listing.workspace_id, listing.id)
     assert row is not None
     assert row.version == listing.version
     assert row.current_price == Decimal("128.00")
+
+
+def test_definite_failures_are_never_declared_retryable() -> None:
+    """确定失败原因码都不会被标记为可重试(当前可重试集合为空)。
+
+    ``PLATFORM_FAILURE`` 由持续不可用产生,``VERSION_CONFLICT`` 无法在同一
+    ``operation_id`` 下改写目标版本:两者重试必然得到同一回执,不得进入
+    重排队循环。
+    """
+    for reason_code in (
+        REASON_PLATFORM_FAILURE,
+        REASON_VERSION_CONFLICT,
+        REASON_LISTING_NOT_FOUND,
+        REASON_CURRENCY_MISMATCH,
+        None,
+    ):
+        assert is_retryable_reason_code(reason_code) is False
 
 
 async def test_cas_success_increments_version_and_lands_price(
@@ -219,8 +304,11 @@ async def test_permanent_failure_is_definite_and_never_unknown(
     second = await mock_adapter.execute(update_command(listing, operation_id="op-2"))
 
     assert first.status == ExecutionStatus.FAILED
-    assert first.reason_code == "PLATFORM_FAILURE"
+    assert first.reason_code == REASON_PLATFORM_FAILURE
+    # 持续不可用不是"暂时不可用":不得交给 Runtime 重排队。
+    assert first.retryable is False
     assert second.status == ExecutionStatus.FAILED
+    assert second.retryable is False
     assert await mock_adapter.count_logical_writes("op-1") == 0
     assert await mock_adapter.count_logical_writes("op-2") == 0
 

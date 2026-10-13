@@ -10,14 +10,19 @@
 - 确认预约(``_assign_operation_id``)即持久化完整执行能力;``begin`` 的全部复用
   路径都比较能力,``expected_state IS NULL`` 不构成覆盖能力的理由;
 - ``expected_state IS NULL`` 的目标绑定只允许两种来源:PREPARED(尚未执行),或
-  NOT_APPLIED 且 ``last_receipt`` 带受控的 ``DETERMINISTIC_REJECTION`` 标记;
-  其余状态/来源一律 fail closed(历史脏数据不得被当成安全状态);
+  NOT_APPLIED 且 ``last_receipt`` 带受控的 ``DETERMINISTIC_REJECTION`` 标记**且
+  不存在 EXECUTE Attempt**;其余状态/来源一律 fail closed(历史脏数据不得被当成
+  安全状态);
 - 复用同一 ``operation_id`` 时不得改变业务目标,也不得改写执行能力;
 - prepare 阶段的确定性拒绝直接落 ``NOT_APPLIED``:不进入 ``EXECUTING``、不写
   执行允许审计、不新增 EXECUTE Attempt、Adapter 零调用——恢复方不会把它误判
   为"可能已执行";
-- ``retry_allowed`` 是显式回执契约:默认不可重试(确定性拒绝、确定性执行失败都
-  落 ToolCall FAILED,不再重排队),只有回执明确声明可重试才回 ``VALIDATING``。
+- 已到过执行边界的 ``NOT_APPLIED``(存在 EXECUTE Attempt 或 ``stage=EXECUTION``
+  回执)不被后续 prepare 拒绝改写来源标记:保留原执行回执与完整 ``expected_state``,
+  新拒绝只追加审计;
+- ``retry_allowed`` 是显式回执契约:默认不可重试(确定性执行失败落 ToolCall
+  FAILED,不再重排队),只有**执行回执**明确声明可重试才回 ``VALIDATING``;
+  prepare 拒绝没有可重试字段——重试走独立的 retryable failure 契约。
 """
 
 from __future__ import annotations
@@ -43,7 +48,12 @@ from runtime.execution.tool_executor import (
 )
 from runtime.execution.tool_result_processor import ToolExecutionReceipt, ToolResultProcessor
 from runtime.interfaces.state import RunStatus
-from runtime.persistence.base import OperationStatus, ToolCallStatus
+from runtime.persistence.base import (
+    OperationAttemptKind,
+    OperationAttemptStatus,
+    OperationStatus,
+    ToolCallStatus,
+)
 from runtime.persistence.models.configuration import (
     Agent,
     AgentVersion,
@@ -308,6 +318,37 @@ async def _execute_attempts(engine: AsyncEngine, operation_row_id: uuid.UUID) ->
         await session.close()
 
 
+async def _seed_execute_attempt(
+    engine: AsyncEngine, *, workspace_id: uuid.UUID, operation_id: uuid.UUID
+) -> None:
+    """预置一条 EXECUTE Attempt:模拟该 Operation 曾到过执行边界。
+
+    只追加证据(``begin`` 才写 Attempt,prepare 拒绝从不写):用于验证"已发生过
+    外部调用"的 Operation 既不能被空目标重绑,也不能被后续拒绝改写来源标记。
+    """
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        operation_row_id = await session.scalar(
+            select(Operation.id).where(
+                Operation.workspace_id == workspace_id,
+                Operation.operation_id == operation_id,
+            )
+        )
+        assert operation_row_id is not None
+        session.add(
+            OperationAttempt(
+                workspace_id=workspace_id,
+                operation_row_id=operation_row_id,
+                attempt_no=1,
+                kind=OperationAttemptKind.EXECUTE,
+                status=OperationAttemptStatus.RUNNING,
+            )
+        )
+        await session.commit()
+    finally:
+        await session.close()
+
+
 async def _uncertain_operations(engine: AsyncEngine, workspace_id: uuid.UUID) -> list[str]:
     """按 LeaseSweeper 的判据列出"可能已执行"的 Operation(EXECUTING/UNKNOWN)。"""
     session = AsyncSession(engine, expire_on_commit=False)
@@ -405,12 +446,11 @@ async def _cleanup_committed_seed(engine: AsyncEngine, ids: dict[str, Any]) -> N
 # ---------------------------------------------------------------------------
 
 
-def _rejection(*, retryable: bool = False) -> PreparedWriteRejection:
+def _rejection() -> PreparedWriteRejection:
     return PreparedWriteRejection(
         status="FAILED",
         error_code="RESOURCE_CHANGED",
         context={"sku": "SKU-001"},
-        retryable=retryable,
     )
 
 
@@ -456,9 +496,13 @@ def test_prepared_tool_write_requires_command_and_target(command: object | None)
         )
 
 
-def test_prepared_write_rejection_defaults_to_non_retryable() -> None:
-    """确定性拒绝默认不可重试:重试必须显式声明,不能靠缺省值放行。"""
-    assert _rejection().retryable is False
+def test_prepared_write_rejection_has_no_retry_escape_hatch() -> None:
+    """确定性拒绝没有可重试字段:重试走独立的 retryable failure 契约。
+
+    保留 ``retryable`` 会让"确定性 prepare 拒绝"与"自动重试"两种互斥语义混在
+    一起,给后续能力模块留下误用空间(拒绝后无限重排队)。
+    """
+    assert not hasattr(_rejection(), "retryable")
 
 
 # ---------------------------------------------------------------------------
@@ -762,27 +806,107 @@ async def test_prepared_rejection_is_audited_without_touching_adapter(
     assert persisted.last_receipt["kind"] == "DETERMINISTIC_REJECTION"
 
 
-async def test_retryable_rejection_returns_tool_call_to_validation(
-    runtime_write_fixture: RuntimeWriteFixture,
+async def test_rejection_after_execution_preserves_execution_source(
+    engine: AsyncEngine, runtime_write_fixture: RuntimeWriteFixture
 ) -> None:
-    """显式声明可重试的拒绝才回 VALIDATING:重试必须由回执契约发起。"""
+    """已到过执行边界的 NOT_APPLIED 不被后续 prepare 拒绝改写来源标记。
+
+    适配器执行过并返回 ``NOT_APPLIED`` 后,同一 ToolCall 再次 prepare 发生拒绝,
+    可以继续追加审计并结束 ToolCall,但**不得**把 ``last_receipt`` 覆盖成
+    ``PREPARATION/DETERMINISTIC_REJECTION``——那会把一条确实调用过外部平台的
+    Operation 抹成"从未进入执行边界",并据此获得空目标重绑资格。
+    """
+    operation_id = uuid.uuid4()
+    execution_receipt = {
+        "stage": "EXECUTION",
+        "outcome": "NOT_APPLIED",
+        "error_code": "PLATFORM_FAILURE",
+        "external_reference": None,
+        "payload": None,
+    }
+    await _seed_operation(
+        engine,
+        workspace_id=runtime_write_fixture.workspace_id,
+        tool_call_id=runtime_write_fixture.tool_call_id,
+        operation_id=operation_id,
+        status=OperationStatus.NOT_APPLIED,
+        expected_state=EXPECTED_STATE,
+        adapter_key=ADAPTER_KEY["key"],
+        supports_native_idempotency=True,
+        supports_reconciliation=True,
+        last_receipt=execution_receipt,
+    )
+    await _seed_execute_attempt(
+        engine, workspace_id=runtime_write_fixture.workspace_id, operation_id=operation_id
+    )
     handler = RecordingPreparedHandler(
-        engine=runtime_write_fixture.engine,
+        engine=engine,
         expected_state=None,
         rejection=PreparedWriteRejection(
-            status="FAILED",
-            error_code="RESOURCE_CHANGED",
-            context={"sku": "SKU-001"},
-            retryable=True,
+            status="FAILED", error_code="LISTING_NOT_FOUND", context={"sku": "SKU-001"}
         ),
     )
     outcome = await runtime_write_fixture.execute(handler=handler)
 
-    assert outcome.recorded.tool_call_status.value == "VALIDATING"
-    assert outcome.recorded.retry_allowed is True
-    persisted = await _load_operation(runtime_write_fixture.engine, outcome.recorded.operation_id)
-    assert persisted.last_receipt is not None
-    assert persisted.last_receipt["kind"] == "DETERMINISTIC_REJECTION"
+    assert outcome.begun is None
+    assert outcome.recorded.operation_id == operation_id
+    assert outcome.recorded.tool_call_status is ToolCallStatus.FAILED
+    assert outcome.recorded.retry_allowed is False
+    persisted = await _load_operation(engine, operation_id)
+    # 执行历史被保留:来源标记仍是 EXECUTION,目标与执行能力均未被改写。
+    assert persisted.last_receipt == execution_receipt
+    assert persisted.expected_state == EXPECTED_STATE
+    assert persisted.supports_native_idempotency is True
+    assert persisted.supports_reconciliation is True
+    # 新拒绝仍留痕:只追加的 TOOL_WRITE_REJECTED 审计事件。
+    payload = await _audit_payload(
+        engine,
+        workspace_id=runtime_write_fixture.workspace_id,
+        actor_id=runtime_write_fixture.actor_id,
+        run_id=runtime_write_fixture.run_id,
+        action="TOOL_WRITE_REJECTED",
+    )
+    assert payload["error_code"] == "LISTING_NOT_FOUND"
+
+
+async def test_null_binding_rejected_when_execute_attempt_exists(
+    engine: AsyncEngine, runtime_write_fixture: RuntimeWriteFixture
+) -> None:
+    """受控标记之外还必须确认没有 EXECUTE Attempt。
+
+    一条带 ``DETERMINISTIC_REJECTION`` 标记却已有 EXECUTE Attempt 的行(脏数据)
+    不能被当成"从未外部执行":它到过执行边界,空目标重绑会重复写。
+    """
+    operation_id = uuid.uuid4()
+    await _seed_operation(
+        engine,
+        workspace_id=runtime_write_fixture.workspace_id,
+        tool_call_id=runtime_write_fixture.tool_call_id,
+        operation_id=operation_id,
+        status=OperationStatus.NOT_APPLIED,
+        expected_state=None,
+        adapter_key=ADAPTER_KEY["key"],
+        supports_native_idempotency=True,
+        supports_reconciliation=True,
+        last_receipt={
+            "outcome": "NOT_APPLIED",
+            "stage": "PREPARATION",
+            "kind": "DETERMINISTIC_REJECTION",
+            "rejection_context": {"sku": "SKU-001"},
+        },
+    )
+    await _seed_execute_attempt(
+        engine, workspace_id=runtime_write_fixture.workspace_id, operation_id=operation_id
+    )
+    handler = RecordingPreparedHandler(engine=engine, expected_state=EXPECTED_STATE)
+
+    with pytest.raises(OperationConflictError, match="EXECUTE Attempt"):
+        await runtime_write_fixture.execute(handler=handler)
+
+    assert handler.execute_prepared_calls == 0
+    persisted = await _load_operation(engine, operation_id)
+    assert persisted.expected_state is None
+    assert persisted.status is OperationStatus.NOT_APPLIED
 
 
 async def test_deterministic_execution_failure_is_not_retried(

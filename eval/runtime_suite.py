@@ -803,6 +803,7 @@ class _RuntimeHarness:
                     lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=_TEST_LIMITS.reconcile_budget,
+                    write_retry_budget=_TEST_LIMITS.write_retry_budget,
                 )
                 outcome = await service.apply_result(verdict)
                 if not await LeaseService(session).complete(job.id, lease.lease_token):
@@ -1012,7 +1013,7 @@ def _price_scenario(case_id: str) -> Scenario:
                         "sku": "SKU-001",
                         "price": "128.00",
                         "currency": "CNY",
-                        "status": "ACTIVE",
+                        "status": "PUBLISHED",
                     }
                 ]
             },
