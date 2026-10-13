@@ -7,7 +7,6 @@
 
 import uuid
 from collections.abc import Mapping
-from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -23,10 +22,7 @@ from runtime.execution.operations import (
     OperationService,
     audit_write_decision,
 )
-from runtime.execution.tool_executor import (
-    PreparedToolWrite,
-    ToolExecutor,
-)
+from runtime.execution.tool_executor import ToolExecutor
 from runtime.execution.tool_result_processor import ToolExecutionReceipt, ToolResultProcessor
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
@@ -58,9 +54,6 @@ def tool_result_unknown(tool_call_id: uuid.UUID) -> OperationResultRecord:
         payload=None,
         error_code="RESPONSE_LOST",
     )
-
-
-TEST_EXPECTED_STATE: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
 
 async def fresh_tool_call(
@@ -102,11 +95,7 @@ async def test_unknown_write_schedules_reconciliation(
     seeded_run: Run,
 ) -> None:
     """计划原文:UNKNOWN → Run WAITING_RECONCILIATION + RECONCILE_OPERATION Job。"""
-    begun = await operation_service.begin(
-        seeded_write_tool_call.id,
-        adapter_key="test-adapter",
-        expected_state=TEST_EXPECTED_STATE,
-    )
+    begun = await operation_service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
     result = await operation_service.record_result(tool_result_unknown(begun.tool_call_id))
     assert result.run_status == RunStatus.WAITING_RECONCILIATION
     assert result.next_job_kind == RunJobKind.RECONCILE_OPERATION
@@ -147,16 +136,10 @@ async def test_begin_is_idempotent_and_visible_after_short_transaction(
         first = await operation_service.begin(
             seeded_write_tool_call.id,
             adapter_key="test-adapter",
-            expected_state=TEST_EXPECTED_STATE,
             supports_reconciliation=True,
         )
         await db_session.commit()
-        second = await operation_service.begin(
-            seeded_write_tool_call.id,
-            adapter_key="test-adapter",
-            expected_state=TEST_EXPECTED_STATE,
-            supports_reconciliation=True,
-        )
+        second = await operation_service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
         await db_session.commit()
 
         assert first.operation_id == second.operation_id
@@ -209,11 +192,7 @@ async def test_record_result_applied_completes_tool_call_and_keeps_run_running(
     events_repository: EventRepository,
 ) -> None:
     """APPLIED:ToolCall SUCCEEDED、Operation APPLIED,Run 保持 RUNNING。"""
-    begun = await operation_service.begin(
-        seeded_write_tool_call.id,
-        adapter_key="test-adapter",
-        expected_state=TEST_EXPECTED_STATE,
-    )
+    begun = await operation_service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
     result = await operation_service.record_result(
         OperationResultRecord(
             tool_call_id=begun.tool_call_id,
@@ -246,60 +225,20 @@ async def test_record_result_not_applied_returns_to_validation(
     seeded_write_tool_call: ToolCall,
     operation_service: OperationService,
 ) -> None:
-    """NOT_APPLIED + retry_allowed:ToolCall 回 VALIDATING,Operation NOT_APPLIED。"""
-    begun = await operation_service.begin(
-        seeded_write_tool_call.id,
-        adapter_key="test-adapter",
-        expected_state=TEST_EXPECTED_STATE,
-    )
+    """NOT_APPLIED:ToolCall 回 VALIDATING(重走 PreToolUse),Operation NOT_APPLIED。"""
+    begun = await operation_service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
     result = await operation_service.record_result(
         OperationResultRecord(
             tool_call_id=begun.tool_call_id,
             outcome=OperationOutcome.NOT_APPLIED,
             payload={"result": "not_found"},
-            retry_allowed=True,
         )
     )
     assert result.tool_call_status == ToolCallStatus.VALIDATING
-    assert result.retry_allowed is True
     tool_call = await fresh_tool_call(
         db_session, seeded_run.workspace_id, seeded_write_tool_call.id
     )
     assert tool_call.status == ToolCallStatus.VALIDATING
-    run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
-    assert run.status == PersistenceRunStatus.RUNNING
-
-
-async def test_record_result_not_applied_without_retry_is_terminal(
-    db_session: AsyncSession,
-    seeded_run: Run,
-    seeded_write_tool_call: ToolCall,
-    operation_service: OperationService,
-) -> None:
-    """NOT_APPLIED 且未声明可重试:ToolCall 直接 FAILED,不回到 VALIDATING。
-
-    这条路径是"确定性失败"与"值得重试"的分界:混为一谈会让 AgentLoop 对同一个
-    ToolCall 反复重排队。
-    """
-    begun = await operation_service.begin(
-        seeded_write_tool_call.id,
-        adapter_key="test-adapter",
-        expected_state=TEST_EXPECTED_STATE,
-    )
-    result = await operation_service.record_result(
-        OperationResultRecord(
-            tool_call_id=begun.tool_call_id,
-            outcome=OperationOutcome.NOT_APPLIED,
-            error_code="LISTING_NOT_FOUND",
-        )
-    )
-    assert result.tool_call_status == ToolCallStatus.FAILED
-    assert result.retry_allowed is False
-    tool_call = await fresh_tool_call(
-        db_session, seeded_run.workspace_id, seeded_write_tool_call.id
-    )
-    assert tool_call.status == ToolCallStatus.FAILED
-    assert tool_call.failure_code == "LISTING_NOT_FOUND"
     run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
     assert run.status == PersistenceRunStatus.RUNNING
 
@@ -321,11 +260,7 @@ async def test_stale_lease_token_rejected(
         expected_state_version=leased_run.state_version,
     )
     with pytest.raises(Exception, match="FENCING"):
-        await service.begin(
-            seeded_write_tool_call.id,
-            adapter_key="test-adapter",
-            expected_state=TEST_EXPECTED_STATE,
-        )
+        await service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
     run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
     assert run.status == PersistenceRunStatus.RUNNING
     assert run.state_version == leased_run.state_version
@@ -342,11 +277,7 @@ async def test_stale_state_version_rejected(
     """state_version CAS 失败 → InvalidTransition,Run 不迁移。"""
     from runtime.execution.transitions import InvalidTransition
 
-    begun = await operation_service.begin(
-        seeded_write_tool_call.id,
-        adapter_key="test-adapter",
-        expected_state=TEST_EXPECTED_STATE,
-    )
+    begun = await operation_service.begin(seeded_write_tool_call.id, adapter_key="test-adapter")
     # 用过期版本构造第二个服务(模拟旧 Worker:version 已被并发推进)。
     stale_service = OperationService(
         db_session,
@@ -474,25 +405,15 @@ class _FakeHandler:
         self.payload = payload if payload is not None else {"result": "ok"}
         self.raise_error = raise_error
         self.calls: list[dict] = []
-        self.prepared_arguments: dict | None = None
 
-    async def prepare(self, *, normalized_arguments: Mapping[str, object]) -> PreparedToolWrite:
-        self.prepared_arguments = dict(normalized_arguments)
-        return PreparedToolWrite(
-            command={"kind": "fake"},
-            expected_state=TEST_EXPECTED_STATE,
-            request_fingerprint="fake-request-fingerprint",
-        )
-
-    async def execute_prepared(
+    async def execute(
         self,
         *,
         tool_call_id: uuid.UUID,
         operation_id: uuid.UUID,
         idempotency_key: str,
-        prepared: PreparedToolWrite,
+        normalized_arguments: Mapping[str, object],
     ) -> ToolExecutionReceipt:
-        assert prepared.command == {"kind": "fake"}
         self.calls.append(
             {
                 "tool_call_id": tool_call_id,

@@ -74,10 +74,6 @@ class PolicyDecision(BaseModel):
     ``resource_versions`` 允许业务策略把授权资源的版本(如
     ``{"<resource_type>:<id>": 3}``)交给 Runtime 写进 ConfirmationSpec,从而在
     确认请求上持久化、跨进程重启依然可比对(架构文档 §6 第 7 条)。
-
-    ``policy_revision`` 是**业务策略自身的修订号**(可选):它解决的是另一个问题
-    ——用户确认发生在"某一版规则"之下,规则更新后旧确认不得继续有效。Runtime
-    只搬运这个整数,不理解任何业务规则内容,也不认识任何策略 stable key。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -86,7 +82,6 @@ class PolicyDecision(BaseModel):
     reason_code: str | None = None
     safe_message: str | None = None
     resource_versions: Mapping[str, int] = {}
-    policy_revision: int | None = None
 
 
 class ArgumentProvenance(BaseModel):
@@ -160,25 +155,12 @@ def deny(
 
 
 def require_input(
-    *,
-    input_requirement: InputRequirement,
-    schema_diagnostic: SchemaDiagnostic | None = None,
+    *, input_requirement: InputRequirement, schema_diagnostic: SchemaDiagnostic
 ) -> PreToolDecision:
-    """需要用户补充输入;决策携带 InputRequirement,可选 SchemaDiagnostic。
-
-    ``schema_diagnostic`` 为 ``None`` 表示这是**业务输入需求**:字段在 Input
-    Schema 中可选、却因业务执行前提而缺失(例如多位置店铺未指定
-    ``location_ref``),因此没有 Schema 层诊断。此时 ``detail`` 的
-    ``field_paths`` 取自 :class:`InputRequirement`,与「必须补充的字段」一致。
-    """
-    field_paths = (
-        schema_diagnostic.field_paths
-        if schema_diagnostic is not None
-        else input_requirement.field_paths
-    )
+    """需要用户补充输入;决策同时携带 InputRequirement 与 SchemaDiagnostic。"""
     return PreToolDecision(
         kind="REQUIRE_INPUT",
-        detail={"field_paths": field_paths},
+        detail={"field_paths": schema_diagnostic.field_paths},
         input_requirement=input_requirement,
         schema_diagnostic=schema_diagnostic,
     )

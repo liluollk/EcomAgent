@@ -5,8 +5,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-alpha, sku: SKU-3003, price: '96.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-beta, sku: SKU-3003, price: '108.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-alpha, sku: SKU-3003, price: '96.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-beta, sku: SKU-3003, price: '108.00', currency: CNY, status: ACTIVE}
   workspace: &workspace {name: eval-workspace}
   actor: &owner {role: owner, permissions: [product.read, product.price.write], store_scope_mode: ALL}
   messages:
@@ -26,8 +26,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-gamma, sku: SKU-4004, price: '68.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-delta, sku: SKU-4004, price: '75.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-gamma, sku: SKU-4004, price: '68.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-delta, sku: SKU-4004, price: '75.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages:
@@ -47,8 +47,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-epsilon, sku: SKU-5005, price: '55.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-epsilon, sku: SKU-5006, price: '65.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-epsilon, sku: SKU-5005, price: '55.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-epsilon, sku: SKU-5006, price: '65.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages:
@@ -68,8 +68,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-zeta, sku: SKU-6001, price: '101.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-zeta, sku: SKU-6002, price: '102.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-zeta, sku: SKU-6001, price: '101.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-zeta, sku: SKU-6002, price: '102.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages:
@@ -87,7 +87,7 @@ scenarios:
 - id: clarify-price-001
   category: incomplete_info
   risk_level: medium
-  initial_state: {listings: [{store_id: store-eta, sku: SKU-7001, price: '118.00', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-eta, sku: SKU-7001, price: '118.00', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages:
@@ -101,7 +101,7 @@ scenarios:
 - id: clarify-price-002
   category: incomplete_info
   risk_level: medium
-  initial_state: {listings: [{store_id: store-theta, sku: SKU-7002, price: '220.00', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-theta, sku: SKU-7002, price: '220.00', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages:

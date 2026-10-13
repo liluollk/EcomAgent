@@ -54,7 +54,6 @@ from runtime.execution.reconciliation import (
     ReconcileResult,
     ReconciliationService,
 )
-from runtime.execution.tool_executor import PreparedToolWrite
 from runtime.execution.tool_result_processor import (
     ToolExecutionReceipt,
     ToolResultProcessor,
@@ -192,22 +191,14 @@ class CrashWriteHandler:
         self.crash_point: str | None = None
         self.receipt_status = "APPLIED"
         self.receipt_payload: Any = {"result": "written"}
-        self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
-    async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
-        return PreparedToolWrite(
-            command={"arguments": dict(normalized_arguments)},
-            expected_state=dict(self.expected_state),
-            request_fingerprint="crash-write-fingerprint",
-        )
-
-    async def execute_prepared(
+    async def execute(
         self,
         *,
         tool_call_id: uuid.UUID,
         operation_id: uuid.UUID,
         idempotency_key: str,
-        prepared: PreparedToolWrite,
+        normalized_arguments: Mapping[str, Any],
     ) -> ToolExecutionReceipt:
         # 受控外部世界:进入 handler 即视为外部写入已生效。
         self.write_count += 1
@@ -216,7 +207,6 @@ class CrashWriteHandler:
                 "tool_call_id": tool_call_id,
                 "operation_id": operation_id,
                 "idempotency_key": idempotency_key,
-                "normalized_arguments": dict(prepared.command["arguments"]),
             }
         )
         if self.crash_point == AFTER_EXTERNAL_WRITE_BEFORE_RESULT:
@@ -397,7 +387,6 @@ class CrashHarness:
                     lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=TEST_LIMITS.reconcile_budget,
-                    write_retry_budget=TEST_LIMITS.write_retry_budget,
                 )
                 outcome = await service.apply_result(verdict)
                 assert await LeaseService(session).complete(job.id, lease.lease_token)
@@ -511,7 +500,6 @@ class CrashHarness:
                 return await service.begin(
                     tool_call.id,
                     adapter_key=_CRASH_ADAPTER_KEY,
-                    expected_state=dict(self.write_handler.expected_state),
                     supports_reconciliation=True,
                 )
         finally:
@@ -1049,14 +1037,11 @@ async def test_stale_fencing_token_rejected_without_second_write(
     stale_lease = await harness.claim_lease("stale-worker")
     begun = await harness.begin_operation(stale_lease)
     # 旧 Worker 已发出外部写请求(网络请求无法被租约撤回)。
-    prepared = await harness.write_handler.prepare(
-        normalized_arguments={"listing_id": "L1"}
-    )
-    await harness.write_handler.execute_prepared(
+    await harness.write_handler.execute(
         tool_call_id=tool_call.id,
         operation_id=begun.operation_id,
         idempotency_key=begun.idempotency_key,
-        prepared=prepared,
+        normalized_arguments={"listing_id": "L1"},
     )
     assert harness.external_write_count == 1
 

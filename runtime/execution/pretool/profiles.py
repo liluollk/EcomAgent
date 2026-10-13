@@ -85,10 +85,8 @@ class EmptyProvenanceResolver:
 class UnresolvableInputRequirement:
     """缺失字段不可补充:Runtime 内置 Tool 依赖 Schema 必填,不生成 Input。"""
 
-    async def resolve(
-        self, *, diagnostic: Any, arguments: Any
-    ) -> InputRequirement | None:
-        del diagnostic, arguments
+    async def resolve(self, *, diagnostic: Any) -> InputRequirement | None:
+        del diagnostic
         return None
 
 
@@ -110,9 +108,6 @@ class PreToolProfile:
     ``None`` 缺省值做隐式回退。``provenance_guard_fields`` 声明"已提供但来源
     不可信时必须退回 Input Request"的关键字段(架构文档 §5):Runtime 在
     argument_provenance 阶段按此声明做统一守卫,业务不需要包装阶段。
-    ``input_requirement_resolver`` 除了把 SchemaDiagnostic 转成 Input
-    Request,还会在**没有诊断**时被咨询:业务可按规范化参数声明"Schema 可选、
-    却是执行前提"的字段(如多位置店铺缺 ``location_ref``)。
     """
 
     input_normalizer: InputNormalizer

@@ -48,31 +48,12 @@ TOOL_ARGUMENT_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "update_price": ("store_id", "sku", "target_price"),
 }
 
-#: P1 新版本 Tool 的模型可见字段集合(设计 §4.1:用 ``store_ref``/``store_refs``
-#: 引用店铺,由 Service 经授权的 StoreReferenceResolver 解析成内部 UUID)。
-#: 与旧版本同 stable key 者按版本区分:``search_products`` 的 v3 用
-#: ``store_refs``,旧 v2 仍用 ``store_ids``,因此不并入上面的映射。
-P1_TOOL_ARGUMENT_FIELDS: Final[dict[str, tuple[str, ...]]] = {
-    "search_products": ("query", "store_refs"),
-    "get_listing": ("store_ref", "sku"),
-    "compare_listing_prices": ("sku", "store_refs"),
-    "set_listing_price": ("store_ref", "sku", "target_price"),
-    "get_inventory_level": ("store_ref", "sku", "location_ref"),
-    "adjust_inventory_quantity": ("store_ref", "sku", "location_ref", "delta", "reason"),
-    "publish_listing": ("store_ref", "sku"),
-    "unpublish_listing": ("store_ref", "sku", "reason"),
-}
-
 BusinessPolicyFactory = Callable[[PreToolProfileContext], Any]
 
 #: 需要"来源守卫"的关键字段:已提供但来源不可信时必须退回 Input Request。
 #: 取值来自架构文档 §5:店铺与 SKU 是可被模型猜测的写目标;金额由确定性
-#: 归一化判定,不属守卫范围。P1 起写目标改用模型可见引用 ``store_ref``,
-#: 库存写还增加 ``location_ref``——它们与 ``store_id`` 同类(存在且有权 ≠
-#: 用户选择的目标),因此同样纳入守卫。守卫只对"已提供"的字段生效
-#: (``field in arguments``),``location_ref`` 缺省仍由 Service 在唯一启用
-#: 位置时确定性解析,不在此处要求补充。
-PROVENANCE_GUARD_FIELDS: Final = ("store_id", "store_ref", "sku", "location_ref")
+#: 归一化判定,不属守卫范围。
+PROVENANCE_GUARD_FIELDS: Final = ("store_id", "sku")
 
 
 async def current_user_message(
@@ -142,11 +123,7 @@ class ProductPreToolProfileFactory:
                 fields=self._fields,
             ),
             input_requirement_resolver=ProductPreToolInputRequirementResolver(
-                resolver,
-                fields=self._fields,
-                actor=context.actor,
-                user_message=user_message,
-                answered=context.answered,
+                resolver, fields=self._fields, actor=context.actor
             ),
             authorization_resource_resolver=self._resource_resolver,
             business_policy=business_policy,
@@ -184,23 +161,11 @@ def fields_for(stable_key: str) -> tuple[str, ...]:
         raise KeyError(f"no product argument fields declared for {stable_key}") from error
 
 
-def p1_fields_for(stable_key: str) -> tuple[str, ...]:
-    """返回 P1 新版本 Tool 的字段集合;未知 Tool 抛错,不静默回退。"""
-    try:
-        return P1_TOOL_ARGUMENT_FIELDS[stable_key]
-    except KeyError as error:  # pragma: no cover - 防御
-        raise KeyError(
-            f"no P1 product argument fields declared for {stable_key}"
-        ) from error
-
-
 __all__ = [
-    "P1_TOOL_ARGUMENT_FIELDS",
     "TOOL_ARGUMENT_FIELDS",
     "BusinessPolicyFactory",
     "ProductPreToolProfileFactory",
     "current_user_message",
     "fields_for",
-    "p1_fields_for",
     "product_registration",
 ]

@@ -43,7 +43,6 @@ from runtime.execution.pretool.decisions import (
 from runtime.execution.pretool.pipeline import ToolCallRequest
 from runtime.execution.reconciliation import ReconcileResult, ReconciliationService
 from runtime.execution.run_service import RunService
-from runtime.execution.tool_executor import PreparedToolWrite, PreparedWriteRejection
 from runtime.execution.tool_result_processor import (
     ToolExecutionReceipt,
     ToolResultProcessor,
@@ -255,72 +254,35 @@ class FakeReadHandler:
 
 
 class FakeWriteHandler:
-    """写 Tool 执行替身。
+    """写 Tool 执行替身;``fail=True`` 模拟响应丢失。"""
 
-    ``fail=True`` 模拟响应丢失(UNKNOWN);``rejection`` 模拟 prepare 阶段的确定性
-    拒绝;``execution_status``/``execution_retryable``/``execution_error_code``
-    模拟适配器回执及其显式可重试声明与诊断码。
-    """
-
-    def __init__(
-        self,
-        *,
-        fail: bool = False,
-        rejection: PreparedWriteRejection | None = None,
-        execution_status: str = "APPLIED",
-        execution_retryable: bool = False,
-        execution_error_code: str | None = None,
-    ) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
-        self.rejection = rejection
-        self.execution_status = execution_status
-        self.execution_retryable = execution_retryable
-        self.execution_error_code = execution_error_code
         self.calls: list[dict[str, Any]] = []
-        self.prepare_calls = 0
-        self.expected_state: dict[str, Any] = {"operation_type": "TEST_WRITE"}
 
-    async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
-        self.prepare_calls += 1
-        if self.rejection is not None:
-            return PreparedToolWrite(
-                command=None,
-                expected_state=None,
-                request_fingerprint="rejected-fingerprint",
-                rejection=self.rejection,
-            )
-        return PreparedToolWrite(
-            command={"arguments": dict(normalized_arguments)},
-            expected_state=dict(self.expected_state),
-            request_fingerprint="fake-write-fingerprint",
-        )
-
-    async def execute_prepared(
+    async def execute(
         self,
         *,
         tool_call_id: uuid.UUID,
         operation_id: uuid.UUID,
         idempotency_key: str,
-        prepared: PreparedToolWrite,
+        normalized_arguments: Mapping[str, Any],
     ) -> ToolExecutionReceipt:
         self.calls.append(
             {
                 "tool_call_id": tool_call_id,
                 "operation_id": operation_id,
                 "idempotency_key": idempotency_key,
-                "normalized_arguments": dict(prepared.command["arguments"]),
+                "normalized_arguments": dict(normalized_arguments),
             }
         )
         if self.fail:
             raise RuntimeError("connection lost")
-        applied = self.execution_status == "APPLIED"
         return ToolExecutionReceipt(
             tool_call_id=tool_call_id,
-            status=self.execution_status,
-            payload={"result": "written"} if applied else None,
-            external_reference="ext-1" if applied else None,
-            error_code=self.execution_error_code,
-            retryable=self.execution_retryable,
+            status="APPLIED",
+            payload={"result": "written"},
+            external_reference="ext-1",
         )
 
 
@@ -511,20 +473,6 @@ async def _load_run(db_session: AsyncSession, run: Run) -> Run:
 def _require_input_decision() -> PreToolDecision:
     return require_input(
         input_requirement=InputRequirement(
-            field_paths=("store_id",),
-            question="Which store?",
-            options={"store_id": ({"value": "s-1", "label": "旗舰店"},)},
-        ),
-        schema_diagnostic=SchemaDiagnostic(
-            field_paths=("store_id",), message="store id missing"
-        ),
-    )
-
-
-def _require_input_decision_without_options() -> PreToolDecision:
-    """无服务端候选项的 Input Request(纯 Schema 缺失场景)。"""
-    return require_input(
-        input_requirement=InputRequirement(
             field_paths=("store_id",), question="Which store?"
         ),
         schema_diagnostic=SchemaDiagnostic(
@@ -561,69 +509,6 @@ async def test_multiple_tool_calls_stop_at_first_waiting_input(
     assert [call.ordinal for call in calls] == [0, 1]
     assert calls[0].status is ToolCallStatus.WAITING_INPUT
     assert calls[1].status is ToolCallStatus.PROPOSED
-
-
-async def _load_input_requests(
-    db_session: AsyncSession, run: Run
-) -> list[InputRequest]:
-    stmt = (
-        select(InputRequest)
-        .where(InputRequest.workspace_id == run.workspace_id)
-        .order_by(InputRequest.created_at, InputRequest.id)
-        .execution_options(populate_existing=True)
-    )
-    return list((await db_session.scalars(stmt)).all())
-
-
-async def test_waiting_input_persists_server_options(
-    make_agent_loop, run_with_two_tool_calls, db_session: AsyncSession
-) -> None:
-    """REQUIRE_INPUT 的服务端候选项随 Request 持久化。
-
-    Workbench/API 直接读取持久化的候选项,不再各自按领域规则重算;否则位置这类
-    新候选永远无法呈现给用户。
-    """
-    scenario = run_with_two_tool_calls
-    loop = make_agent_loop(
-        backend=scenario.backend,
-        pipeline=ScriptedPipeline([_require_input_decision()]),
-    )
-
-    result = await loop.advance(scenario.run.id)
-    assert result.run_status == RunStatus.WAITING_INPUT
-
-    requests = await _load_input_requests(db_session, scenario.run)
-    assert len(requests) == 1
-    stored = requests[0].options_json
-    assert stored is not None
-    assert [option["value"] for option in stored["store_id"]] == ["s-1"]
-    assert [option["label"] for option in stored["store_id"]] == ["旗舰店"]
-
-
-async def test_waiting_input_without_options_persists_none(
-    make_agent_loop, seeded_run: Run, db_session: AsyncSession
-) -> None:
-    """无候选项时持久化为 NULL,而不是空字典——保持"服务端未给候选"的语义。"""
-    backend = SequencedBackend(
-        [
-            [
-                ToolCallCompleted(
-                    call_id="c0", name=READ_TOOL_KEY, arguments={"listing_id": "L1"}
-                ),
-                BackendCompleted(finish_reason="tool_calls"),
-            ]
-        ]
-    )
-    loop = make_agent_loop(
-        backend=backend,
-        pipeline=ScriptedPipeline([_require_input_decision_without_options()]),
-    )
-
-    await loop.advance(seeded_run.id)
-
-    requests = await _load_input_requests(db_session, seeded_run)
-    assert len(requests) == 1
-    assert requests[0].options_json is None
 
 
 async def test_loop_limit_fails_deterministically(
@@ -1146,7 +1031,6 @@ async def test_reconciliation_applied_recovery_completes_run(
         lease_token=reconcile_lease.lease_token,
         expected_state_version=(await _load_run(db_session, run)).state_version,
         reconcile_budget=TEST_LIMITS.reconcile_budget,
-        write_retry_budget=TEST_LIMITS.write_retry_budget,
     )
     outcome = await reconciler.apply_result(ReconcileResult.APPLIED)
     assert outcome.run_status is RunStatus.QUEUED
@@ -1237,201 +1121,6 @@ async def test_require_confirmation_assigns_operation_id_and_resumes_after_accep
     assert len(write_handler.calls) == 1
     # 复用确认前分配的稳定 operation_id(不重新生成)。
     assert write_handler.calls[0]["operation_id"] == operation_id
-
-
-async def _drive_write_to_confirmation_and_accept(
-    *,
-    make_agent_loop,
-    db_session: AsyncSession,
-    run: Run,
-    run_service: RunService,
-    actor_id: uuid.UUID,
-    write_handler: FakeWriteHandler,
-) -> Lease:
-    """驱动写 Tool 到人工确认并接受,返回恢复推进的租约。"""
-    spec = ConfirmationSpec(
-        tool_name=WRITE_TOOL_KEY,
-        normalized_arguments={"listing_id": "L1"},
-        resource_versions={"listing": "v1"},
-    )
-    lease = await _claim_advance_job(db_session, run)
-    first = await make_agent_loop(
-        backend=SequencedBackend([_write_round()]),
-        pipeline=ScriptedPipeline([require_confirmation(confirmation_spec=spec)]),
-        write_handler=write_handler,
-    ).advance(run.id, lease_token=lease.lease_token)
-    assert first.run_status is RunStatus.WAITING_CONFIRMATION
-
-    confirmation = (
-        await db_session.scalars(
-            select(ConfirmationRequest).where(
-                ConfirmationRequest.workspace_id == run.workspace_id,
-                ConfirmationRequest.run_id == run.id,
-            )
-        )
-    ).one()
-    assert await LeaseService(db_session).complete(lease.job_id, lease.lease_token)
-    accepted = await ConfirmationService(
-        db_session, workspace_id=run.workspace_id, actor_id=actor_id
-    ).accept(confirmation.id, now=fake_clock_now())
-    assert accepted.status.value == "ACCEPTED"
-    await run_service.transition_run(
-        run_id=run.id,
-        target_status=RunStatus.QUEUED,
-        event_kind="RUN_RESUMED",
-        event_payload={"reason": "CONFIRMATION_ACCEPTED"},
-        expected_status=RunStatus.WAITING_CONFIRMATION,
-    )
-    return await _claim_advance_job(db_session, run)
-
-
-async def test_deterministic_rejection_is_executed_once_without_requeue(
-    make_agent_loop,
-    seeded_run: Run,
-    db_session: AsyncSession,
-    seeded_workspace,
-    run_service: RunService,
-) -> None:
-    """确定性拒绝只执行一次:ToolCall 落 FAILED,不再产生 ADVANCE_RUN 重排队。
-
-    NOT_APPLIED 不等于"值得重试":把两者画等号会让同一个 ToolCall 反复经
-    PreToolUse → prepare → 拒绝,永远走不到终态。
-    """
-    run = seeded_run
-    write_handler = FakeWriteHandler(
-        rejection=PreparedWriteRejection(
-            status="FAILED", error_code="RESOURCE_CHANGED", context={"listing_id": "L1"}
-        )
-    )
-    recovery = await _drive_write_to_confirmation_and_accept(
-        make_agent_loop=make_agent_loop,
-        db_session=db_session,
-        run=run,
-        run_service=run_service,
-        actor_id=seeded_workspace.user.id,
-        write_handler=write_handler,
-    )
-    second = await make_agent_loop(
-        backend=SequencedBackend([]),
-        pipeline=ScriptedPipeline([allow()]),
-        write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
-
-    # 模型拿到失败 Tool Result 后收尾:Run 直接完成,不重新排队。
-    assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
-    calls = await _load_tool_calls(db_session, run)
-    assert calls[0].status is ToolCallStatus.FAILED
-    assert calls[0].failure_code == "RESOURCE_CHANGED"
-    assert write_handler.prepare_calls == 1
-    assert write_handler.calls == []
-
-
-async def test_explicitly_retryable_write_failure_requeues_for_revalidation(
-    make_agent_loop,
-    seeded_run: Run,
-    db_session: AsyncSession,
-    seeded_workspace,
-    run_service: RunService,
-) -> None:
-    """回执显式声明可重试时才重排队:ToolCall 回 VALIDATING + ADVANCE_RUN。"""
-    run = seeded_run
-    write_handler = FakeWriteHandler(
-        execution_status="FAILED", execution_retryable=True
-    )
-    recovery = await _drive_write_to_confirmation_and_accept(
-        make_agent_loop=make_agent_loop,
-        db_session=db_session,
-        run=run,
-        run_service=run_service,
-        actor_id=seeded_workspace.user.id,
-        write_handler=write_handler,
-    )
-    second = await make_agent_loop(
-        backend=SequencedBackend([]),
-        pipeline=ScriptedPipeline([allow()]),
-        write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
-
-    assert second.run_status is RunStatus.RUNNING
-    assert second.next_job_kind is RunJobKind.ADVANCE_RUN
-    calls = await _load_tool_calls(db_session, run)
-    assert calls[0].status is ToolCallStatus.VALIDATING
-    assert len(write_handler.calls) == 1
-
-
-async def test_deterministic_adapter_failure_is_not_requeued(
-    make_agent_loop,
-    seeded_run: Run,
-    db_session: AsyncSession,
-    seeded_workspace,
-    run_service: RunService,
-) -> None:
-    """适配器确定失败且未声明可重试:ToolCall FAILED,Run 继续由模型收尾。"""
-    run = seeded_run
-    write_handler = FakeWriteHandler(execution_status="FAILED")
-    recovery = await _drive_write_to_confirmation_and_accept(
-        make_agent_loop=make_agent_loop,
-        db_session=db_session,
-        run=run,
-        run_service=run_service,
-        actor_id=seeded_workspace.user.id,
-        write_handler=write_handler,
-    )
-    second = await make_agent_loop(
-        backend=SequencedBackend([]),
-        pipeline=ScriptedPipeline([allow()]),
-        write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
-
-    assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
-    calls = await _load_tool_calls(db_session, run)
-    assert calls[0].status is ToolCallStatus.FAILED
-    # 外部调用只发生过一次:不重排队就不会有第二次 Adapter 调用。
-    assert len(write_handler.calls) == 1
-    assert write_handler.prepare_calls == 1
-
-
-async def test_version_conflict_failure_is_terminal_and_returned_to_model(
-    make_agent_loop,
-    seeded_run: Run,
-    db_session: AsyncSession,
-    seeded_workspace,
-    run_service: RunService,
-) -> None:
-    """``VERSION_CONFLICT`` 不重排同一个 ToolCall:失败返回模型。
-
-    同一 ``operation_id`` 下 ``expected_version`` 不允许改写,平台也已按该
-    ``operation_id`` 记录失败回执——重复提交只会回放旧结论。因此必须把失败
-    返回模型(重新读取资源后创建新的 ToolCall/Operation),而不是把 ToolCall
-    重排队回 VALIDATING。
-    """
-    run = seeded_run
-    write_handler = FakeWriteHandler(
-        execution_status="FAILED", execution_error_code="VERSION_CONFLICT"
-    )
-    recovery = await _drive_write_to_confirmation_and_accept(
-        make_agent_loop=make_agent_loop,
-        db_session=db_session,
-        run=run,
-        run_service=run_service,
-        actor_id=seeded_workspace.user.id,
-        write_handler=write_handler,
-    )
-    second = await make_agent_loop(
-        backend=SequencedBackend([]),
-        pipeline=ScriptedPipeline([allow()]),
-        write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
-
-    assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
-    calls = await _load_tool_calls(db_session, run)
-    assert calls[0].status is ToolCallStatus.FAILED
-    assert calls[0].failure_code == "VERSION_CONFLICT"
-    assert len(write_handler.calls) == 1
-    assert write_handler.prepare_calls == 1
 
 
 # ---------------------------------------------------------------------------

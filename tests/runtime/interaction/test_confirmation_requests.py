@@ -176,45 +176,6 @@ async def test_verify_detects_tool_schema_hash_drift(
     assert (omitted.valid, omitted.reason_code) == (False, "CONFIRMATION_STALE")
 
 
-async def test_verify_rejects_confirmation_when_policy_revision_changed(
-    confirmation_service: ConfirmationService, seeded_run, seeded_tool_call
-) -> None:
-    """业务策略重新发布后旧确认失效:当前修订号与确认时不同即 CONFIRMATION_STALE。"""
-    request = await confirmation_service.create(
-        session_id=seeded_run.session_id,
-        run_id=seeded_run.id,
-        tool_call_id=seeded_tool_call.id,
-        normalized_arguments={"listing_id": "L1"},
-        resource_versions={"listing": 1},
-        policy_version=3,
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
-    )
-    await confirmation_service.accept(request.id)
-
-    # 同一修订号:仍然有效。
-    same = await confirmation_service.verify(
-        request.id,
-        current_resource_versions={"listing": 1},
-        policy_version=3,
-    )
-    assert (same.valid, same.reason_code) == (True, None)
-
-    # 策略改版(3 → 4):旧确认不再匹配当前规则。
-    drifted = await confirmation_service.verify(
-        request.id,
-        current_resource_versions={"listing": 1},
-        policy_version=4,
-    )
-    assert (drifted.valid, drifted.reason_code) == (False, "CONFIRMATION_STALE")
-
-    # 未提供当前修订号时退回存储值,保持旧调用方行为不变。
-    legacy = await confirmation_service.verify(
-        request.id,
-        current_resource_versions={"listing": 1},
-    )
-    assert (legacy.valid, legacy.reason_code) == (True, None)
-
-
 async def test_verify_rejects_unaccepted_confirmation(
     confirmation_service: ConfirmationService, pending_confirmation
 ) -> None:

@@ -41,46 +41,6 @@ REASON_TIMEOUT_BEFORE_WRITE: Final = "TIMEOUT_BEFORE_WRITE"
 REASON_RESPONSE_LOST_AFTER_COMMIT: Final = "RESPONSE_LOST_AFTER_COMMIT"
 """回执 ``reason_code``:不参与状态迁移,供 Runtime 记录与诊断。"""
 
-REASON_IDEMPOTENCY_CONFLICT: Final = "IDEMPOTENCY_KEY_REUSED"
-"""同一 ``operation_id`` 被用于**不同业务动作**时的确定失败码(平台侧 fail closed)。
-
-幂等去重表按 ``operation_id`` 记录"这条命令是哪个业务动作"。正常链路里一个
-``operation_id`` 只对应一个逻辑操作,因此重复提交应当回放旧回执(见
-:data:`RETRYABLE_REASON_CODES` 关于"重复提交只回放旧结论"的说明)。但装配错误、
-错路由或脏数据可能让同一个 ``operation_id`` 指向**另一个资源或另一组目标值**:
-此时回放旧回执会把别处操作的成功伪装成本次操作的成功,调用方还会据此认为
-"我这次的目标已生效"。
-
-因此平台必须确定失败,而不是回放旧结论。判定比对**业务意图指纹**
-(价格侧 ``workspace_id + listing_id + 外部引用 + target_price + currency``,
-库存侧 ``workspace_id + location_id + product_id + 外部引用 + delta +
-expected_quantity_after + reason``),但**排除** ``expected_version`` 等会随首次
-写入自然变化的乐观锁字段——否则同一次重复提交(重读版本后 ``expected_version``
-已 +1)会被误判成冲突。该码不允许重试:正确做法是修正上游路由后以新的
-``operation_id`` 重新发起。
-"""
-
-RETRYABLE_REASON_CODES: Final[frozenset[str]] = frozenset()
-"""可安全重试的确定失败原因;当前为空。
-
-"确定失败"只说明这次没生效,不说明再试一次值得:同一 ``operation_id`` /
-``expected_version`` 下,任何确定失败重试都只会得到同一回执。
-
-- ``PLATFORM_FAILURE`` 由持续不可用(``permanent_failure``)产生,重试仍会失败;
-- ``VERSION_CONFLICT`` 不能在同一 ``operation_id`` 上改写 ``expected_version``,
-  且平台已按该 ``operation_id`` 记录失败回执、重复提交只会回放旧结论。正确做法
-  是把失败返回模型,重新读取资源后创建**新的** ToolCall/Operation(必要时重新确认)。
-
-因此当前集合为空:任何确定失败都落 ToolCall 终态。若将来需要自动重试,应新增
-独立原因码(如 ``PLATFORM_UNAVAILABLE`` / ``RATE_LIMITED``)并以持久化的重试预算
-与退避约束,而不是复用这些"重试必然同结果"的码值。
-"""
-
-
-def is_retryable_reason_code(reason_code: str | None) -> bool:
-    """确定性失败是否允许在重新通过完整 PreToolUse 后再次执行。"""
-    return reason_code in RETRYABLE_REASON_CODES
-
 
 @dataclass(frozen=True)
 class UpdatePriceCommand:
@@ -113,9 +73,6 @@ class ExecutionReceipt:
 
     ``status`` 为 UNKNOWN 时观测字段一律为 ``None``——调用方未收到响应,
     不得从回执臆测写入结果,只能调度 ``reconcile``。
-
-    ``retryable`` 是执行端对"这次失败是否值得重试"的显式声明,默认 False;
-    Runtime 只有在它为 True 时才允许该 ToolCall 重走完整 PreToolUse 后再次执行。
     """
 
     operation_id: str
@@ -126,7 +83,6 @@ class ExecutionReceipt:
     listing_version: int | None = None
     external_ref: str | None = None
     reason_code: str | None = None
-    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,18 +114,15 @@ class CommerceAdapter(Protocol):
 
 __all__ = [
     "REASON_CURRENCY_MISMATCH",
-    "REASON_IDEMPOTENCY_CONFLICT",
     "REASON_LISTING_NOT_FOUND",
     "REASON_PLATFORM_FAILURE",
     "REASON_RESPONSE_LOST_AFTER_COMMIT",
     "REASON_TIMEOUT_BEFORE_WRITE",
     "REASON_VERSION_CONFLICT",
-    "RETRYABLE_REASON_CODES",
     "CommerceAdapter",
     "ExecutionReceipt",
     "ExecutionStatus",
     "ReconcileResult",
     "ReconciliationCommand",
     "UpdatePriceCommand",
-    "is_retryable_reason_code",
 ]

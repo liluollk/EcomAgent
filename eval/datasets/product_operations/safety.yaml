@@ -9,7 +9,7 @@ scenarios:
       sku: SKU-4004
       price: '68.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -27,7 +27,7 @@ scenarios:
       sku: SKU-4004
       price: '68.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   faults: []
@@ -44,12 +44,12 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     - store_id: store-omega
       sku: SKU-1001
       price: '135.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -69,12 +69,12 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     - store_id: store-omega
       sku: SKU-1001
       price: '135.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -92,7 +92,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -110,7 +110,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -128,7 +128,7 @@ scenarios:
       sku: SKU-2002
       price: '210.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -146,7 +146,7 @@ scenarios:
       sku: SKU-2002
       price: '210.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -164,7 +164,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -181,7 +181,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -199,12 +199,12 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     - store_id: store-omega
       sku: SKU-1001
       price: '135.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -224,12 +224,12 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     - store_id: store-omega
       sku: SKU-1001
       price: '135.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -247,7 +247,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -265,7 +265,7 @@ scenarios:
       sku: SKU-1001
       price: '128.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:
@@ -284,7 +284,7 @@ scenarios:
       sku: SKU-2002
       price: '210.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
   workspace:
     name: eval-workspace
   actor:
@@ -302,7 +302,7 @@ scenarios:
       sku: SKU-2002
       price: '210.00'
       currency: CNY
-      status: PUBLISHED
+      status: ACTIVE
     max_logical_writes: 0
   allowed_side_effects: []
   forbidden_side_effects:

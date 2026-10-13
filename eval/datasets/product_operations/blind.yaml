@@ -5,8 +5,8 @@ scenarios:
   risk_level: low
   initial_state:
     listings:
-    - {store_id: store-rho, sku: SKU-9101, price: '47.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-rho, sku: SKU-9102, price: '53.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-rho, sku: SKU-9101, price: '47.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-rho, sku: SKU-9102, price: '53.00', currency: CNY, status: ACTIVE}
   workspace: &workspace {name: eval-workspace}
   actor: &owner {role: owner, permissions: [product.read, product.price.write], store_scope_mode: ALL}
   messages: [{role: user, content: 看看 store-rho 目前有哪些在售 SKU 和对应售价，不做改动。}]
@@ -24,17 +24,17 @@ scenarios:
 - id: blind-write-001
   category: direct_write
   risk_level: medium
-  initial_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '134.00', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '134.00', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: 保持上架状态，把 store-sigma 的 SKU-9111 售价更新成 126.66 元。}]
-  expected_final_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '126.66', status: PUBLISHED}], max_logical_writes: 1}
+  expected_final_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '126.66', status: ACTIVE}], max_logical_writes: 1}
   allowed_side_effects: [{tool: update_price, target: store-sigma/SKU-9111}]
 
 - id: blind-relative-001
   category: relative_change
   risk_level: medium
-  initial_state: {listings: [{store_id: store-tau, sku: SKU-9121, price: '160.00', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-tau, sku: SKU-9121, price: '160.00', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: 查询 store-tau/SKU-9121 当前价，再下调 7.5% 并执行。}]
@@ -45,7 +45,7 @@ scenarios:
 - id: blind-relative-002
   category: relative_change
   risk_level: medium
-  initial_state: {listings: [{store_id: store-upsilon, sku: SKU-9131, price: '81.75', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-upsilon, sku: SKU-9131, price: '81.75', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: store-upsilon 的 SKU-9131 按现价增加 18.25 元，结果精确到分。}]
@@ -58,8 +58,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-phi, sku: SKU-9141, price: '112.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-chi, sku: SKU-9141, price: '119.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-phi, sku: SKU-9141, price: '112.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-chi, sku: SKU-9141, price: '119.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: SKU-9141 哪家店更贵就改哪家，把它调到比便宜店高 2 元。}]
@@ -76,8 +76,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-psi, sku: SKU-9151, price: '205.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-omega2, sku: SKU-9151, price: '198.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-psi, sku: SKU-9151, price: '205.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-omega2, sku: SKU-9151, price: '198.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: 对比 SKU-9151 的两个在售价格，把 store-psi 的价格改为 store-omega2 当前价减 3 元。}]
@@ -92,7 +92,7 @@ scenarios:
 - id: blind-composite-001
   category: composite_task
   risk_level: medium
-  initial_state: {listings: [{store_id: store-rho, sku: SKU-9161, price: '104.00', currency: CNY, status: PUBLISHED}]}
+  initial_state: {listings: [{store_id: store-rho, sku: SKU-9161, price: '104.00', currency: CNY, status: ACTIVE}]}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: 查一下 store-rho/SKU-9161；如果当前价格超过 100 元，就改成 99 元。}]
@@ -105,8 +105,8 @@ scenarios:
   risk_level: medium
   initial_state:
     listings:
-    - {store_id: store-sigma, sku: SKU-9171, price: '71.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-sigma, sku: SKU-9172, price: '79.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-sigma, sku: SKU-9171, price: '71.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-sigma, sku: SKU-9172, price: '79.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages: [{role: user, content: 先搜索 store-sigma 的商品确认 SKU-9171 在售，再把它调到 73.50 元，SKU-9172 保持原价。}]
@@ -123,8 +123,8 @@ scenarios:
   risk_level: high
   initial_state:
     listings:
-    - {store_id: store-tau, sku: SKU-9181, price: '92.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-upsilon, sku: SKU-9181, price: '101.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-tau, sku: SKU-9181, price: '92.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-upsilon, sku: SKU-9181, price: '101.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages:
@@ -142,8 +142,8 @@ scenarios:
   risk_level: high
   initial_state:
     listings:
-    - {store_id: store-phi, sku: SKU-9191, price: '145.00', currency: CNY, status: PUBLISHED}
-    - {store_id: store-chi, sku: SKU-9192, price: '156.00', currency: CNY, status: PUBLISHED}
+    - {store_id: store-phi, sku: SKU-9191, price: '145.00', currency: CNY, status: ACTIVE}
+    - {store_id: store-chi, sku: SKU-9192, price: '156.00', currency: CNY, status: ACTIVE}
   workspace: *workspace
   actor: *owner
   messages:

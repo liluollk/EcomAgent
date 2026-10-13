@@ -14,8 +14,7 @@
 - argument_provenance:注入 :class:`ArgumentProvenanceResolver`(确定性规则,
   不接受模型自报来源);
 - input_requirement:注入 :class:`InputRequirementResolver`,把 SchemaDiagnostic
-  转成 InputRequirement,或判为不可补充;该阶段**即使没有诊断也会咨询业务层**,
-  以便业务按规范化参数声明"Schema 可选但执行前提缺失"的字段;
+  转成 InputRequirement,或判为不可补充;
 - authorization_resource:注入 :class:`AuthorizationResourceResolver`,从规范化
   参数提取 ``(resource_type, resource_id)``,不读写授权结果;
 - access_control:注入 :class:`Authorizer`,按 ToolDefinition 动作权限与资源
@@ -134,7 +133,6 @@ class PreToolContext:
     schema_diagnostic: SchemaDiagnostic | None = None
     resources: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     resource_versions: Mapping[str, int] = field(default_factory=dict)
-    policy_decision: PolicyDecision | None = None
     execution_mode: ExecutionModeDecision | None = None
 
 
@@ -158,18 +156,10 @@ class ArgumentProvenanceResolver(Protocol):
 
 
 class InputRequirementResolver(Protocol):
-    """决定「需要补充的字段」能否转成用户可回答的 Input Request。
-
-    ``diagnostic`` 为 ``None`` 时仍会被调用:业务层可以基于**规范化参数**直接
-    声明"执行前提缺失但 Schema 可选"的字段(例如多位置店铺未指定
-    ``location_ref``),这类需求没有 Schema 层诊断。返回 ``None`` 表示无需补充。
-    """
+    """决定缺失字段能否转成用户可回答的 Input Request。"""
 
     async def resolve(
-        self,
-        *,
-        diagnostic: SchemaDiagnostic | None,
-        arguments: Mapping[str, Any],
+        self, *, diagnostic: SchemaDiagnostic
     ) -> InputRequirement | None: ...
 
 
@@ -200,19 +190,10 @@ class ExecutionModeResolver(Protocol):
 
 
 class AcceptedConfirmationLookup(Protocol):
-    """已接受 Confirmation 的查询回调;指纹/Actor/过期/状态校验由实现方负责。
-
-    ``policy_version`` 是本轮 PreToolUse 读到的**当前**业务策略修订号:实现方必须把
-    它喂给指纹重算,否则策略更新后旧确认仍会被当成有效。
-    """
+    """已接受 Confirmation 的查询回调;指纹/Actor/过期/状态校验由实现方负责。"""
 
     async def __call__(
-        self,
-        *,
-        tool_call_id: UUID,
-        stable_key: str,
-        actor_id: UUID,
-        policy_version: int | None,
+        self, *, tool_call_id: UUID, stable_key: str, actor_id: UUID
     ) -> bool: ...
 
 
@@ -386,21 +367,18 @@ def _apply_provenance_guard(
 
 def _input_requirement_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
+        diagnostic = context.schema_diagnostic
+        if diagnostic is None:
+            return None
         profile = _require_profile(context)
         if profile is None:
             return deny(
                 PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
             )
-        diagnostic = context.schema_diagnostic
-        # 无诊断也要咨询业务层:业务输入需求(如多位置店铺缺 location_ref)
-        # 不来自 Schema,只能由业务按**规范化参数**判定。
         requirement = await profile.input_requirement_resolver.resolve(
-            diagnostic=diagnostic,
-            arguments=context.normalized_arguments or {},
+            diagnostic=diagnostic
         )
         if requirement is None:
-            if diagnostic is None:
-                return None
             return deny(
                 ARGUMENTS_INCOMPLETE,
                 safe_message="missing business fields cannot be turned into an input request",
@@ -463,9 +441,6 @@ def _business_policy_stage() -> StageHandler:
         )
         if policy_decision.allowed:
             context.resource_versions = dict(policy_decision.resource_versions)
-            # 保留允许决策:确认阶段要把它携带的策略修订号写进 ConfirmationSpec,
-            # 使"规则更新后旧确认失效"有可比较的依据。
-            context.policy_decision = policy_decision
             return None
         return deny(
             policy_decision.reason_code or POLICY_DENIED,
@@ -508,19 +483,11 @@ def _confirmation_verification_stage(dependencies: PreToolDependencies) -> Stage
         if mode.mode != "CONFIRM":
             return None
         lookup = dependencies.accepted_confirmation_lookup
-        # 当前业务策略修订号先算出来:它既用于查询已接受确认(供指纹重算判定旧确认
-        # 是否随策略更新而失效),也用于本轮新生成的 ConfirmationSpec。
-        policy_revision = (
-            context.policy_decision.policy_revision
-            if context.policy_decision is not None
-            else None
-        )
         accepted = (
             await lookup(
                 tool_call_id=context.request.tool_call_id,
                 stable_key=context.request.stable_key,
                 actor_id=context.actor.actor_id,
-                policy_version=policy_revision,
             )
             if lookup is not None
             else False
@@ -529,8 +496,7 @@ def _confirmation_verification_stage(dependencies: PreToolDependencies) -> Stage
             return None
         return require_confirmation(
             confirmation_spec=ConfirmationSpec(
-                resource_versions=dict(context.resource_versions),
-                policy_version=policy_revision,
+                resource_versions=dict(context.resource_versions)
             )
         )
 

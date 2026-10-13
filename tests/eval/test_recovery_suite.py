@@ -3,7 +3,7 @@
 - 计划原文用例:``recovery_suite.result_for("write-applied-response-lost")``
   必须声明 ``UNKNOWN → APPLIED`` 的回查路径与恰好一次逻辑写;
 - 数据集(eval/datasets/recovery/faults.yaml)声明 ≥7 类故障点(模型超时、
-  Tool 调用前退出、写入已生效响应丢失、确认后 Worker 重启、平台持续不可用、
+  Tool 调用前退出、写入已生效响应丢失、确认后 Worker 重启、平台暂时不可用、
   回查暂时不一致、重复提交),每例携带故障注名、期望回查路径、逻辑写上界
   与权威最终状态(价格 + Run 终态);
 - ``run_all()`` 全部通过(failed/infrastructure_errors/skipped 均为 0)且恢复
@@ -61,7 +61,7 @@ def test_recovery_suite_contains_required_fault_points(recovery_suite: RecoveryS
         "worker-exit-before-write",
         "write-applied-response-lost",
         "worker-restart-after-confirmation",
-        "platform-persistent-failure",
+        "platform-temporarily-unavailable",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
     }
@@ -74,7 +74,7 @@ def test_required_constants_cover_plan_faults() -> None:
         "worker-exit-before-write",
         "write-applied-response-lost",
         "worker-restart-after-confirmation",
-        "platform-persistent-failure",
+        "platform-temporarily-unavailable",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
     }
@@ -122,12 +122,7 @@ def test_result_for_unknown_case_raises(recovery_suite: RecoverySuite) -> None:
 
 async def test_run_all_passes_all_fault_cases(recovery_suite: RecoverySuite) -> None:
     first = await recovery_suite.run_all()
-    failures = [
-        f"{result.case_id}: {result.error}"
-        for result in first.results
-        if result.status != "PASSED"
-    ]
-    assert (first.failed, first.infrastructure_errors, first.skipped) == (0, 0, 0), failures
+    assert (first.failed, first.infrastructure_errors, first.skipped) == (0, 0, 0)
     assert first.passed == len(recovery_suite.case_ids)
 
     # 发布门槛指标:零重复写、成功率/最终状态一致率/UNKNOWN 处理正确率全满。

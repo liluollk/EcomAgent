@@ -22,14 +22,11 @@ import uuid
 from decimal import Decimal
 
 import sqlalchemy as sa
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.persistence.models import Listing
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
-from runtime.persistence.base import OperationStatus
-from runtime.persistence.models.execution import Operation
 
 
 async def test_confirmed_price_update_reaches_authoritative_state(
@@ -217,15 +214,15 @@ async def test_duplicate_submit_with_same_operation_id_is_idempotent(
     assert operation_id is not None
 
     # 以同一 operation_id 重复发起外部执行(平台收到的重复提交)。
-    handler = product_application.write_handler
-    prepared = await handler.prepare(
-        normalized_arguments={"store_id": store_id, "sku": "SKU-001", "target_price": 99}
-    )
-    replay = await handler.execute_prepared(
+    replay = await product_application.write_handler.execute(
         tool_call_id=uuid.uuid4(),
         operation_id=operation_id,
         idempotency_key=f"op:{operation_id}",
-        prepared=prepared,
+        normalized_arguments={
+            "store_id": store_id,
+            "sku": "SKU-001",
+            "target_price": 99,
+        },
     )
     assert replay.status == "APPLIED"
     assert await product_application.adapter.count_logical_writes(str(operation_id)) == 1
@@ -276,90 +273,6 @@ async def test_listing_version_conflict_after_restart(
         await product_application.authoritative_price(store_id, "SKU-001")
         == Decimal("128.00")
     )
-
-
-async def test_reserved_operation_is_promoted_on_confirmed_execution(
-    product_application, engine: AsyncEngine
-) -> None:
-    """真实确认路径:预约的 PREPARED Operation 在执行前被绑定目标并推进。
-
-    锁定 Task 2.1/Task 2.2:确认前预约即持久化完整执行能力与该写 Tool 的
-    adapter_key,真正执行时只补完整 ``expected_state``;执行边界比较能力而不是
-    覆盖能力。
-    """
-    ids = product_application.seed_ids
-    store_id = str(ids.store_id)
-    product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
-    )
-
-    run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
-    assert run.status == RunStatus.WAITING_CONFIRMATION
-    snapshot = await product_application.tool_call_snapshot(run.run_id)
-    assert snapshot is not None
-    operation_id = snapshot.operation_id
-    assert operation_id is not None
-
-    reserved = await _load_operation_row(engine, operation_id)
-    assert reserved.status is OperationStatus.PREPARED
-    assert reserved.expected_state is None
-    # 预约阶段已带上完整执行能力:执行边界只校验一致性,不接管能力写入。
-    assert reserved.supports_reconciliation is True
-    assert reserved.supports_native_idempotency is False
-
-    run = await product_application.confirm(run.pending_confirmation_id)
-    assert run.status == RunStatus.COMPLETED
-
-    executed = await _load_operation_row(engine, operation_id)
-    assert executed.status is OperationStatus.APPLIED
-    assert executed.expected_state is not None
-    assert executed.expected_state["operation_type"] == "UPDATE_PRICE_LEGACY"
-    assert executed.expected_state["listing_id"] == str(ids.listing_id)
-    assert executed.expected_state["target_price"] == "99.00"
-    # 执行能力在预约阶段落库,执行后保持不变。
-    assert executed.adapter_key == reserved.adapter_key
-    assert executed.supports_reconciliation is True
-    assert executed.supports_native_idempotency is False
-
-
-async def test_prepare_rejects_unresolvable_listing_with_minimal_context(
-    product_application,
-) -> None:
-    """Listing 无法解析:拒绝不伪造 expected_state,只给最小审计上下文。"""
-    prepared = await product_application.write_handler.prepare(
-        normalized_arguments={
-            "store_id": str(uuid.uuid4()),
-            "sku": "SKU-001",
-            "target_price": 99,
-        }
-    )
-
-    assert prepared.command is None
-    assert prepared.expected_state is None
-    assert prepared.rejection is not None
-    assert prepared.rejection.status == "FAILED"
-    assert prepared.rejection.error_code == "LISTING_NOT_FOUND"
-    # 不臆测 listing_id / currency / expected_version:拒绝上下文只含 PreToolUse
-    # 已固定的模型输入与策略版本,不为"形状统一"补空值。
-    assert set(prepared.rejection.context) == {
-        "operation_type",
-        "store_id",
-        "sku",
-        "target_price",
-        "policy_version",
-    }
-
-
-async def _load_operation_row(engine: AsyncEngine, operation_id: uuid.UUID) -> Operation:
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        return (
-            await session.scalars(
-                select(Operation).where(Operation.operation_id == operation_id)
-            )
-        ).one()
-    finally:
-        await session.close()
 
 
 async def _bump_listing_version(engine: AsyncEngine, listing_id: uuid.UUID) -> None:

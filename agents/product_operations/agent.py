@@ -59,9 +59,6 @@ PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
         "backend_retries": 1,
         # Reconciliation 预算 3 次:足以覆盖平台回查与补偿,不含无限重试。
         "reconcile_budget": 3,
-        # 写入重试预算 1 次:同一 Operation 只允许一次 EXECUTE;NOT_APPLIED 后
-        # 不再无限重排,预算耗尽即让 ToolCall 落 FAILED 由模型收尾。
-        "write_retry_budget": 1,
     },
 )
 

@@ -41,7 +41,7 @@ def _price_scenario_dict(scenario_id: str, *, target_price: str) -> dict[str, An
                     "sku": "SKU-001",
                     "price": "128.00",
                     "currency": "CNY",
-                    "status": "PUBLISHED",
+                    "status": "ACTIVE",
                 }
             ]
         },

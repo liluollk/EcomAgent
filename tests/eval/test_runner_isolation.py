@@ -255,7 +255,7 @@ async def test_policy_denial_preserves_normalized_arguments_for_audit(
                         "sku": "SKU-001",
                         "price": "128.00",
                         "currency": "CNY",
-                        "status": "PUBLISHED",
+                        "status": "ACTIVE",
                     }
                 ]
             },
@@ -470,7 +470,7 @@ async def test_seed_reuses_product_for_same_sku_across_stores(
                 sku="SKU-SHARED",
                 price=price,
                 currency="CNY",
-                status="PUBLISHED",
+                status="ACTIVE",
                 products_by_sku=products_by_sku,
             )
         products = (

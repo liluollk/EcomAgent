@@ -49,8 +49,8 @@ async def search_products(
     """按关键词搜索授权店铺内商品;workspace_id 过滤恒在。
 
     ``store_ids`` 只允许在授权范围内收窄;越权 store 以
-    ``RESOURCE_SCOPE_DENIED`` 拒绝。仅返回 PUBLISHED Listing 与 ACTIVE Store
-    ("已发布店铺"语义);按 SKU 与店铺 ID 确定性排序。
+    ``RESOURCE_SCOPE_DENIED`` 拒绝。仅返回 ACTIVE Listing 与 ACTIVE Store
+    ("上架店铺"语义);按 SKU 与店铺 ID 确定性排序。
     """
     authorize_product_read(actor)
     input_model = SearchProductsInput(query=query, store_ids=tuple(store_ids))
@@ -78,7 +78,7 @@ async def search_products(
             Product.workspace_id == actor.workspace_id,
             Listing.workspace_id == actor.workspace_id,
             Store.workspace_id == actor.workspace_id,
-            Listing.status == ListingStatus.PUBLISHED,
+            Listing.status == ListingStatus.ACTIVE,
             Store.status == StoreStatus.ACTIVE,
         )
         .order_by(Product.sku, Store.id)

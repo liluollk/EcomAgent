@@ -57,14 +57,11 @@ from agents.product_operations.input.profiles import (
     product_registration,
 )
 from agents.product_operations.persistence.models import Listing, Product, Store
+from agents.product_operations.policy.models import PricePolicyConfig
 from agents.product_operations.policy.price_pretool import PricePreToolPolicy
 from agents.product_operations.policy.resources import (
     StoreIdsResourceResolver,
     StoreResourceResolver,
-)
-from agents.product_operations.pricing.configuration import (
-    PRICING_POLICY_STABLE_KEY,
-    PublishedPricingPolicy,
 )
 from agents.product_operations.prompt import PRODUCT_AGENT_PROMPT
 from agents.product_operations.skill import (
@@ -91,7 +88,6 @@ from agents.product_operations.tools.update_price import (
 )
 from composition.provisioning.product_operations import (
     ProductOperationsCapabilities,
-    load_published_pricing_policy,
     product_tool_definitions,
     require_published_capabilities,
 )
@@ -170,7 +166,6 @@ from runtime.persistence.models.interaction import (
     Message,
 )
 from runtime.persistence.repositories.jobs import JobRepository
-from runtime.persistence.repositories.run_snapshots import PolicySnapshotPin
 from runtime.persistence.repositories.runs import RunRepository
 
 
@@ -365,12 +360,7 @@ class _AcceptedConfirmationLookup:
         self._workspace_id = workspace_id
 
     async def __call__(
-        self,
-        *,
-        tool_call_id: uuid.UUID,
-        stable_key: str,
-        actor_id: uuid.UUID,
-        policy_version: int | None,
+        self, *, tool_call_id: uuid.UUID, stable_key: str, actor_id: uuid.UUID
     ) -> bool:
         del stable_key
         request = (
@@ -390,15 +380,9 @@ class _AcceptedConfirmationLookup:
             return False
         if request.actor_id != actor_id:
             return False
-        # 资源版本用当前值(而非请求自带的副本),并把当前策略修订一并喂入指纹重算:
-        # 确认之后资源被改动或价格策略被重新发布,旧确认都必须失效。
         result = await ConfirmationService(
             self._session, workspace_id=self._workspace_id, actor_id=actor_id
-        ).verify(
-            request.id,
-            current_resource_versions=dict(request.resource_versions),
-            policy_version=policy_version,
-        )
+        ).verify(request.id, current_resource_versions=dict(request.resource_versions))
         return result.valid
 
 
@@ -469,7 +453,7 @@ class ProductApplication:
         engine: AsyncEngine,
         assembly: RuntimeAssembly,
         tool_registry: ToolRegistry,
-        pricing_policy: PublishedPricingPolicy,
+        price_config: PricePolicyConfig,
         backend: AgentBackend,
         adapter: CommerceAdapter,
         adapter_session: AsyncSession,
@@ -483,7 +467,7 @@ class ProductApplication:
         self._engine = engine
         self._assembly = assembly
         self._tool_registry = tool_registry
-        self._pricing_policy = pricing_policy
+        self._price_config = price_config
         self._backend = backend
         self._adapter = adapter
         self._adapter_session = adapter_session
@@ -561,9 +545,8 @@ class ProductApplication:
         return self._run_limits
 
     @property
-    def pricing_policy(self) -> PublishedPricingPolicy:
-        """本次装配实际读取的已发布价格策略(精确行 + 已校验配置)。"""
-        return self._pricing_policy
+    def price_config(self) -> PricePolicyConfig:
+        return self._price_config
 
     @property
     def agent_prompt(self) -> str:
@@ -601,13 +584,6 @@ class ProductApplication:
                     actor_id=self._actor_id,
                     membership_id=self._membership_id,
                     model_config_version_id=self._capabilities.model_config_version_id,
-                    policy_pins=(
-                        PolicySnapshotPin(
-                            policy_key=PRICING_POLICY_STABLE_KEY,
-                            version_id=self._pricing_policy.version_id,
-                            config_hash=self._pricing_policy.config_hash,
-                        ),
-                    ),
                 ).create(agent_key=AGENT_KEY)
                 run_id = pinned.id
                 store = MessageStore(session=session, workspace_id=self._workspace_id)
@@ -921,7 +897,6 @@ class ProductApplication:
                     lease_token=lease_token,
                     expected_state_version=expected_state_version,
                     reconcile_budget=self._run_limits.reconcile_budget,
-                    write_retry_budget=self._run_limits.write_retry_budget,
                 ).apply_result(verdict)
                 await LeaseService(session).complete(job.id, lease_token)
                 return outcome.next_job_kind is RunJobKind.ADVANCE_RUN
@@ -954,6 +929,7 @@ async def build_product_application(
     workspace_id: uuid.UUID,
     actor_id: uuid.UUID,
     membership_id: uuid.UUID,
+    price_config: PricePolicyConfig,
     worker_id: str = "product-worker",
     commerce_adapter: CommerceAdapter | None = None,
     adapter_key: str = ADAPTER_KEY,
@@ -962,19 +938,8 @@ async def build_product_application(
 
     ``capabilities`` 必须来自已发布快照(:class:`ProductOperationsProvisioner`);
     本函数只校验并消费,不写任何配置表。
-
-    价格规则**不在本函数的参数里**:它从 ``capabilities.pricing_policy_version_id``
-    指向的已发布行读取一次,同一个 :class:`PublishedPricingPolicy` 注入 PreTool
-    业务策略与执行 Handler。任何"从常量、环境变量或 Prompt 回退配置"的路径都不存在,
-    因此装配期就能保证"预检、执行与确认指纹用的是同一版规则"。
     """
     await require_published_capabilities(engine, capabilities)
-    pricing_policy = await load_published_pricing_policy(
-        engine,
-        workspace_id=workspace_id,
-        version_id=capabilities.pricing_policy_version_id,
-        expected_config_hash=capabilities.pricing_policy_config_hash,
-    )
 
     agent_registry = AgentRegistry()
     agent_registry.register(
@@ -1005,20 +970,16 @@ async def build_product_application(
         workspace_id=workspace_id,
         session=adapter_session,
         gateway=_CommerceGateway(adapter),
-        policy_version=pricing_policy.config.policy_version,
-        policy_version_id=pricing_policy.version_id,
-        policy_revision=pricing_policy.version,
-        policy_config_hash=pricing_policy.config_hash,
+        policy_version=price_config.policy_version,
     )
 
     def price_policy_factory(context: PreToolProfileContext) -> PricePreToolPolicy:
         """写 Tool 的业务策略工厂:绑定本次请求的 Session/Actor/ToolCall。"""
         return PricePreToolPolicy(
             session=context.session,
-            config=pricing_policy.config,
+            config=price_config,
             actor=context.actor,
             tool_call_id=context.request.tool_call_id,
-            policy_revision=pricing_policy.version,
         )
 
     def registration_for(key: str) -> PreToolProfileRegistration:
@@ -1129,7 +1090,7 @@ async def build_product_application(
         engine=engine,
         assembly=assembly,
         tool_registry=tool_registry,
-        pricing_policy=pricing_policy,
+        price_config=price_config,
         backend=backend,
         adapter=adapter,
         adapter_session=adapter_session,

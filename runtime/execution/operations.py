@@ -10,26 +10,18 @@
   ``operation_id``)、EXECUTING(同一 operation_id 的幂等重入)或 NOT_APPLIED
   (上次尝试确定未生效);已绑定目标时要求规范化 ``expected_state`` 与执行能力
   (adapter / 原生幂等 / 回查)完全一致;``expected_state IS NULL`` 只允许在
-  PREPARED 或"带 ``DETERMINISTIC_REJECTION`` 标记且**不存在 EXECUTE Attempt**"
-  的 NOT_APPLIED 下首次绑定目标(其余状态/来源一律 fail closed,历史脏数据不得
-  被当成安全状态),且目标为空**不构成覆盖执行能力**的理由;进入执行边界即把状态
-  推进 EXECUTING——这是恢复方识别"可能已执行"的唯一判据;
+  PREPARED / NOT_APPLIED 下首次绑定目标,其余状态一律 fail closed;进入执行
+  边界即把状态推进 EXECUTING——这是恢复方识别"可能已执行"的唯一判据;
 - **本地确定性拒绝**:prepare 阶段发现的确定性冲突走
   :meth:`OperationService.record_rejected_preparation`,直接落 NOT_APPLIED,
   不写 EXECUTING、不写 TOOL_WRITE_ALLOWED、不新增 EXECUTE Attempt,因而不产生
-  外部执行的不确定窗口;拒绝一律不可重试(ToolCall 直接 ``FAILED``)。拒绝上下文
-  只进 ``last_receipt``(最新诊断快照,会被后续结果覆盖),``request_fingerprint``
-  另写只追加审计事件。**已发生过外部执行的 NOT_APPLIED 不被后续拒绝改写来源标记**:
-  它保留原执行回执与完整 ``expected_state``,新拒绝只追加审计事件——否则一条确实
-  调用过外部平台的 Operation 会被抹成"从未进入执行边界";
+  外部执行的不确定窗口;拒绝上下文只进 ``last_receipt``(审计用途,不参与回查);
 - **结果分类**:适配器回执状态 → :class:`OperationOutcome`(APPLIED /
   NOT_APPLIED / UNKNOWN)确定性分类(:func:`classify_receipt_status`);
 - **UNKNOWN 只能进 Reconciliation**:Run ``RUNNING → WAITING_RECONCILIATION``,
   返回 ``next_job_kind=RECONCILE_OPERATION`` 供编排层调度;禁止盲目重试;
-- **NOT_APPLIED 的终态由 ``retry_allowed`` 决定**:显式可重试时 ToolCall
-  ``EXECUTING → VALIDATING``(必须重新通过完整 PreToolUse 才可再次执行);
-  否则 ToolCall 直接 ``FAILED``——"确定未生效"与"值得重试"是两件事,混为一谈
-  会让编排层对同一个 ToolCall 无限重排队;
+- **NOT_APPLIED 只能回 VALIDATING**:ToolCall ``EXECUTING → VALIDATING``,
+  必须重新通过完整 PreToolUse 后才可再次执行;
 - **fencing 提交**:结果事务要求 ``job.lease_token == worker_lease_token`` 且
   ``run.state_version == expected_state_version``;token 无效/过期抛
   :class:`LeaseStaleError`,版本过期经 RunService CAS 抛
@@ -86,25 +78,6 @@ TOOL_WRITE_UNKNOWN: Final = "TOOL_WRITE_UNKNOWN"
 EVENT_TOOL_RESULT_RECORDED: Final = "TOOL_RESULT_RECORDED"
 EVENT_RUN_WAITING_RECONCILIATION: Final = "RUN_WAITING_RECONCILIATION"
 
-# ---- last_receipt 的受控来源标记 ----
-
-RECEIPT_STAGE_PREPARATION: Final = "PREPARATION"
-"""回执来源:prepare 阶段(尚未发起外部调用)。"""
-
-RECEIPT_STAGE_EXECUTION: Final = "EXECUTION"
-"""回执来源:外部执行边界。"""
-
-RECEIPT_STAGE_RECONCILIATION: Final = "RECONCILIATION"
-"""回执来源:Reconciliation 回查。
-
-回查刷新 ``last_receipt`` 时写入该标记,使"最新诊断快照"的语义与当前状态
-一致;原 EXECUTION 证据不依赖 ``last_receipt``(它本来就会被覆盖),而由
-``OperationAttempt(kind=EXECUTE)`` 与追加式 AgentEvent/审计事件保留。
-"""
-
-REJECTION_KIND_DETERMINISTIC: Final = "DETERMINISTIC_REJECTION"
-"""本地确定性拒绝的受控标记;只有它允许同一 Operation 在目标为空时重新绑定。"""
-
 # ---- 结果分类 ----
 
 
@@ -160,47 +133,16 @@ _BEGINNABLE_OPERATION_STATUSES: Final[frozenset[OperationStatus]] = frozenset(
     }
 )
 
+_NULL_STATE_BINDABLE_STATUSES: Final[frozenset[OperationStatus]] = frozenset(
+    # 只有"从未发起外部调用"的状态允许以 NULL expected_state 首次绑定目标。
+    {OperationStatus.PREPARED, OperationStatus.NOT_APPLIED}
+)
+
 _EXECUTABLE_TOOL_CALL_STATUSES: Final[tuple[ToolCallStatus, ...]] = (
     # 执行边界的 ToolCall 前提:VALIDATING(新执行)或 EXECUTING(幂等重入)。
     ToolCallStatus.VALIDATING,
     ToolCallStatus.EXECUTING,
 )
-
-_REJECTION_RECORDABLE_STATUSES: Final[frozenset[OperationStatus]] = frozenset(
-    # 拒绝只允许改写"确定未生效"的操作;EXECUTING/UNKNOWN(可能已执行)与
-    # APPLIED(已生效)只能走 Reconciliation。
-    {OperationStatus.PREPARED, OperationStatus.NOT_APPLIED}
-)
-
-
-def _target_binding_allowed(operation_row: Operation) -> bool:
-    """``expected_state IS NULL`` 时能否首次绑定业务目标(仅看状态与来源标记)。
-
-    只认两种来源:
-
-    - PREPARED:确认前只预约了 ``operation_id``,从未发起外部调用;
-    - NOT_APPLIED 且 ``last_receipt`` 带 ``DETERMINISTIC_REJECTION`` 标记:上一次
-      是本地 prepare 拒绝,同样从未发起外部调用。
-
-    仅凭"状态 + 空目标"推断安全会把历史脏数据(例如适配器判定 NOT_APPLIED 却
-    丢失目标记录的行)当成可重新绑定的状态,因此其他来源一律 fail closed。
-
-    标记本身不充分:它只是 prepare 拒绝写入的诊断快照。调用方还必须确认该
-    Operation **不存在 EXECUTE Attempt**(见
-    :meth:`OperationService._operation_has_execute_attempt`),否则一条确实到过
-    执行边界的行会借标记重新绑定。
-    """
-    if operation_row.status is OperationStatus.PREPARED:
-        return True
-    if operation_row.status is not OperationStatus.NOT_APPLIED:
-        return False
-    receipt = operation_row.last_receipt
-    if not isinstance(receipt, Mapping):
-        return False
-    return (
-        receipt.get("stage") == RECEIPT_STAGE_PREPARATION
-        and receipt.get("kind") == REJECTION_KIND_DETERMINISTIC
-    )
 
 
 # ---- 值对象 ----
@@ -212,8 +154,7 @@ class OperationResultRecord:
 
     ``payload`` 是权威结果(处理器已完成密钥类脱敏;可为 None,如 UNKNOWN);
     ``error_code`` 携带 ``INVALID_TOOL_RESULT`` / ``RESPONSE_LOST`` 等诊断码;
-    ``retry_allowed`` 是显式回执契约:为 True 仅表示"允许在重新通过完整
-    PreToolUse 后再次执行",默认 False——``NOT_APPLIED`` 本身不蕴含可重试。
+    ``retry_allowed`` 为 True 仅表示"允许在重新通过完整 PreToolUse 后再次执行"。
     """
 
     tool_call_id: uuid.UUID
@@ -246,7 +187,6 @@ class RecordResultOutcome:
     operation_id: uuid.UUID
     operation_outcome: OperationOutcome
     tool_call_status: ToolCallStatus
-    retry_allowed: bool
     run_status: RunStatus
     next_job_kind: RunJobKind | None
     event: AppendedEvent
@@ -444,7 +384,7 @@ class OperationService:
             operation_row = existing
             # Operation.operation_id 列非空;复用时以行上的稳定值为准。
             operation_id: uuid.UUID = existing.operation_id
-            await self._prepare_existing_for_execution(
+            self._prepare_existing_for_execution(
                 existing,
                 adapter_key=adapter_key,
                 expected_state=expected_state,
@@ -512,9 +452,8 @@ class OperationService:
         """结果事务:分类落库 + ToolCall/Operation/Attempt 状态迁移 + Run 事件。
 
         - APPLIED → Operation APPLIED、ToolCall SUCCEEDED、Run 保持 RUNNING;
-        - NOT_APPLIED + ``retry_allowed`` → ToolCall 回 VALIDATING
+        - NOT_APPLIED → Operation NOT_APPLIED、ToolCall 回 VALIDATING
           (必须重走完整 PreToolUse,不得直接重执行);
-        - NOT_APPLIED 且不可重试 → ToolCall FAILED:确定失败落终态,不再重排队;
         - UNKNOWN → Operation/ToolCall UNKNOWN,Run ``RUNNING →
           WAITING_RECONCILIATION``,``next_job_kind=RECONCILE_OPERATION``,
           禁止盲目重试;
@@ -538,9 +477,7 @@ class OperationService:
                 f"operation {tool_call.operation_id} not found for tool call {result.tool_call_id}"
             )
 
-        tool_call_status = _tool_call_status_for(
-            result.outcome, retry_allowed=result.retry_allowed
-        )
+        tool_call_status = _TOOL_CALL_STATUS_BY_OUTCOME[result.outcome]
         attempt_status = _ATTEMPT_STATUS_BY_OUTCOME[result.outcome]
         moved = await self._transition_tool_call(
             result.tool_call_id,
@@ -557,7 +494,6 @@ class OperationService:
             operation_row.id,
             status=_OPERATION_STATUS_BY_OUTCOME[result.outcome],
             last_receipt={
-                "stage": RECEIPT_STAGE_EXECUTION,
                 "outcome": result.outcome.value,
                 "error_code": result.error_code,
                 "external_reference": result.external_reference,
@@ -624,7 +560,6 @@ class OperationService:
             operation_id=operation_row.operation_id,
             operation_outcome=result.outcome,
             tool_call_status=tool_call_status,
-            retry_allowed=result.retry_allowed,
             run_status=run_status,
             next_job_kind=next_job_kind,
             event=event,
@@ -637,7 +572,6 @@ class OperationService:
         adapter_key: str,
         rejection_context: Mapping[str, Any],
         error_code: str,
-        request_fingerprint: str,
         supports_native_idempotency: bool = False,
         supports_reconciliation: bool = False,
         idempotency_key: str | None = None,
@@ -648,18 +582,8 @@ class OperationService:
           因此不存在"可能已执行"的不确定窗口,也不会有回查被无谓触发;
         - ``expected_state`` 保持 NULL:拒绝不存在可回查的业务目标,把模型输入
           与策略版本这类审计上下文放进 ``last_receipt.rejection_context``;
-        - ``last_receipt`` 带受控标记 ``stage=PREPARATION`` /
-          ``kind=DETERMINISTIC_REJECTION``:这是"该 Operation 从未发起外部调用"
-          的可验证证据,后续只有它允许在同一行上重新绑定目标;
-        - **不覆盖已有执行历史**:若该 Operation 已经到过执行边界(存在 EXECUTE
-          Attempt,或 ``last_receipt.stage=EXECUTION``),则保留原执行回执与完整
-          ``expected_state``,不写 ``DETERMINISTIC_REJECTION`` 标记——否则一条确实
-          调用过外部平台的行会被抹成"从未执行",并据此获得空目标重绑资格。此时
-          新拒绝只写追加式 ``TOOL_WRITE_REJECTED`` 审计事件;
-        - ``request_fingerprint`` 写进只追加的 TOOL_WRITE_REJECTED 审计事件——
-          ``last_receipt`` 会被后续结果覆盖,不能当作不可变证据;
-        - 拒绝一律不可重试:ToolCall 直接 ``FAILED``(确定性拒绝重排队只会再次
-          走到同一拒绝);暂时性基础设施故障走独立的 retryable 回执契约;
+        - ToolCall 回到/保持 VALIDATING 并落 ``failure_code``:再次执行必须重新
+          通过完整 PreToolUse(与 NOT_APPLIED 的通用语义一致);
         - Run 状态不变,不产生 RECONCILE Job。
         """
         await ensure_write_fencing(
@@ -670,8 +594,6 @@ class OperationService:
         )
         tool_call = await self._load_tool_call(tool_call_id)
         receipt = {
-            "stage": RECEIPT_STAGE_PREPARATION,
-            "kind": REJECTION_KIND_DETERMINISTIC,
             "outcome": OperationOutcome.NOT_APPLIED.value,
             "error_code": error_code,
             "external_reference": None,
@@ -685,27 +607,23 @@ class OperationService:
         if existing is not None:
             # 只有尚未发起外部调用的 Operation 可以被改写为"确定未生效";
             # 已进入 EXECUTING/UNKNOWN/APPLIED 的行必须走 Reconciliation。
-            if existing.status not in _REJECTION_RECORDABLE_STATUSES:
+            if existing.status not in _NULL_STATE_BINDABLE_STATUSES:
                 raise OperationConflictError(
                     f"operation {existing.operation_id} 状态 {existing.status.value} "
                     "不允许记录 prepare 拒绝;已执行或不确定的操作只能走 Reconciliation"
                 )
-            # 执行能力由确认预约/首次执行边界落库;拒绝不是改写能力的理由。
-            _require_same_execution_contract(
-                existing,
-                adapter_key=adapter_key,
-                supports_native_idempotency=supports_native_idempotency,
-                supports_reconciliation=supports_reconciliation,
-            )
+            if existing.adapter_key != adapter_key:
+                raise OperationConflictError(
+                    f"operation {existing.operation_id} 已绑定 adapter_key="
+                    f"{existing.adapter_key!r},与本次 {adapter_key!r} 不一致"
+                )
+            operation_row = existing
+            operation_row.status = OperationStatus.NOT_APPLIED
+            operation_row.supports_native_idempotency = supports_native_idempotency
+            operation_row.supports_reconciliation = supports_reconciliation
+            operation_row.last_receipt = receipt
+            await self._session.flush()
             operation_id = existing.operation_id
-            if not await self._operation_reached_execution_boundary(existing):
-                # 从未发起外部调用(PREPARED 预约,或上一次也是本地拒绝):可以
-                # 改写为"确定未生效"并留下受控来源标记,供后续空目标重绑。
-                existing.status = OperationStatus.NOT_APPLIED
-                existing.last_receipt = receipt
-                await self._session.flush()
-            # 已有执行历史:保留原执行回执与完整 expected_state;新拒绝只写
-            # 追加式审计,绝不把"到过执行边界"抹成"从未进入执行边界"。
         else:
             operation_id = assigned_id if assigned_id is not None else uuid.uuid4()
             key = idempotency_key if idempotency_key is not None else f"op:{operation_id}"
@@ -725,12 +643,9 @@ class OperationService:
             await self._session.flush()
             if assigned_id is None:
                 await self._assign_operation_id(tool_call_id, operation_id)
-        tool_call_status = _tool_call_status_for(
-            OperationOutcome.NOT_APPLIED, retry_allowed=False
-        )
         if not await self._transition_tool_call(
             tool_call_id,
-            new_status=tool_call_status,
+            new_status=ToolCallStatus.VALIDATING,
             expected_statuses=frozenset(
                 {ToolCallStatus.VALIDATING, ToolCallStatus.EXECUTING}
             ),
@@ -747,8 +662,6 @@ class OperationService:
                 "operation_id": str(operation_id),
                 "adapter_key": adapter_key,
                 "error_code": error_code,
-                "request_fingerprint": request_fingerprint,
-                "retryable": False,
             },
             run_id=self._run_id,
             tool_call_id=tool_call_id,
@@ -770,8 +683,7 @@ class OperationService:
             tool_call_id=tool_call_id,
             operation_id=operation_id,
             operation_outcome=OperationOutcome.NOT_APPLIED,
-            tool_call_status=tool_call_status,
-            retry_allowed=False,
+            tool_call_status=ToolCallStatus.VALIDATING,
             run_status=await self._load_run_status(),
             next_job_kind=None,
             event=event,
@@ -779,7 +691,7 @@ class OperationService:
 
     # ---- 内部 ----
 
-    async def _prepare_existing_for_execution(
+    def _prepare_existing_for_execution(
         self,
         operation_row: Operation,
         *,
@@ -797,33 +709,22 @@ class OperationService:
                 " 的操作只能走 Reconciliation"
             )
         if operation_row.expected_state is None:
-            # 目标为空只允许在"确定从未发起外部调用"的 Operation 上首次绑定:
-            # PREPARED,或带 DETERMINISTIC_REJECTION 标记的 NOT_APPLIED。其他
-            # 来源出现 NULL 说明目标记录缺失:此时若放行,恢复方会把一个可能已
-            # 执行的操作误判为"尚未绑定目标"→ 重复写。
-            if not _target_binding_allowed(operation_row):
+            # 只有"从未发起外部调用"的状态可以首次绑定业务目标。其他状态出现
+            # NULL 说明目标记录缺失:此时若放行,恢复方会把一个可能已执行的
+            # 操作误判为"尚未绑定目标"→ 重复写。
+            if status not in _NULL_STATE_BINDABLE_STATUSES:
                 raise OperationConflictError(
                     f"operation {operation_row.operation_id} 状态 {status.value} 下 "
-                    "expected_state 为空且缺少 DETERMINISTIC_REJECTION 标记;"
-                    "无法确认该操作从未发起外部调用,拒绝执行(fail closed)"
+                    "expected_state 为空;无法确认业务目标,拒绝执行(fail closed)"
                 )
-            # 标记只是 prepare 拒绝写的诊断快照:必须再确认没有任何 EXECUTE
-            # Attempt,否则一条到过执行边界(已发生过外部调用)的行会借标记
-            # 重新绑定目标 → 重复写。
-            if await self._operation_has_execute_attempt(operation_row.id):
+            if operation_row.adapter_key != adapter_key:
                 raise OperationConflictError(
-                    f"operation {operation_row.operation_id} 已有 EXECUTE Attempt;"
-                    "该操作到过执行边界,不允许在空目标下重新绑定(fail closed)"
+                    f"operation {operation_row.operation_id} 已绑定 adapter_key="
+                    f"{operation_row.adapter_key!r},与本次 {adapter_key!r} 不一致"
                 )
-            # 目标为空不构成改写执行能力的理由:确认预约已经知道完整
-            # execution_profile,能力差异只能说明记录被静默改写。
-            _require_same_execution_contract(
-                operation_row,
-                adapter_key=adapter_key,
-                supports_native_idempotency=supports_native_idempotency,
-                supports_reconciliation=supports_reconciliation,
-            )
             operation_row.expected_state = dict(expected_state)
+            operation_row.supports_native_idempotency = supports_native_idempotency
+            operation_row.supports_reconciliation = supports_reconciliation
         else:
             persisted = canonical_expected_state(operation_row.expected_state)
             requested = canonical_expected_state(expected_state)
@@ -863,38 +764,6 @@ class OperationService:
             Operation.operation_id == operation_id,
         )
         return (await self._session.scalars(stmt)).one_or_none()
-
-    async def _operation_has_execute_attempt(self, operation_row_id: uuid.UUID) -> bool:
-        """该 Operation 是否到过执行边界(存在 EXECUTE Attempt)。
-
-        prepare 拒绝从不新增 Attempt,任何 EXECUTE Attempt 都意味着 ``begin``
-        曾把它推进 ``EXECUTING`` 并即将发起外部调用;因此它是"可能已执行"的
-        只追加证据,用于阻止空目标重新绑定、以及拒绝路径改写已有执行来源。
-        """
-        stmt = (
-            select(OperationAttempt.id)
-            .where(
-                OperationAttempt.workspace_id == self._workspace_id,
-                OperationAttempt.operation_row_id == operation_row_id,
-                OperationAttempt.kind == OperationAttemptKind.EXECUTE,
-            )
-            .limit(1)
-        )
-        return (await self._session.scalar(stmt)) is not None
-
-    async def _operation_reached_execution_boundary(self, operation_row: Operation) -> bool:
-        """该 Operation 是否已到过执行边界(可能已调用外部平台)。
-
-        两种只追加证据取或:存在 EXECUTE Attempt,或 ``last_receipt.stage`` 为
-        ``EXECUTION``。命中即不得再用 prepare 拒绝改写来源标记、也不得空目标重绑。
-        """
-        receipt = operation_row.last_receipt
-        if (
-            isinstance(receipt, Mapping)
-            and receipt.get("stage") == RECEIPT_STAGE_EXECUTION
-        ):
-            return True
-        return await self._operation_has_execute_attempt(operation_row.id)
 
     async def _load_run_status(self) -> RunStatus:
         """读取当前 Run 状态(条件更新不经 ORM 同步,须 populate_existing 重读)。"""
@@ -1010,29 +879,16 @@ class OperationService:
         await self._session.execute(stmt)
 
 
+_TOOL_CALL_STATUS_BY_OUTCOME: Final[dict[OperationOutcome, ToolCallStatus]] = {
+    OperationOutcome.APPLIED: ToolCallStatus.SUCCEEDED,
+    OperationOutcome.NOT_APPLIED: ToolCallStatus.VALIDATING,
+    OperationOutcome.UNKNOWN: ToolCallStatus.UNKNOWN,
+}
 _OPERATION_STATUS_BY_OUTCOME: Final[dict[OperationOutcome, OperationStatus]] = {
     OperationOutcome.APPLIED: OperationStatus.APPLIED,
     OperationOutcome.NOT_APPLIED: OperationStatus.NOT_APPLIED,
     OperationOutcome.UNKNOWN: OperationStatus.UNKNOWN,
 }
-
-
-def _tool_call_status_for(
-    outcome: OperationOutcome, *, retry_allowed: bool
-) -> ToolCallStatus:
-    """结果分类 + 显式重试声明 → ToolCall 终态。
-
-    ``NOT_APPLIED`` 只说明"这次没生效",不说明"值得再试":可重试时回到
-    ``VALIDATING`` 等重走完整 PreToolUse,否则直接 ``FAILED`` 落终态。UNKNOWN
-    永远不进 VALIDATING(禁止盲目重试),只能由 Reconciliation 推进。
-    """
-    if outcome is OperationOutcome.APPLIED:
-        return ToolCallStatus.SUCCEEDED
-    if outcome is OperationOutcome.NOT_APPLIED:
-        return ToolCallStatus.VALIDATING if retry_allowed else ToolCallStatus.FAILED
-    return ToolCallStatus.UNKNOWN
-
-
 _ATTEMPT_STATUS_BY_OUTCOME: Final[dict[OperationOutcome, OperationAttemptStatus]] = {
     OperationOutcome.APPLIED: OperationAttemptStatus.SUCCEEDED,
     OperationOutcome.NOT_APPLIED: OperationAttemptStatus.FAILED,

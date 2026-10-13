@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
 from apps.api.dependencies import SessionDep
-from apps.worker.e2e import E2E_PRICE_CONFIG
 from composition.provisioning.product_operations import (
     ModelConnectionProvisioningSpec,
     ProductOperationsProvisioner,
@@ -165,11 +164,7 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
     await session.commit()
     capabilities = await ProductOperationsProvisioner(
         lambda: AsyncSession(engine, expire_on_commit=False)
-    ).provision(
-        workspace_id=workspace.id,
-        model=E2E_MODEL_SPEC,
-        pricing_policy=E2E_PRICE_CONFIG,
-    )
+    ).provision(workspace_id=workspace.id, model=E2E_MODEL_SPEC)
 
     # 复位 Runtime 执行遗留数据与商品域种子(幂等;独立短事务提交)。
     seed_session = AsyncSession(engine, expire_on_commit=False)

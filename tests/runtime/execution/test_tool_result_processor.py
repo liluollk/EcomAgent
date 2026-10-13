@@ -139,29 +139,14 @@ async def test_classification_is_deterministic(
 async def test_not_applied_allows_revalidation_only(
     tool_result_processor: ToolResultProcessor,
 ) -> None:
-    """回执显式声明可重试时,NOT_APPLIED 允许重试,但仍须重走完整 PreToolUse。"""
+    """NOT_APPLIED 允许重试,但只能经完整 PreToolUse 重新校验后执行。"""
     processed = await tool_result_processor.process(
         ToolExecutionReceipt(
-            tool_call_id=PROCESSOR_TOOL_CALL_ID,
-            status="NOT_APPLIED",
-            payload={"result": "ok"},
-            retryable=True,
+            tool_call_id=PROCESSOR_TOOL_CALL_ID, status="NOT_APPLIED", payload={"result": "ok"}
         )
     )
     assert processed.operation_outcome == OperationOutcome.NOT_APPLIED
     assert processed.retry_allowed is True
-
-
-async def test_not_applied_without_explicit_retry_is_terminal(
-    tool_result_processor: ToolResultProcessor,
-) -> None:
-    """未声明可重试的 NOT_APPLIED 一律不可重试:重试是显式契约,不是缺省行为。"""
-    for status in ("NOT_APPLIED", "FAILED", "ERROR"):
-        processed = await tool_result_processor.process(
-            ToolExecutionReceipt(tool_call_id=PROCESSOR_TOOL_CALL_ID, status=status)
-        )
-        assert processed.operation_outcome == OperationOutcome.NOT_APPLIED
-        assert processed.retry_allowed is False
 
 
 async def test_authoritative_result_keeps_original_fields_with_secrets_redacted(
