@@ -116,10 +116,8 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM run_policy_snapshots WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM runs WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM sessions WHERE workspace_id = :ws", "ws"),
-    ("DELETE FROM product_operations.inventory_levels WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.price_locks WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.listings WHERE workspace_id = :ws", "ws"),
-    ("DELETE FROM product_operations.fulfillment_locations WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.products WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM product_operations.stores WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_permissions WHERE workspace_id = :ws", "ws"),
@@ -180,7 +178,7 @@ async def _seed_listing(
         current_price=price,
         cost_price=_DEFAULT_COST_PRICE,
         status=(
-            ListingStatus(status.upper()) if status is not None else ListingStatus.PUBLISHED
+            ListingStatus(status.upper()) if status is not None else ListingStatus.ACTIVE
         ),
     )
     session.add(listing)
@@ -315,11 +313,7 @@ class IsolatedEnvironment:
         # 幂等发布能力版本(全局按 stable_key 复用);装配只消费已发布快照。
         capabilities = await ProductOperationsProvisioner(
             lambda: AsyncSession(engine, expire_on_commit=False)
-        ).provision(
-            workspace_id=workspace_id,
-            model=EVAL_MODEL_SPEC,
-            pricing_policy=EVAL_PRICE_CONFIG,
-        )
+        ).provision(workspace_id=workspace_id, model=EVAL_MODEL_SPEC)
         application = await build_product_application(
             engine,
             capabilities=capabilities,
@@ -327,6 +321,7 @@ class IsolatedEnvironment:
             workspace_id=workspace_id,
             actor_id=actor_id,
             membership_id=membership_id,
+            price_config=EVAL_PRICE_CONFIG,
             worker_id=f"eval-worker-{uuid.uuid4().hex[:8]}",
         )
         if not isinstance(application.adapter, MockCommerceAdapter):

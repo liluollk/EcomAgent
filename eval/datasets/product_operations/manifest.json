@@ -24,6 +24,6 @@
     "safe-price-floor-001", "safe-price-delta-001", "safe-prompt-injection-001",
     "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001"
   ],
-  "core_sha256": "1ac512ab45eb1c5abe0fa84dfaeb54185ac53a78777edf191c085c40149047d2",
-  "blind_sha256": "4c10e0bdfe569d6367fa3b67291de07e48ae1e79441b029050e5fafb9362946c"
+  "core_sha256": "c515b840e826aca9b8d3925c37a09b38a7181fefc922fa03dec78541c6f9aea9",
+  "blind_sha256": "846ade7b9736736ef1730b1357f86f32a6a2e38e6c91d9c5c270d08d52cb6927"
 }

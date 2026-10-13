@@ -120,7 +120,7 @@ REQUIRED_CASE_IDS: Final[frozenset[str]] = frozenset(
         "worker-exit-before-write",
         "write-applied-response-lost",
         "worker-restart-after-confirmation",
-        "platform-persistent-failure",
+        "platform-temporarily-unavailable",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
     }
@@ -438,7 +438,7 @@ def _scenario(case_id: str) -> Scenario:
                         "sku": "SKU-001",
                         "price": _INITIAL_PRICE,
                         "currency": "CNY",
-                        "status": "PUBLISHED",
+                        "status": "ACTIVE",
                     }
                 ]
             },
@@ -1131,23 +1131,15 @@ async def _case_worker_restart_after_confirmation(engine: AsyncEngine) -> _CaseO
         return await _assert_completed_write(env, pending.run_id, expected_path=())
 
 
-async def _case_platform_persistent_failure(engine: AsyncEngine) -> _CaseObservation:
-    """e) platform-persistent-failure:平台持续失败 → 确定 NOT_APPLIED,零写。
-
-    持续故障不是"暂时不可用":回执确定 FAILED 且不声明可重试,因此 Operation
-    NOT_APPLIED、ToolCall 落 FAILED 终态、失败返回模型,Run 不重排队、不产生
-    UNKNOWN 回查。(用 ``permanent_failure`` 模拟"暂时不可用"会驱动 Runtime 进入
-    一个没有成功出口的重排循环,故本用例只声明持续故障的确定语义。)
-    """
-    async with _isolated_environment(
-        engine, "platform-persistent-failure", _PriceWriteBackend()
-    ) as env:
+async def _case_platform_temporarily_unavailable(engine: AsyncEngine) -> _CaseObservation:
+    """e) platform-temporarily-unavailable:平台持续失败 → 确定 NOT_APPLIED,零写。"""
+    async with _isolated_environment(engine, "platform-temporarily-unavailable", _PriceWriteBackend()) as env:
         env.commerce_write_observer.faults.inject(PERMANENT_FAILURE)
         pending = await _drive_to_confirmation(env)
         view = await env.application.confirm(pending.confirmation_id)
-        if view.status is not RunStatus.COMPLETED:
+        if view.status is not RunStatus.QUEUED:
             raise CaseFailure(
-                "a persistent platform failure must reach a terminal run state, got "
+                "deterministic platform failure must requeue the run, got "
                 f"{view.status.value}"
             )
         operation = await _single_operation(engine, env.workspace_id, pending.run_id)
@@ -1157,19 +1149,15 @@ async def _case_platform_persistent_failure(engine: AsyncEngine) -> _CaseObserva
                 f"{None if operation is None else operation.status.value}"
             )
         receipt = operation.last_receipt
-        if (
-            not isinstance(receipt, dict)
-            or receipt.get("outcome") != "NOT_APPLIED"
-            or receipt.get("error_code") != "PLATFORM_FAILURE"
-        ):
+        if not isinstance(receipt, dict) or receipt.get("outcome") != "NOT_APPLIED":
             raise CaseFailure(
-                f"authoritative receipt must record NOT_APPLIED/PLATFORM_FAILURE, got {receipt!r}"
+                f"authoritative receipt must record NOT_APPLIED, got {receipt!r}"
             )
         tool_call = await _single_tool_call(engine, env.workspace_id, pending.run_id)
-        if tool_call.status.value != "FAILED":
+        if tool_call.status.value != "VALIDATING":
             raise CaseFailure(
-                "a persistent platform failure must terminate the tool call "
-                f"(no requeue for revalidation), got {tool_call.status.value}"
+                "tool call must return to VALIDATING for a full PreToolUse re-pass, "
+                f"got {tool_call.status.value}"
             )
         if await _count_operations(engine, env.workspace_id, pending.run_id) != 1:
             raise CaseFailure("exactly one authoritative operation is allowed")
@@ -1300,7 +1288,7 @@ _FAULT_EXECUTORS: Final[Mapping[str, FaultExecutor]] = {
     "worker_exit_before_write": _case_worker_exit_before_write,
     "response_lost_after_commit": _case_write_applied_response_lost,
     "worker_restart_after_confirmation": _case_worker_restart_after_confirmation,
-    "permanent_failure": _case_platform_persistent_failure,
+    "permanent_failure": _case_platform_temporarily_unavailable,
     "temporary_reconcile_unknown": _case_reconcile_temporarily_inconsistent,
     "duplicate_submit": _case_duplicate_submit,
 }

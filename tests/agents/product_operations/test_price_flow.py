@@ -283,9 +283,8 @@ async def test_reserved_operation_is_promoted_on_confirmed_execution(
 ) -> None:
     """真实确认路径:预约的 PREPARED Operation 在执行前被绑定目标并推进。
 
-    锁定 Task 2.1/Task 2.2:确认前预约即持久化完整执行能力与该写 Tool 的
-    adapter_key,真正执行时只补完整 ``expected_state``;执行边界比较能力而不是
-    覆盖能力。
+    锁定 Task 2.1:确认前只预约 ``operation_id``(无目标、能力是占位值),真正
+    执行时才同时落库完整 ``expected_state`` 与该写 Tool 的执行能力。
     """
     ids = product_application.seed_ids
     store_id = str(ids.store_id)
@@ -303,8 +302,8 @@ async def test_reserved_operation_is_promoted_on_confirmed_execution(
     reserved = await _load_operation_row(engine, operation_id)
     assert reserved.status is OperationStatus.PREPARED
     assert reserved.expected_state is None
-    # 预约阶段已带上完整执行能力:执行边界只校验一致性,不接管能力写入。
-    assert reserved.supports_reconciliation is True
+    # 预约阶段只有占位能力:执行能力必须来自执行边界,而不是确认前的默认值。
+    assert reserved.supports_reconciliation is False
     assert reserved.supports_native_idempotency is False
 
     run = await product_application.confirm(run.pending_confirmation_id)
@@ -316,10 +315,9 @@ async def test_reserved_operation_is_promoted_on_confirmed_execution(
     assert executed.expected_state["operation_type"] == "UPDATE_PRICE_LEGACY"
     assert executed.expected_state["listing_id"] == str(ids.listing_id)
     assert executed.expected_state["target_price"] == "99.00"
-    # 执行能力在预约阶段落库,执行后保持不变。
+    # 执行能力随首次执行边界落库,并驱动平台回查能力。
     assert executed.adapter_key == reserved.adapter_key
     assert executed.supports_reconciliation is True
-    assert executed.supports_native_idempotency is False
 
 
 async def test_prepare_rejects_unresolvable_listing_with_minimal_context(

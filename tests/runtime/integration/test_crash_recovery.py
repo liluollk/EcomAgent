@@ -397,7 +397,6 @@ class CrashHarness:
                     lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=TEST_LIMITS.reconcile_budget,
-                    write_retry_budget=TEST_LIMITS.write_retry_budget,
                 )
                 outcome = await service.apply_result(verdict)
                 assert await LeaseService(session).complete(job.id, lease.lease_token)

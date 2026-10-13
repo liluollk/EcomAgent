@@ -34,14 +34,10 @@ class ProductStatus(str, enum.Enum):
 
 
 class ListingStatus(str, enum.Enum):
-    """渠道刊登发布状态。
+    """渠道上架状态。"""
 
-    第一版 ``ACTIVE/INACTIVE`` 在 P1 迁移为 ``PUBLISHED/UNPUBLISHED``
-    (设计 §7):库存为零不等价于取消发布,平台审核/违规另以 issues 表达。
-    """
-
-    PUBLISHED = "PUBLISHED"
-    UNPUBLISHED = "UNPUBLISHED"
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
 
 
 @dataclass(frozen=True)
@@ -95,37 +91,6 @@ class Listing:
 
 
 @dataclass(frozen=True)
-class FulfillmentLocation:
-    """履约位置(架构文档 §3;P1 设计 §7)。
-
-    ``status`` 复用 :class:`StoreStatus`:位置与店铺一样有 ACTIVE/DISABLED,
-    只有 ACTIVE 位置参与库存调整。
-    """
-
-    id: uuid.UUID
-    workspace_id: uuid.UUID
-    store_id: uuid.UUID
-    external_location_ref: str
-    name: str
-    aliases: tuple[str, ...]
-    status: StoreStatus
-    version: int
-
-
-@dataclass(frozen=True)
-class InventoryLevel:
-    """某位置某商品的可用库存(P1 设计 §7);``version`` 用于 CAS。"""
-
-    id: uuid.UUID
-    workspace_id: uuid.UUID
-    location_id: uuid.UUID
-    product_id: uuid.UUID
-    available_quantity: int
-    version: int
-    updated_at: datetime | None = None
-
-
-@dataclass(frozen=True)
 class PriceLock:
     """锁价窗口(架构文档 §3 price_locks);``[starts_at, ends_at)`` 内禁止改价。"""
 
@@ -150,8 +115,6 @@ class PriceChange:
 
 
 __all__ = [
-    "FulfillmentLocation",
-    "InventoryLevel",
     "Listing",
     "ListingStatus",
     "Price",

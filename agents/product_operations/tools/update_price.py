@@ -10,8 +10,7 @@
    服务端解析 ``(workspace, store, sku) → Listing``,取 currency 与当前
    ``version`` 作为乐观并发 ``expected_version``,产出服务端可信命令与可回放
    ``expected_state``(含受控 ``operation_type``)。Listing 已不存在时返回
-   确定性 rejection(默认可重试性为 False:ToolCall 直接落终态,不再重排队),
-   不调用平台;本阶段不产生任何外部副作用;
+   确定性 rejection,不调用平台;本阶段不产生任何外部副作用;
 2. Runtime 提交 ``expected_state``(外部调用前持久化);
 3. ``execute_prepared``:以 Runtime 分配的稳定 operation_id 派生幂等键,经
    注入的 :class:`UpdatePriceGateway` 执行平台写;不接受模型参数,异常交由
@@ -184,12 +183,7 @@ class PreparedPriceWrite:
 
 @dataclass(frozen=True)
 class UpdatePriceWriteReceipt:
-    """平台写回执;UNKNOWN 时观测字段为 None,由调用方调度回查。
-
-    ``retryable`` 是执行端对"这次失败是否值得重试"的显式声明(默认 False),
-    原样透传给 Runtime 的回执契约,决定 ToolCall 是回 ``VALIDATING`` 还是落
-    ``FAILED`` 终态。
-    """
+    """平台写回执;UNKNOWN 时观测字段为 None,由调用方调度回查。"""
 
     status: str
     before_price: Decimal | None = None
@@ -197,7 +191,6 @@ class UpdatePriceWriteReceipt:
     listing_version: int | None = None
     external_ref: str | None = None
     reason_code: str | None = None
-    retryable: bool = False
 
 
 class UpdatePriceGateway(Protocol):
@@ -224,17 +217,11 @@ class UpdatePriceToolHandler:
         session: AsyncSession,
         gateway: UpdatePriceGateway,
         policy_version: str,
-        policy_version_id: uuid.UUID | None = None,
-        policy_revision: int | None = None,
-        policy_config_hash: str | None = None,
     ) -> None:
         self._workspace_id = workspace_id
         self._session = session
         self._gateway = gateway
         self._policy_version = policy_version
-        self._policy_version_id = policy_version_id
-        self._policy_revision = policy_revision
-        self._policy_config_hash = policy_config_hash
 
     async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
         """服务端补全 → 可信命令 + ``expected_state``;不产生外部副作用。
@@ -259,8 +246,6 @@ class UpdatePriceToolHandler:
             return PreparedToolWrite(
                 command=None,
                 expected_state=None,
-                # 拒绝同样给出确定性指纹:它随只追加的 TOOL_WRITE_REJECTED 审计
-                # 留痕(last_receipt 会被后续结果覆盖,不能当不可变证据)。
                 request_fingerprint=_expected_state_fingerprint(rejection_context),
                 rejection=PreparedWriteRejection(
                     status="FAILED",
@@ -278,12 +263,6 @@ class UpdatePriceToolHandler:
             "expected_version": prepared_command.expected_version,
             "policy_version": self._policy_version,
         }
-        if self._policy_version_id is not None:
-            expected_state["policy_version_id"] = str(self._policy_version_id)
-        if self._policy_revision is not None:
-            expected_state["policy_revision"] = self._policy_revision
-        if self._policy_config_hash is not None:
-            expected_state["policy_config_hash"] = self._policy_config_hash
         return PreparedToolWrite(
             command=prepared_command,
             expected_state=expected_state,
@@ -384,7 +363,6 @@ class UpdatePriceToolHandler:
             payload=payload,
             external_reference=receipt.external_ref,
             error_code=receipt.reason_code,
-            retryable=receipt.retryable,
         )
 
 def _format_price(price: Decimal | None) -> str | None:

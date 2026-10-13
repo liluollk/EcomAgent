@@ -8,7 +8,3 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-# 会话数据与审计产物:按计划协议永不入库。
-.workbuddy/
-docs/审计/
-reports/
