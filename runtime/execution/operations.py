@@ -94,6 +94,14 @@ RECEIPT_STAGE_PREPARATION: Final = "PREPARATION"
 RECEIPT_STAGE_EXECUTION: Final = "EXECUTION"
 """回执来源:外部执行边界。"""
 
+RECEIPT_STAGE_RECONCILIATION: Final = "RECONCILIATION"
+"""回执来源:Reconciliation 回查。
+
+回查刷新 ``last_receipt`` 时写入该标记,使"最新诊断快照"的语义与当前状态
+一致;原 EXECUTION 证据不依赖 ``last_receipt``(它本来就会被覆盖),而由
+``OperationAttempt(kind=EXECUTE)`` 与追加式 AgentEvent/审计事件保留。
+"""
+
 REJECTION_KIND_DETERMINISTIC: Final = "DETERMINISTIC_REJECTION"
 """本地确定性拒绝的受控标记;只有它允许同一 Operation 在目标为空时重新绑定。"""
 

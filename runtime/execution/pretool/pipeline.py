@@ -14,7 +14,8 @@
 - argument_provenance:注入 :class:`ArgumentProvenanceResolver`(确定性规则,
   不接受模型自报来源);
 - input_requirement:注入 :class:`InputRequirementResolver`,把 SchemaDiagnostic
-  转成 InputRequirement,或判为不可补充;
+  转成 InputRequirement,或判为不可补充;该阶段**即使没有诊断也会咨询业务层**,
+  以便业务按规范化参数声明"Schema 可选但执行前提缺失"的字段;
 - authorization_resource:注入 :class:`AuthorizationResourceResolver`,从规范化
   参数提取 ``(resource_type, resource_id)``,不读写授权结果;
 - access_control:注入 :class:`Authorizer`,按 ToolDefinition 动作权限与资源
@@ -156,10 +157,18 @@ class ArgumentProvenanceResolver(Protocol):
 
 
 class InputRequirementResolver(Protocol):
-    """决定缺失字段能否转成用户可回答的 Input Request。"""
+    """决定「需要补充的字段」能否转成用户可回答的 Input Request。
+
+    ``diagnostic`` 为 ``None`` 时仍会被调用:业务层可以基于**规范化参数**直接
+    声明"执行前提缺失但 Schema 可选"的字段(例如多位置店铺未指定
+    ``location_ref``),这类需求没有 Schema 层诊断。返回 ``None`` 表示无需补充。
+    """
 
     async def resolve(
-        self, *, diagnostic: SchemaDiagnostic
+        self,
+        *,
+        diagnostic: SchemaDiagnostic | None,
+        arguments: Mapping[str, Any],
     ) -> InputRequirement | None: ...
 
 
@@ -367,18 +376,21 @@ def _apply_provenance_guard(
 
 def _input_requirement_stage() -> StageHandler:
     async def handler(context: PreToolContext) -> PreToolDecision | None:
-        diagnostic = context.schema_diagnostic
-        if diagnostic is None:
-            return None
         profile = _require_profile(context)
         if profile is None:
             return deny(
                 PIPELINE_INVARIANT, safe_message="pretool profile was not resolved"
             )
+        diagnostic = context.schema_diagnostic
+        # 无诊断也要咨询业务层:业务输入需求(如多位置店铺缺 location_ref)
+        # 不来自 Schema,只能由业务按**规范化参数**判定。
         requirement = await profile.input_requirement_resolver.resolve(
-            diagnostic=diagnostic
+            diagnostic=diagnostic,
+            arguments=context.normalized_arguments or {},
         )
         if requirement is None:
+            if diagnostic is None:
+                return None
             return deny(
                 ARGUMENTS_INCOMPLETE,
                 safe_message="missing business fields cannot be turned into an input request",

@@ -363,3 +363,40 @@ async def test_p1_migration_inventory_levels_enforces_non_negative_quantity(engi
         )
         definition = result.scalar_one()
     assert "available_quantity >= 0" in definition
+
+
+async def test_product_operations_workspace_ownership_constraints(engine) -> None:
+    """0005 把归属关系下沉为数据库约束:组合 FK + 父表 (workspace_id, id) 唯一键。"""
+    composite_fks = {
+        "fk_listings_store",
+        "fk_listings_product",
+        "fk_fulfillment_locations_store",
+        "fk_inventory_levels_location",
+        "fk_inventory_levels_product",
+        "fk_price_locks_listing",
+    }
+    workspace_unique_keys = {
+        "uq_stores_workspace_id",
+        "uq_products_workspace_id",
+        "uq_listings_workspace_id",
+        "uq_fulfillment_locations_workspace_id",
+    }
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            sa.text(
+                "SELECT conname, pg_get_constraintdef(oid) AS definition "
+                "FROM pg_constraint WHERE conname = ANY(:names)"
+            ),
+            {"names": sorted(composite_fks | workspace_unique_keys)},
+        )
+        definitions = {name: definition for name, definition in rows}
+
+    assert composite_fks <= set(definitions)
+    assert workspace_unique_keys <= set(definitions)
+    for name in composite_fks:
+        definition = definitions[name]
+        # 组合外键必须同时约束 workspace_id 与业务父键。
+        assert "FOREIGN KEY (workspace_id," in definition
+        assert "workspace_id, id)" in definition
+    for name in workspace_unique_keys:
+        assert "(workspace_id, id)" in definitions[name]

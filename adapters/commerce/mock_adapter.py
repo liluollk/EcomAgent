@@ -77,8 +77,10 @@ class _OperationRecord:
 class MockCommerceAdapter:
     """确定性 Mock 平台;结构化实现 :class:`PricingGateway` 协议。
 
-    幂等去重表为内存状态:仅在请求到达平台写路径(第 4 步之后)时创建
-    记录,写前超时与持续失败不产生记录——两者都可确定地重试。
+    幂等去重表为内存状态:仅在请求到达平台写路径(第 4 步之后)时创建记录;
+    写前超时(UNKNOWN)与持续失败(FAILED)都不产生记录。但"不产生记录"不等于
+    "值得重试":两者都带固定 ``reason_code``,重排队只会得到同一结论——按
+    Runtime 的确定失败语义,它们的 ToolCall 都落终态,而非自动重试。
     """
 
     def __init__(self, session: AsyncSession) -> None:

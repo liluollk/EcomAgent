@@ -155,12 +155,25 @@ def deny(
 
 
 def require_input(
-    *, input_requirement: InputRequirement, schema_diagnostic: SchemaDiagnostic
+    *,
+    input_requirement: InputRequirement,
+    schema_diagnostic: SchemaDiagnostic | None = None,
 ) -> PreToolDecision:
-    """需要用户补充输入;决策同时携带 InputRequirement 与 SchemaDiagnostic。"""
+    """需要用户补充输入;决策携带 InputRequirement,可选 SchemaDiagnostic。
+
+    ``schema_diagnostic`` 为 ``None`` 表示这是**业务输入需求**:字段在 Input
+    Schema 中可选、却因业务执行前提而缺失(例如多位置店铺未指定
+    ``location_ref``),因此没有 Schema 层诊断。此时 ``detail`` 的
+    ``field_paths`` 取自 :class:`InputRequirement`,与「必须补充的字段」一致。
+    """
+    field_paths = (
+        schema_diagnostic.field_paths
+        if schema_diagnostic is not None
+        else input_requirement.field_paths
+    )
     return PreToolDecision(
         kind="REQUIRE_INPUT",
-        detail={"field_paths": schema_diagnostic.field_paths},
+        detail={"field_paths": field_paths},
         input_requirement=input_requirement,
         schema_diagnostic=schema_diagnostic,
     )

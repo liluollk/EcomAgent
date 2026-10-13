@@ -1288,6 +1288,103 @@ Expected: PASS，提交成功。
 
 ---
 
+### Task 6.1: 收口回查/Pricing/多租户约束缺陷（Task 7 复用前置）
+
+Task 6 门禁全绿（943 passed），但复评发现 1 个 P0、3 个 P1。Inventory（Task 7）
+会复用同一套回查、拒绝码、计数与外键模式，因此先做一个不回滚既有提交的独立收口。
+
+**缺陷与证据（复评原文）：**
+
+- [P0] **回查终态没有生成 ToolResult**：Reconciliation 把 ToolCall 改成
+  SUCCEEDED/FAILED 并重排 Run，却没有持久化与原始 assistant tool call 配对的
+  tool message。下一轮真实模型看到的是一组「有 tool call 无 tool result」的历史，
+  OpenAI/Anthropic 可能直接拒绝，模型也无法在 APPLIED 或预算耗尽后正常收尾。
+- [P1] **所有 Pricing 拒绝都被伪装成 LISTING_NOT_FOUND**：`prepare` 在拿到
+  `None` 时一律返回 `LISTING_NOT_FOUND`，但 `None` 可能来自参数非法、无匹配门店、
+  别名歧义、越权门店、低于价格下限、价格被锁、价格未变更。应返回带规范
+  `error_code`/`context` 的类型化拒绝，而不是统一伪装成资源不存在。
+- [P1] **`reconcile_count` 使用了全局 `attempt_no`**：写入事件用的是
+  `attempt_no`，它跨越 EXECUTE 与 RECONCILE 两类 Attempt。一次真实执行加首次回查
+  会被记成 `reconcile_count=2`，污染审计与恢复指标。
+- [P1] **新表没有数据库级 Workspace 归属约束**：`workspace_id` 与 `store_id` 是两个
+  独立外键，Workspace A 的 location 可以引用 Workspace B 的 store；
+  inventory_levels 的 location/product 同理。应用层过滤无法替代多租户的库级不变量。
+
+**Files:**
+- Modify: `runtime/execution/reconciliation.py`
+- Modify: `runtime/execution/operations.py`
+- Modify: `agents/product_operations/pricing/service.py`
+- Modify: `agents/product_operations/persistence/models.py`
+- Modify: `adapters/commerce/mock_adapter.py`
+- Create: `migrations/versions/0005_product_operations_workspace_fks.py`
+- Modify: `tests/runtime/execution/test_reconciliation.py`
+- Modify: `tests/agents/product_operations/pricing/test_set_listing_price.py`
+- Modify: `tests/agents/product_operations/test_domain_schema.py`
+- Modify: `tests/persistence/test_migrations.py`
+
+- [x] **Step 1: APPLIED / 终态 NOT_APPLIED 原子持久化一次 ToolResult**
+
+`reconciliation.py` 在 ToolCall 进入终态（SUCCEEDED/FAILED）时调用
+`_persist_terminal_tool_result`，以 `call_id` 为幂等键：已存在同 `call_id` 的 TOOL
+消息则跳过，重复恢复不重复写消息。在途（VALIDATING）与 UNKNOWN 分支不写。
+
+- [x] **Step 2: 预算耗尽使用稳定错误码 `WRITE_RETRY_BUDGET_EXCEEDED`**
+
+NOT_APPLIED 且 `executed >= write_retry_budget` 时，`failure_code` 固定为
+`WRITE_RETRY_BUDGET_EXCEEDED`，同时写入 `ToolCall.failure_code` 并作为 tool 结果
+返回模型。
+
+- [x] **Step 3: Reconciliation 更新一致的最新回执（stage=RECONCILIATION）**
+
+`_update_operation_receipt` 写入 `stage=RECEIPT_STAGE_RECONCILIATION` 的
+`last_receipt`；原始 EXECUTION 证据保留在 EXECUTE Attempt 与 append-only
+Events/审计中，不依赖可覆盖的 `last_receipt`。
+
+- [x] **Step 4: 修正 `reconcile_count`**
+
+返回值、AgentEvent、AuditEvent 统一使用按 kind=RECONCILE 计数的
+`reconcile_count`；`attempt_no` 仅作为 OperationAttempt 行序号。
+
+- [x] **Step 5: Pricing `prepare` 保留真实拒绝原因**
+
+`_resolve`/`_resolve_store` 返回类型化 `_Rejection`：参数非法→
+`VALIDATION_FAILED(INVALID_ARGUMENTS)`；缺失→`LISTING_NOT_FOUND`；越权→
+`RESOURCE_SCOPE_DENIED`；策略拒绝映射 `VALIDATION_FAILED + rule_code`
+（`PRICE_BELOW_FLOOR`/`PRICE_UNCHANGED`）或 `VERSION_CONFLICT`；别名歧义→
+`AMBIGUOUS_STORE_REFERENCE`。
+
+- [x] **Step 6: 组合 Workspace 外键迁移 + 跨 Workspace 插入失败测试**
+
+迁移 `0005` 先 `_assert_no_cross_workspace_references()` 失败即停，再为
+stores/products/listings/fulfillment_locations 加 `(workspace_id, id)` 唯一键，
+最后把 6 条子表外键改为组合 `(workspace_id, child_col) → (workspace_id, id)`。
+
+- [x] **Step 7: 修正 `MockCommerceAdapter` 过时注释**
+
+移除「持续失败可确定重试」表述，澄清 FAILED/UNKNOWN 落入终态 ToolCall 而非自动重试。
+
+- [x] **Step 8: 运行全链路并提交**
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m mypy .
+git add runtime/execution/reconciliation.py runtime/execution/operations.py agents/product_operations/pricing/service.py agents/product_operations/persistence/models.py adapters/commerce/mock_adapter.py migrations/versions/0005_product_operations_workspace_fks.py tests/runtime/execution/test_reconciliation.py tests/agents/product_operations/pricing/test_set_listing_price.py tests/agents/product_operations/test_domain_schema.py tests/persistence/test_migrations.py
+git commit -m "fix: close reconciliation, pricing rejection, and tenancy gaps"
+```
+
+Expected: 960 passed（943 + 17 新增），ruff/mypy 全绿，提交成功。
+
+**验收测试：**
+- `UNKNOWN→APPLIED→ADVANCE_RUN` 后存在配对的 tool message。
+- `UNKNOWN→NOT_APPLIED` 预算耗尽后 tool message 携带 `WRITE_RETRY_BUDGET_EXCEEDED`。
+- 重放不产生重复 ToolResult。
+- 首次真实回查 `reconcile_count==1`（即使已有 EXECUTE Attempt）。
+- 越权门店 / 价格规则拒绝不再返回 `LISTING_NOT_FOUND`。
+- 数据库拒绝跨 Workspace 的 location/inventory/listing 插入。
+
+---
+
 ### Task 7: 实现 Inventory 查询、调整和恢复
 
 **Files:**

@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agents.product_operations.domain.models import ListingStatus, StorePlatform
 from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.policy.models import PricePolicyConfig
-from agents.product_operations.pricing.configuration import PublishedPricingPolicy
 from agents.product_operations.pricing.gateway import (
     PriceQuery,
     PriceSnapshot,
@@ -80,15 +79,6 @@ _POLICY_CONFIG = PricePolicyConfig(
     currency="CNY",
     min_allowed_price=Decimal("50.00"),
     max_price_change=Decimal("100.00"),
-)
-
-# Task 10:Handler 消费的是"已发布策略快照",不是裸配置;version_id 与
-# config_hash 由发布路径提供,这里用固定值保持用例确定性。
-_PUBLISHED_POLICY = PublishedPricingPolicy(
-    version_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
-    version=1,
-    config=_POLICY_CONFIG,
-    config_hash="a" * 64,
 )
 
 
@@ -171,7 +161,7 @@ async def env(db_session: AsyncSession) -> AsyncIterator[_Env]:
         actor=actor,
         session=db_session,
         gateway=gateway,
-        pricing_policy=_PUBLISHED_POLICY,
+        policy_config=_POLICY_CONFIG,
     )
     try:
         yield _Env(
@@ -268,7 +258,7 @@ async def test_prepare_rejects_out_of_scope_store(
         actor=restricted,
         session=db_session,
         gateway=_RecordingGateway(),
-        pricing_policy=_PUBLISHED_POLICY,
+        policy_config=_POLICY_CONFIG,
     )
     prepared = await handler.prepare(
         normalized_arguments={
@@ -366,7 +356,7 @@ async def test_execute_prepared_unknown_receipt_has_no_payload(db_session: Async
         actor=_actor(workspace.id, store.id),
         session=db_session,
         gateway=gateway,
-        pricing_policy=_PUBLISHED_POLICY,
+        policy_config=_POLICY_CONFIG,
     )
     try:
         prepared = await handler.prepare(
