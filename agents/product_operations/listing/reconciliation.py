@@ -2,7 +2,8 @@
 
 :class:`ListingReconciler` 只使用 ``Operation.expected_state`` 构造平台回查命令:
 目标发布状态、Listing 标识与外部引用全部来自写前持久化的业务预期,**绝不**从最新
-对话、当前 Agent Prompt 或模型文本恢复(设计 §6)。
+对话、当前 Agent Prompt 或模型文本恢复(设计 §6)。持久化的 ``workspace_id`` 必须
+与当前 Workspace 一致,否则 ``VALIDATION_FAILED``。
 
 ``operation_id`` 是 Runtime 的执行边界分配、写进 Operation 行的权威身份,不在
 ``expected_state`` 中;因此应用层按 Operation 逐条构造本 Reconciler,由其携带该
@@ -27,6 +28,9 @@ from agents.product_operations.shared.errors import (
     VALIDATION_FAILED,
     ProductOperationError,
 )
+from agents.product_operations.shared.reconciliation import (
+    resolve_persisted_workspace_id,
+)
 from runtime.execution.reconciliation import ReconcileResult
 
 
@@ -50,7 +54,9 @@ def build_reconcile_listing_command(
     """从 ``expected_state`` 构造回查命令;缺字段或类型不符即 fail closed。
 
     不做任何"默认回查"猜测:缺少可信业务目标时抛 ``VALIDATION_FAILED``,由应用层
-    记录,而不是拿残缺上下文去查平台。目标状态必须是受控枚举取值,否则同样拒绝。
+    记录,而不是拿残缺上下文去查平台。目标状态必须是受控枚举取值,否则同样拒绝;
+    持久化的 ``workspace_id`` 必须与 ``workspace_id`` 参数一致,否则同样拒绝
+    (不让当前 Workspace 覆盖持久预期)。
     """
     missing = [key for key in _REQUIRED_KEYS if key not in expected_state]
     if missing:
@@ -63,6 +69,9 @@ def build_reconcile_listing_command(
             VALIDATION_FAILED,
             f"operation_type 不是 {OPERATION_TYPE}: {expected_state['operation_type']!r}",
         )
+    persisted_workspace_id = resolve_persisted_workspace_id(
+        expected_state, current_workspace_id=workspace_id
+    )
     try:
         store_id = uuid.UUID(str(expected_state["store_id"]))
         listing_id = uuid.UUID(str(expected_state["listing_id"]))
@@ -73,7 +82,7 @@ def build_reconcile_listing_command(
         ) from error
     return ReconcileListingCommand(
         operation_id=operation_id,
-        workspace_id=workspace_id,
+        workspace_id=persisted_workspace_id,
         store_id=store_id,
         listing_id=listing_id,
         external_store_ref=str(expected_state["external_store_ref"]),
