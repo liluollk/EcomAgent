@@ -98,11 +98,15 @@ class ProvenanceOutcome:
 
     - ``field_sources``:白名单关键字段 → 来源;
     - ``canonical_values``:可信来源下的规范化值(店铺别名 → ``str(store.id)``、
-      金额 → 两位小数 ``Decimal``);不可信字段为 ``None``。
+      金额 → 两位小数 ``Decimal``);不可信字段为 ``None``;
+    - ``store_scope``:本次调用已确定的规范 ``str(store.id)``(来源为
+      ``store_id`` 或 ``store_ref`` 之一),供调用方把**位置引用**限定到目标店铺;
+      两者都不可信时为 ``None``。
     """
 
     field_sources: Mapping[str, ArgumentTrustLevel]
     canonical_values: Mapping[str, Any]
+    store_scope: str | None = None
 
 
 class EvidenceResolver:
@@ -131,6 +135,11 @@ class EvidenceResolver:
         ``store_ref`` 的规范化值不被本引擎改写(Service 只接受名称/别名,
         不接受内部 UUID),``location_ref`` 缺省时不产生来源(由 Service 在
         唯一启用位置时确定性解析)。
+
+        ``location_ref`` 在**已确定的店铺作用域**内判定:``store_id`` /
+        ``store_ref`` 已被证明时,先按该规范 ``store_id`` 过滤候选位置,再比较
+        名称/别名。不同店铺常有同名"默认仓",跨店铺比较会把用户已经明确的
+        "店铺 + 仓库"错误判成歧义(``UNTRUSTED``)。
         """
         del history
         normalized_message = normalize_label(user_message)
@@ -148,7 +157,7 @@ class EvidenceResolver:
         field_sources["store_id"] = store_source
         canonical_values["store_id"] = store_value
 
-        store_ref_source, _ = self._resolve_store(
+        store_ref_source, store_ref_value = self._resolve_store(
             field="store_ref",
             normalized_message=normalized_message,
             arguments=arguments,
@@ -156,6 +165,10 @@ class EvidenceResolver:
             answers=answers,
         )
         field_sources["store_ref"] = store_ref_source
+
+        # 位置证据的店铺作用域:取已证明来源的规范店铺(store_id 优先),
+        # 二者都不可信时为 None(退回全 Workspace 匹配,由证据唯一性决定)。
+        store_scope = store_value if store_value is not None else store_ref_value
 
         sku_source, sku_value = self._resolve_sku(
             normalized_message=normalized_message,
@@ -171,6 +184,7 @@ class EvidenceResolver:
             arguments=arguments,
             locations=locations,
             answers=answers,
+            store_scope=store_scope,
         )
 
         price_source, price_value = self._resolve_target_price(
@@ -180,7 +194,9 @@ class EvidenceResolver:
         canonical_values["target_price"] = price_value
 
         return ProvenanceOutcome(
-            field_sources=field_sources, canonical_values=canonical_values
+            field_sources=field_sources,
+            canonical_values=canonical_values,
+            store_scope=store_scope,
         )
 
     def _resolve_store(
@@ -223,27 +239,34 @@ class EvidenceResolver:
         arguments: Mapping[str, Any],
         locations: Sequence[LocationCandidate],
         answers: Mapping[str, str],
+        store_scope: str | None,
     ) -> ArgumentTrustLevel:
         """``location_ref`` 只接受 USER_EXPLICIT / USER_CONFIRMED。
 
-        缺省(既未提供也未回答)时不参与判定:唯一启用位置由 Service 确定性
-        解析,多位置由 Service 要求补充;此处只负责"模型**自行提供**的位置
-        引用必须有用户证据"。
+        ``store_scope`` 已知时,先在**该店铺内**的候选位置上判定:候选集先按
+        ``store_id`` 过滤,再做名称/别名唯一性比较。缺省(既未提供也未回答)
+        时不参与判定:唯一启用位置由 Service 确定性解析,多位置由 Service
+        要求补充;此处只负责"模型**自行提供**的位置引用必须有用户证据"。
         """
+        scoped = (
+            locations
+            if store_scope is None
+            else tuple(loc for loc in locations if loc.store_id == store_scope)
+        )
         value = _trimmed_str(arguments.get("location_ref"))
         answered_location = _trimmed_str(answers.get("location_ref"))
         if value is not None:
-            if self._explicit_location_evidence(normalized_message, value, locations):
+            if self._explicit_location_evidence(normalized_message, value, scoped):
                 return ArgumentTrustLevel.USER_EXPLICIT
             if (
                 answered_location is not None
                 and value == answered_location
-                and _location_by_value(answered_location, locations) is not None
+                and _location_by_value(answered_location, scoped) is not None
             ):
                 return ArgumentTrustLevel.USER_CONFIRMED
             return ArgumentTrustLevel.UNTRUSTED
         if answered_location is not None and _location_by_value(
-            answered_location, locations
+            answered_location, scoped
         ) is not None:
             return ArgumentTrustLevel.USER_CONFIRMED
         return ArgumentTrustLevel.UNTRUSTED
@@ -321,6 +344,8 @@ class EvidenceResolver:
 
         与店铺证据同规则:消息可以同时点名多个仓,只要当前 ``location_ref``
         唯一指向其中之一即构成用户显式证据;共享别名导致的歧义不做证据。
+        ``locations`` 已由调用方按目标店铺收窄,故"同名仓"只在**同一店铺内**
+        才构成歧义,不会把用户已明确的"店铺 + 仓库"误判成不可信。
         """
         value_matches = [loc for loc in locations if loc.matches_value(value)]
         if len(value_matches) != 1:

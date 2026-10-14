@@ -1606,6 +1606,178 @@ Expected: PASS。全量 1010 passed（993 + 17 新增）/ ruff 通过 / mypy 源
 
 ---
 
+### Task 7.2: 拆分幂等资源身份与业务意图，位置证据按店铺作用域匹配，并接通多仓业务输入需求
+
+Task 7.1 门禁全绿，但复评连续两轮指出未收口点，方向正确、不要求回滚既有提交。
+
+第一轮的两处都不是"写错了"，而是**判定粒度太粗**：一个把"同一个资源"当成了
+"同一个业务动作"，另一个把"整个 Workspace 的位置集合"当成了"目标店铺的位置集合"。
+
+第二轮（本轮）指出：Task 7.2 首版新加的"多位置在 PreToolUse 直接要求补充"**没有
+真正接入 Runtime**，并且位置候选会越过授权边界：
+
+- [P1] `resolve()` 生成的 `InputRequirement` 被 `ProductPreToolNormalizer` 与
+  `ProductPreToolProvenanceResolver` 丢弃；`location_ref` 在 Tool Schema 中可选，
+  Schema 阶段不产生诊断，因此真实管线永远不会返回 `REQUIRE_INPUT`。
+- [P1] 即便修通链路，`AgentLoop` 创建持久化 Input Request 时没有传递
+  `requirement.options`，Workbench 看不到位置/店铺候选项。
+- [P1] `store_scope` 来自 Workspace 全量店铺证据，可能指向 Actor 越权店铺，而
+  `_location_options()` 在 Access Control **之前**返回该店铺的位置名称。
+
+**缺陷与证据（第一轮复评原文）：**
+
+- [P1] **幂等冲突只比较资源，没有比较业务意图**：`mock_adapter.py` 的写路径身份是
+  改价 `workspace_id + listing_id`、库存 `workspace_id + location_id + product_id`。
+  于是同一个 `operation_id`：同一 Listing `99 → 199` 仍回放第一次成功；同一库存
+  `delta=5 → delta=10` 仍回放第一次成功；`currency=CNY → USD` 甚至会在币种校验前
+  回放成功；调整原因变化也不产生冲突。复评用当前代码直接验证：
+  `inventory identity equal for delta 5 vs 10: True`、
+  `price identity equal for target 99 vs 199: True`。
+- [P1] **位置 Provenance 没有按已选店铺缩小候选范围**：`provenance.py` 已解析出
+  `store_ref` 对应的规范店铺 ID，却用 `_` 丢弃；随后 `location_ref` 在整个
+  Workspace 的位置集合中匹配。真实多店场景（淘宝旗舰店 → 默认仓；抖音小店 →
+  默认仓）下，用户明确说"淘宝旗舰店默认仓增加 5 件"，仍得到
+  `store_ref = USER_EXPLICIT` / `location_ref = UNTRUSTED`。
+
+**Files:**
+- Modify: `adapters/commerce/mock_adapter.py`
+- Modify: `adapters/commerce/protocol.py`（`IDEMPOTENCY_KEY_REUSED` 文档语义收口）
+- Modify: `agents/product_operations/input/provenance.py`
+- Modify: `agents/product_operations/input/requirements.py`
+- Modify: `agents/product_operations/input/profiles.py`（把用户消息/回答传给输入需求适配器）
+- Modify: `runtime/execution/pretool/pipeline.py`（业务输入检查契约）
+- Modify: `runtime/execution/pretool/decisions.py`（`require_input` 允许无诊断）
+- Modify: `runtime/execution/pretool/profiles.py`（空实现对齐新签名）
+- Modify: `runtime/orchestration/agent_loop.py`（持久化候选项）
+- Modify: `apps/api/routes/sessions.py`（候选项注释与兜底语义收口）
+- Modify: `tests/adapters/commerce/test_mock_adapter.py`
+- Modify: `tests/agents/product_operations/inventory/test_inventory_recovery.py`
+- Modify: `tests/agents/product_operations/inventory/test_inventory_write_guard.py`
+- Modify: `tests/agents/product_operations/test_argument_provenance.py`
+- Add: `tests/agents/product_operations/test_location_requirement_scope.py`（无数据库用例）
+- Modify: `tests/runtime/execution/test_pretool_pipeline.py`
+- Modify: `tests/runtime/execution/test_argument_trust_levels.py`
+- Modify: `tests/runtime/orchestration/test_agent_loop.py`
+
+- [x] **Step 1: 把"同一个资源"与"同一个业务动作"拆成两个正交概念**
+
+`_OperationRecord` 同时保留两个指纹：
+
+```python
+resource_identity  # 回查路径使用:只证明是不是同一个资源
+operation_intent   # 写路径使用:证明是不是同一个业务动作
+```
+
+- **`resource_identity`（回查）**：价格 `workspace_id + listing_id`，库存
+  `workspace_id + location_id + product_id`。`_reconcile_price` /
+  `_reconcile_inventory` 改为直接比对该元组（库存侧再叠加
+  `applied_quantity == expected_quantity_after`），错资源一律 `NOT_APPLIED`。
+- **`operation_intent`（写路径）**：在资源身份之上并入外部引用与目标值，
+  价格再加 `target_price` / `currency`，库存再加 `delta` /
+  `expected_quantity_after` / `reason`。写路径逐项比对：意图不同 → 确定失败
+  `IDEMPOTENCY_KEY_REUSED`，零逻辑写，绝不回放旧成功。
+
+两个指纹都**排除** `expected_version`：它属于"基于哪一次读取"的乐观锁版本，
+重复提交会重读资源而自然 +1，纳入即会把正常重复提交误判成冲突（safety matrix 的
+`duplicate_submit` 契约）。这与 Task 7.1 首版"整条命令指纹"回退的教训一致——区别
+在于**排除的只有乐观锁版本，目标值/增量/币种/原因必须留下**。
+
+- [x] **Step 2: 位置证据按已解析店铺收窄候选**
+
+`EvidenceResolver.resolve` 不再丢弃 `store_ref` 的规范店铺，而是与 `store_id` 一起
+得出 `store_scope`：
+
+```python
+store_scope = store_value if store_value is not None else store_ref_value
+```
+
+`_resolve_location` 先按 `store_scope` 过滤 `LocationCandidate`，再在**目标店铺内**
+做名称/别名唯一性比较。`ProvenanceOutcome` 新增 `store_scope`，供调用方复用。
+作用域缺失（店铺本身不可信）时退回全 Workspace 匹配，跨店铺同名仓仍按歧义处理。
+
+- [x] **Step 3: 多位置时在 PreToolUse 直接要求补充**
+
+`requirements.py` 新增 `_requires_location_choice`：工具声明了 `location_ref`、
+模型未提供该字段、目标店铺已确定且该店铺存在**多个**启用位置时，直接并入
+`untrusted`，在 PreToolUse 阶段产生要求补充 `location_ref` 的 Input Request，
+不再等进入 Handler 后才确定性失败。`requirement_for` 同时给出目标店铺内的
+位置候选项（值为位置名称，可被 `location_ref` 解析）。
+
+- [x] **Step 4: 扩展 PreToolUse 业务输入检查契约（让 Step 3 真正接入 Runtime）**
+
+首版问题不在规则本身，而在**契约**：`resolve()` 产出的 `requirement` 被
+`ProductPreToolNormalizer` 与 `ProductPreToolProvenanceResolver` 丢弃，而
+`ProductPreToolInputRequirementResolver` 只接收 `SchemaDiagnostic`；`location_ref`
+在 Schema 中可选，Schema 阶段不产生诊断，于是业务需求永远到不了管线。选择完整
+方案而不是回退 P2：
+
+- `InputRequirementResolver` 协议放宽为
+  `resolve(*, diagnostic: SchemaDiagnostic | None, arguments)`；`input_requirement`
+  阶段**即使没有诊断也咨询业务层**（`input_normalization` 的规范化参数一并传入）。
+  这样"Schema 可选、却是执行前提"的字段（多位置店铺缺 `location_ref`）才能变成
+  `REQUIRE_INPUT`。
+- `require_input` 的 `schema_diagnostic` 改为可选：无诊断时 `detail.field_paths`
+  取 `InputRequirement.field_paths`；有诊断时保持原语义（仍取诊断字段）。
+- 适配层两条来源：**诊断驱动**沿用原逻辑；**无诊断**时复用域层同一份判定
+  （`ProductInputRequirementResolver.resolve`），不重复实现规则。只有声明了
+  `location_ref` 的工具会在无诊断时触发域层判定，其余 Tool 提前短路，不增加
+  权威读取。
+
+- [x] **Step 5: 持久化候选项，并让位置候选不越过授权边界**
+
+- `AgentLoop._handle_require_input` 把 `requirement.options` 传给
+  `InputService.create(options=...)`（服务已支持，此前**从未传入**，因此店铺/
+  位置候选在 API 与 Workbench 一律为空）；无候选时保持 `NULL`，保留"服务端未给
+  候选"的语义。`apps/api/routes/sessions.py` 的注释与兜底同步收口。
+- 位置候选与"多位置要求补充"都以**授权店铺**为界：新增
+  `_store_in_actor_scope`，`_requires_location_choice` 与 `requirement_for` 的
+  `location_ref` 分支都先校验 `store_scope` 在 Actor 范围内。越权店铺不生成
+  位置候选、也不向用户追问，交由 Access Control 以资源范围确定性拒绝。
+
+- [x] **Step 6: 回归测试与门禁**
+
+- 无数据库用例（`test_location_requirement_scope.py`，新增）：`_requires_location_choice`
+  的授权闸门与其它条件（已提供 `location_ref` / 单位置 / 没有该字段 / 店铺不可信）；
+  `requirement_for` 不为越权店铺产出位置候选；适配层在无诊断时接通业务需求、
+  不涉位置时短路；`require_input` 无诊断时的 `detail.field_paths` 语义。这组用例
+  在 PostgreSQL 未启动时同样可执行；
+- 管线契约（`test_pretool_pipeline.py`）：无 `SchemaDiagnostic` 的业务需求 →
+  `REQUIRE_INPUT`，且 `detail.field_paths` 取自需求本身；`test_argument_trust_levels.py`
+  的替身对齐新签名；
+- 真实管线（`test_inventory_write_guard.py`）：店铺多个启用位置 + 缺省
+  `location_ref` → 真实管线 `REQUIRE_INPUT`（无诊断）且 Adapter 调用为 0；
+  越权店铺 → 不生成位置候选、`RESOURCE_SCOPE_DENIED`；
+- 域证据（`test_argument_provenance.py`）：两店同名"默认仓" + 店铺已明确 →
+  `location_ref` 为 `USER_EXPLICIT`；店铺证据缺失时仍按歧义处理（对照组）；
+  目标店铺多位置且缺省 `location_ref` → `field_paths == ("location_ref",)`
+  且候选项限定在目标店铺内；越权店铺 → 不产生位置需求、候选项不含 `location_ref`；
+- 候选项持久化（`test_agent_loop.py`）：`REQUIRE_INPUT` 的 `options_json` 落库；
+  无候选时落 `NULL`；
+- Adapter 写路径意图冲突：`test_mock_adapter.py` 改目标价 / 换币种 2 例 +
+  `expected_version` 重读仍回放的对照面；`test_inventory_recovery.py` 改增量 /
+  改原因（参数化）→ `FAILED` + `IDEMPOTENCY_KEY_REUSED`，逻辑写不增，并补
+  `expected_version` 重读仍回放的对照面。
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce -q
+```
+
+Expected: PASS。`ruff check .` 通过 / `mypy runtime agents adapters apps eval` 241 files 通过。
+
+实际结果（2026-10-14，PostgreSQL 由 `docker compose up -d postgres` 提供）：
+
+- 聚焦 `tests/agents/product_operations tests/adapters/commerce`：**286 passed**；
+- 全量 `pytest -q`：**1036 passed**；
+- 无数据库子集（新增纯逻辑用例 + 既有管线单元测试）：34 passed，可在 PostgreSQL
+  未启动时独立运行：
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/runtime/execution tests/agents/product_operations/test_location_requirement_scope.py -q
+```
+
+
+---
+
 ### Task 8: 实现 Listing 发布、取消发布和恢复
 
 **Files:**

@@ -142,7 +142,11 @@ class ProductPreToolProfileFactory:
                 fields=self._fields,
             ),
             input_requirement_resolver=ProductPreToolInputRequirementResolver(
-                resolver, fields=self._fields, actor=context.actor
+                resolver,
+                fields=self._fields,
+                actor=context.actor,
+                user_message=user_message,
+                answered=context.answered,
             ),
             authorization_resource_resolver=self._resource_resolver,
             business_policy=business_policy,
