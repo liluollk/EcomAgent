@@ -3,11 +3,13 @@
 领域入口 :class:`ProductInputRequirementResolver`:
 
 - ``resolve``:按架构文档 §5 判定关键字段(白名单:``store_id``/``sku``/
-  ``target_price``)的 Provenance;任一关键字段缺失、歧义或来源不可信时,
-  返回可由用户回答的 :class:`InputRequirement`;金额格式非法时返回校验
-  诊断而不是 Input Request。证据匹配候选是当前 Workspace 全部 ACTIVE
-  店铺(架构文档 §5 的"Workspace 别名表"):越权店铺的用户显式证据仍会
-  产生 USER_EXPLICIT,由 Access Control 阶段以资源范围拒绝;
+  ``target_price``,以及 P1 写目标的模型可见引用 ``store_ref``/``location_ref``)
+  的 Provenance;任一关键字段缺失、歧义或来源不可信时,返回可由用户回答的
+  :class:`InputRequirement`;金额格式非法时返回校验诊断而不是 Input Request。
+  证据匹配候选是当前 Workspace 全部 ACTIVE 店铺(架构文档 §5 的"Workspace
+  别名表"):越权店铺的用户显式证据仍会产生 USER_EXPLICIT,由 Access Control
+  阶段以资源范围拒绝;``location_ref`` / ``store_ref`` 只在**模型实际提供**时
+  参与判定(缺省的 ``location_ref`` 由 Service 确定性解析或要求补充);
 - ``store_requirement``:生成店铺选择需求,候选项严格限定在 Actor 授权
   店铺内(店铺标识 = ``str(store.id)``,与 Task 2 只读 Tool 约定一致)。
 
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -37,9 +39,14 @@ from agents.product_operations.input.provenance import (
     TRUSTED_TRUST_LEVELS,
     ArgumentTrustLevel,
     EvidenceResolver,
+    LocationCandidate,
     StoreCandidate,
 )
-from agents.product_operations.persistence.models import Product, Store
+from agents.product_operations.persistence.models import (
+    FulfillmentLocation,
+    Product,
+    Store,
+)
 from runtime.access.actor import ActorContext
 from runtime.execution.pretool.decisions import (
     ArgumentProvenance as RuntimeArgumentProvenance,
@@ -49,6 +56,11 @@ from runtime.interfaces.requests import InputRequirement
 
 
 _INVALID_PRICE_MESSAGE = "target_price 不是合法金额(需要至多两位小数的非负数值)"
+
+#: P1 写目标的模型可见引用字段。它们与 ``store_id`` 同属"可被模型猜测的业务
+#: 目标",但只在**实际提供**时才要求来源证明:``location_ref`` 可缺省,由
+#: Service 在唯一启用位置时确定性解析,多位置时要求用户补充。
+_P1_PROVENANCE_FIELDS: Final = ("store_ref", "location_ref")
 
 
 def _question_for(field_paths: Sequence[str]) -> str:
@@ -113,8 +125,10 @@ class ProductInputRequirementResolver:
         """
         normalized = normalize_arguments(dict(arguments), fields=fields)
         stores: tuple[StoreCandidate, ...] = ()
+        locations: tuple[LocationCandidate, ...] = ()
         if actor is not None:
             stores = await self._load_workspace_store_candidates(actor)
+            locations = await self._load_location_candidates(actor)
         sku_value = normalized.get("sku")
         sku_unique: bool | None = None
         if actor is not None and isinstance(sku_value, str) and sku_value:
@@ -124,6 +138,7 @@ class ProductInputRequirementResolver:
             user_message=user_message,
             arguments=normalized,
             stores=stores,
+            locations=locations,
             answered=answered,
             sku_unique_in_workspace=sku_unique,
             history=history,
@@ -137,10 +152,19 @@ class ProductInputRequirementResolver:
         requirement: InputRequirement | None = None
         if not diagnostics:
             key_fields = tuple(field for field in fields if field in KEY_ARGUMENT_FIELDS)
-            untrusted = tuple(
+            # P1 写目标只在模型实际提供时才要求来源证明:location_ref 可缺省,
+            # 由 Service 在唯一启用位置时确定性解析(多位置由 Service 要求补充)。
+            provided_provenance = tuple(
                 field
-                for field in key_fields
-                if outcome.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
+                for field in fields
+                if field in _P1_PROVENANCE_FIELDS and field in normalized
+            )
+            untrusted = tuple(
+                dict.fromkeys(
+                    field
+                    for field in (*key_fields, *provided_provenance)
+                    if outcome.field_sources.get(field) not in TRUSTED_TRUST_LEVELS
+                )
             )
             if untrusted:
                 requirement = await self._build_requirement(untrusted, actor=actor)
@@ -167,6 +191,19 @@ class ProductInputRequirementResolver:
         candidates = await self._load_store_candidates(actor)
         return tuple(
             InputOption(value=candidate.store_id, label=candidate.name)
+            for candidate in candidates
+        )
+
+    async def store_reference_options(self, actor: ActorContext) -> tuple[InputOption, ...]:
+        """``store_ref`` 的候选项(值为店铺**名称**,可被 store_ref 解析)。
+
+        与 :meth:`store_options` 的差异只在取值:P1 Tool 的模型可见字段是
+        ``store_ref``,而 :class:`StoreReferenceResolver` 只接受名称/别名,
+        不接受内部 UUID,因此候选项不能给出 ``str(store.id)``。
+        """
+        candidates = await self._load_store_candidates(actor)
+        return tuple(
+            InputOption(value=candidate.name, label=candidate.name)
             for candidate in candidates
         )
 
@@ -219,6 +256,33 @@ class ProductInputRequirementResolver:
             for store in rows
         )
 
+    async def _load_location_candidates(
+        self, actor: ActorContext
+    ) -> tuple[LocationCandidate, ...]:
+        """证据匹配候选:当前 Workspace 全部 ACTIVE 履约位置(不做授权过滤)。
+
+        位置证据只在提供 ``location_ref`` 时使用;越权位置仍由 Service 的
+        授权解析拒绝,证据匹配与授权判定分工不合并。
+        """
+        stmt = (
+            select(FulfillmentLocation)
+            .where(
+                FulfillmentLocation.workspace_id == actor.workspace_id,
+                FulfillmentLocation.status == StoreStatus.ACTIVE,
+            )
+            .order_by(FulfillmentLocation.name, FulfillmentLocation.id)
+        )
+        rows = (await self._session.scalars(stmt)).all()
+        return tuple(
+            LocationCandidate(
+                location_id=str(location.id),
+                store_id=str(location.store_id),
+                name=location.name,
+                aliases=tuple(location.aliases),
+            )
+            for location in rows
+        )
+
     async def _sku_is_unique(self, actor: ActorContext, sku: str) -> bool:
         """权威读取:SKU 在当前 Workspace 是否恰好唯一(唯一约束保证 ≤ 1)。"""
         ids = (
@@ -240,6 +304,12 @@ class ProductInputRequirementResolver:
             if store_options:
                 options["store_id"] = tuple(
                     option.model_dump() for option in store_options
+                )
+        if "store_ref" in field_paths and actor is not None:
+            ref_options = await self.store_reference_options(actor)
+            if ref_options:
+                options["store_ref"] = tuple(
+                    option.model_dump() for option in ref_options
                 )
         return InputRequirement(
             field_paths=field_paths,
@@ -355,6 +425,12 @@ class ProductPreToolInputRequirementResolver:
             if store_options:
                 options["store_id"] = tuple(
                     option.model_dump() for option in store_options
+                )
+        if "store_ref" in field_paths and self._actor is not None:
+            ref_options = await self._resolver.store_reference_options(self._actor)
+            if ref_options:
+                options["store_ref"] = tuple(
+                    option.model_dump() for option in ref_options
                 )
         return InputRequirement(
             field_paths=field_paths,

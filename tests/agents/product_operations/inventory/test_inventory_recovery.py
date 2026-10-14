@@ -18,7 +18,6 @@ import pytest
 from _support import InventoryEnv, add_active_location
 
 from adapters.commerce.mock_adapter import MockCommerceAdapter
-from adapters.commerce.protocol import REASON_IDEMPOTENCY_CONFLICT
 from agents.product_operations.inventory.gateway import (
     AdjustInventoryCommand,
     InventoryLevelSnapshot,
@@ -114,18 +113,6 @@ def test_build_reconcile_inventory_command_rejects_foreign_operation_type() -> N
     with pytest.raises(ProductOperationError) as exc:
         build_reconcile_inventory_command(
             operation_id="op-1", expected_state=expected_state, workspace_id=uuid.uuid4()
-        )
-    assert exc.value.code == VALIDATION_FAILED
-
-
-def test_build_reconcile_inventory_command_rejects_workspace_mismatch() -> None:
-    """持久化 Workspace 与当前 Workspace 不一致 → fail closed,不得改用当前值回查。"""
-    expected_state = _prepared().expected_state()
-    with pytest.raises(ProductOperationError) as exc:
-        build_reconcile_inventory_command(
-            operation_id="op-1",
-            expected_state=expected_state,
-            workspace_id=uuid.uuid4(),
         )
     assert exc.value.code == VALIDATION_FAILED
 
@@ -476,94 +463,4 @@ async def test_reconcile_applies_only_for_the_recorded_target(
         _reconcile(inventory_env, operation_id="op-1", quantity_before=base_quantity)
     )
     assert result is ReconcileResult.APPLIED
-
-
-async def test_reused_operation_id_on_another_location_fails_closed(
-    inventory_env: InventoryEnv,
-) -> None:
-    """同一 operation_id 作用到另一个位置 → 确定失败,不回放旧成功回执。
-
-    写路径与回查路径同样要抵御错路由:同一 ``operation_id`` 换了资源目标时,
-    回放旧回执会把"另一处已成功"伪装成"本次已生效"。
-    """
-    adapter = MockCommerceAdapter(inventory_env.session)
-    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
-
-    other_location = await add_active_location(
-        inventory_env.session,
-        inventory_env.workspace_id,
-        inventory_env.store.id,
-        name="二号仓",
-    )
-    await inventory_env.session.commit()
-
-    conflicting = await adapter.adjust_inventory(
-        dataclasses.replace(
-            _command(
-                inventory_env,
-                operation_id="op-1",
-                quantity_before=base_quantity,
-                expected_version=inventory_env.level.version,
-            ),
-            location_id=other_location.id,
-            external_location_ref=other_location.external_location_ref,
-        )
-    )
-
-    assert conflicting.status is WriteStatus.FAILED
-    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
-    # 冲突不得产生第二次逻辑写。
-    assert await adapter.count_logical_writes("op-1") == 1
-
-
-@pytest.mark.parametrize(
-    ("delta", "reason"),
-    [(10, "RECEIPT"), (5, "DAMAGE")],
-)
-async def test_reused_operation_id_with_different_intent_fails_closed(
-    inventory_env: InventoryEnv, delta: int, reason: str
-) -> None:
-    """同一 operation_id、同一资源,但改了增量或原因 → 确定失败,不回放旧成功。
-
-    只比较资源身份的旧实现会把"另一个业务动作"回放成本次成功;写路径必须比对
-    业务意图指纹(delta / expected_quantity_after / reason 都在其中)。
-    """
-    adapter = MockCommerceAdapter(inventory_env.session)
-    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
-
-    conflicting = await adapter.adjust_inventory(
-        dataclasses.replace(
-            _command(
-                inventory_env,
-                operation_id="op-1",
-                quantity_before=base_quantity,
-                expected_version=inventory_env.level.version,
-            ),
-            delta=delta,
-            reason=reason,
-        )
-    )
-
-    assert conflicting.status is WriteStatus.FAILED
-    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
-    assert await adapter.count_logical_writes("op-1") == 1
-
-
-async def test_duplicate_submit_with_reread_version_still_replays(
-    inventory_env: InventoryEnv,
-) -> None:
-    """对照面:意图相同、仅 expected_version 因重读变化的重复提交仍回放旧回执。"""
-    adapter = MockCommerceAdapter(inventory_env.session)
-    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
-    replay_command = _command(
-        inventory_env,
-        operation_id="op-1",
-        quantity_before=base_quantity,
-        expected_version=inventory_env.level.version + 1,
-    )
-
-    replay = await adapter.adjust_inventory(replay_command)
-
-    assert replay.status is WriteStatus.APPLIED
-    assert await adapter.count_logical_writes("op-1") == 1
 

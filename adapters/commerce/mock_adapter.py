@@ -14,7 +14,9 @@ P1 起本 Adapter 实现 :class:`PricingGateway`(``get_price`` / ``set_price`` /
 ``set_price`` 执行顺序(确定性,无随机):
 
 1. ``timeout_before_write`` → UNKNOWN(请求未达平台逻辑,零状态变更);
-2. 幂等去重:已见 ``operation_id`` 直接回放上次回执,不再写;
+2. 幂等去重:已见 ``operation_id`` 且业务意图指纹一致 → 回放上次回执;指纹不同
+   (换资源、换目标价/币种/增量/原因)→ FAILED/``IDEMPOTENCY_KEY_REUSED``
+   (确定失败,不回放,零逻辑写);
 3. ``permanent_failure`` → FAILED(确定失败,请求未达写路径,不建记录);
 4. 平台侧命令校验(Listing 存在、币种一致),拒绝 → FAILED 且零逻辑写;
 5. ``expected_version`` CAS 写入;零行命中 → FAILED/VERSION_CONFLICT,
@@ -37,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adapters.commerce.faults import FaultInjector
 from adapters.commerce.protocol import (
     REASON_CURRENCY_MISMATCH,
+    REASON_IDEMPOTENCY_CONFLICT,
     REASON_LISTING_NOT_FOUND,
     REASON_PLATFORM_FAILURE,
     REASON_RESPONSE_LOST_AFTER_COMMIT,
@@ -73,19 +76,40 @@ from runtime.execution.reconciliation import ReconcileResult
 
 @dataclass(frozen=True)
 class _OperationRecord:
-    """operation_id 幂等记录:上次回执与逻辑写事实。
+    """operation_id 幂等记录:上次回执、资源身份、业务意图与逻辑写事实。
 
     价格与库存共享同一张按 ``operation_id`` 去重的表:``listing_id`` 与
-    ``applied_price`` 供改价回放/回查,``location_id`` 与 ``applied_quantity``
-    供库存调整回放/回查;未用到的字段为 ``None``。
+    ``applied_price`` 供改价回放/回查,``location_id``/``product_id`` 与
+    ``applied_quantity`` 供库存调整回放/回查;未用到的字段为 ``None``。
+
+    恢复契约把"同一个资源"与"同一个业务动作"分成两个正交概念,分别服务两条
+    路径——只比较资源会让"同一 ``operation_id`` 改了目标价/增量"被错误回放,
+    只比较业务意图又会让回查无法只凭资源定位记录:
+
+    - ``resource_identity``(**回查路径**使用):本操作**作用的资源**的规范化
+      元组(价格侧 ``workspace_id + listing_id``,库存侧 ``workspace_id +
+      location_id + product_id``)。回查时资源身份或预期值不匹配 → ``NOT_APPLIED``
+      (fail closed),绝不因价格/数量恰好相同而猜想 ``APPLIED``。
+    - ``operation_intent``(**写路径**使用):本操作**业务意图**的规范化指纹,
+      在资源身份之上并入外部引用与目标值(价格侧再加 ``target_price``/
+      ``currency``,库存侧再加 ``delta``/``expected_quantity_after``/``reason``)。
+      写路径逐项比对:意图不同 → 确定失败 ``IDEMPOTENCY_KEY_REUSED``,绝不回放
+      旧回执;意图相同才按平台幂等契约回放。
+
+    两个指纹都**排除** ``expected_version``:它是"基于哪一次读取"的乐观锁版本,
+    同一次重复提交会重读资源而自然 +1,纳入即会把正常重复提交误判成冲突
+    (见 ``test_duplicate_submit_writes_listing_version_only_once``)。
     """
 
     receipt: PriceWriteReceipt | InventoryWriteReceipt
     workspace_id: uuid.UUID
     logical_writes: int
     committed: bool
+    resource_identity: tuple[str, ...] = ()
+    operation_intent: tuple[str, ...] = ()
     listing_id: uuid.UUID | None = None
     location_id: uuid.UUID | None = None
+    product_id: uuid.UUID | None = None
     applied_price: Decimal | None = None
     applied_quantity: int | None = None
 
@@ -102,6 +126,16 @@ class MockCommerceAdapter:
     以 ``version`` CAS 更新数量并保证调整后非负;``reconcile_inventory`` 同时
     校验操作记录与预期调整后数量,权威数量与预期不一致(疑似并发变更)时返回
     ``UNKNOWN``,绝不猜测 ``APPLIED``。
+
+    恢复契约不依赖"上游肯定不会传错":写路径比对**业务意图指纹**
+    (``operation_intent``:资源 + 外部引用 + 目标值),回查路径比对**资源身份**
+    (``resource_identity``:Workspace + 资源):
+
+    - 写路径:同一 ``operation_id`` 被用于**另一个资源或另一个业务动作**时确定失败
+      (``IDEMPOTENCY_KEY_REUSED``),不回放旧回执;意图完全一致才按平台幂等契约
+      回放(不比对 ``expected_version`` 等随首次写入自然变化的字段);
+    - 回查路径:资源身份或预期值不匹配一律 fail closed(``NOT_APPLIED``),绝不因
+      数量/价格恰好相同而猜测 ``APPLIED``。
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -142,8 +176,9 @@ class MockCommerceAdapter:
     async def reconcile_price(self, command: ReconcilePriceCommand) -> ReconcileResult:
         """以权威状态回答;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
 
-        幂等记录不存在或未提交 → 确定未应用;已提交则重读 Listing,权威
-        价格与期望价格及本操作应用价一致才返回 APPLIED。
+        幂等记录不存在或未提交 → 确定未应用;记录与回查命令的资源身份
+        (Workspace/Listing)不一致 → 确定未应用;否则重读 Listing,权威价格
+        与期望价格及本操作应用价一致才返回 APPLIED。
         """
         if self._session.in_transaction():
             return await self._reconcile_price(command)
@@ -171,8 +206,9 @@ class MockCommerceAdapter:
     ) -> ReconcileResult:
         """以权威状态回答库存是否生效;只能返回 APPLIED/NOT_APPLIED/UNKNOWN。
 
-        幂等记录不存在或未提交 → 确定未应用;已提交且本操作应用数量与预期一致,
-        再重读权威库存:数量仍等于预期 → APPLIED,数量已被并发改动 → UNKNOWN
+        幂等记录不存在或未提交 → 确定未应用;记录与回查命令的资源身份
+        (Workspace/位置/商品)或预期调整后数量不一致 → 确定未应用;否则重读
+        权威库存:数量仍等于预期 → APPLIED,数量已被并发改动 → UNKNOWN
         (无法区分是本操作还是并发变更所致,绝不猜测 APPLIED)。
         """
         if self._session.in_transaction():
@@ -220,9 +256,17 @@ class MockCommerceAdapter:
                 reason_code=REASON_TIMEOUT_BEFORE_WRITE,
             )
 
-        # 2. 幂等去重:已见 operation_id 直接回放上次回执,不再写。
+        # 2. 幂等去重:已见 operation_id 时,业务意图指纹一致才回放旧回执;指纹不同
+        #    (换了资源、目标价或币种)一律确定失败,绝不把别处的成功回放成本次成功。
         record = self._operations.get(command.operation_id)
         if record is not None:
+            if record.operation_intent != _price_operation_intent(command):
+                return _receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
+                    reason_code=REASON_IDEMPOTENCY_CONFLICT,
+                )
             return cast("PriceWriteReceipt", record.receipt)
 
         # 3. 平台逻辑不可用:确定失败(非 UNKNOWN);未达写路径,不建记录。
@@ -306,9 +350,13 @@ class MockCommerceAdapter:
         self._operations[command.operation_id] = _OperationRecord(
             receipt=receipt,
             workspace_id=command.workspace_id,
-            listing_id=command.listing_id,
             logical_writes=1,
             committed=True,
+            resource_identity=_price_resource_identity(
+                command.workspace_id, command.listing_id
+            ),
+            operation_intent=_price_operation_intent(command),
+            listing_id=command.listing_id,
             applied_price=command.target_price,
         )
 
@@ -328,6 +376,12 @@ class MockCommerceAdapter:
 
         record = self._operations.get(command.operation_id)
         if record is None or not record.committed:
+            return ReconcileResult.NOT_APPLIED
+        # 回查命令必须与记录指向同一资源;错 Workspace/Listing 一律 fail closed,
+        # 不得因目标价格恰好相同就判定 APPLIED。
+        if record.resource_identity != _price_resource_identity(
+            command.workspace_id, command.listing_id
+        ):
             return ReconcileResult.NOT_APPLIED
 
         listing = await self._repository.get_listing(
@@ -365,9 +419,17 @@ class MockCommerceAdapter:
                 reason_code=REASON_TIMEOUT_BEFORE_WRITE,
             )
 
-        # 2. 幂等去重:已见 operation_id 直接回放上次回执,不再写。
+        # 2. 幂等去重:已见 operation_id 时,业务意图指纹一致才回放旧回执;指纹不同
+        #    (换了资源、增量或原因)一律确定失败,绝不把别处的成功回放成本次成功。
         record = self._operations.get(command.operation_id)
         if record is not None:
+            if record.operation_intent != _inventory_operation_intent(command):
+                return _inventory_receipt(
+                    command.operation_id,
+                    command.idempotency_key,
+                    WriteStatus.FAILED,
+                    reason_code=REASON_IDEMPOTENCY_CONFLICT,
+                )
             return cast("InventoryWriteReceipt", record.receipt)
 
         # 3. 平台逻辑不可用:确定失败(非 UNKNOWN);未达写路径,不建记录。
@@ -440,7 +502,12 @@ class MockCommerceAdapter:
             workspace_id=command.workspace_id,
             logical_writes=1,
             committed=True,
+            resource_identity=_inventory_resource_identity(
+                command.workspace_id, command.location_id, command.product_id
+            ),
+            operation_intent=_inventory_operation_intent(command),
             location_id=command.location_id,
+            product_id=command.product_id,
             applied_quantity=command.expected_quantity_after,
         )
 
@@ -463,8 +530,15 @@ class MockCommerceAdapter:
         record = self._operations.get(command.operation_id)
         if record is None or not record.committed:
             return ReconcileResult.NOT_APPLIED
-        # 记录应证明本操作应用的就是预期的调整后数量;否则它属于其他目标。
-        if record.applied_quantity != command.expected_quantity_after:
+        # 回查命令必须与记录指向**同一资源**且预期数量一致;错 Workspace / 位置 /
+        # 商品时,即使目标数量碰巧相同也必须 fail closed,不得判定 APPLIED。
+        if (
+            record.resource_identity
+            != _inventory_resource_identity(
+                command.workspace_id, command.location_id, command.product_id
+            )
+            or record.applied_quantity != command.expected_quantity_after
+        ):
             return ReconcileResult.NOT_APPLIED
 
         level = await self._repository.get_inventory_level(
@@ -492,7 +566,12 @@ class MockCommerceAdapter:
             workspace_id=command.workspace_id,
             logical_writes=logical_writes,
             committed=committed,
+            resource_identity=_inventory_resource_identity(
+                command.workspace_id, command.location_id, command.product_id
+            ),
+            operation_intent=_inventory_operation_intent(command),
             location_id=command.location_id,
+            product_id=command.product_id,
             applied_quantity=applied_quantity,
         )
         return receipt
@@ -510,12 +589,71 @@ class MockCommerceAdapter:
         self._operations[command.operation_id] = _OperationRecord(
             receipt=receipt,
             workspace_id=command.workspace_id,
-            listing_id=command.listing_id,
             logical_writes=logical_writes,
             committed=committed,
+            resource_identity=_price_resource_identity(
+                command.workspace_id, command.listing_id
+            ),
+            operation_intent=_price_operation_intent(command),
+            listing_id=command.listing_id,
             applied_price=applied_price,
         )
         return receipt
+
+
+def _price_resource_identity(
+    workspace_id: uuid.UUID, listing_id: uuid.UUID
+) -> tuple[str, ...]:
+    """改价操作作用的**资源身份**:Workspace + Listing(回查路径唯一依据)。
+
+    只证明"是不是同一个资源";是否同一业务动作由
+    :func:`_price_operation_intent` 判定。
+    """
+    return (str(workspace_id), str(listing_id))
+
+
+def _inventory_resource_identity(
+    workspace_id: uuid.UUID, location_id: uuid.UUID, product_id: uuid.UUID
+) -> tuple[str, ...]:
+    """库存操作作用的**资源身份**:Workspace + 位置 + 商品(回查路径唯一依据)。"""
+    return (str(workspace_id), str(location_id), str(product_id))
+
+
+def _price_operation_intent(command: SetListingPriceCommand) -> tuple[str, ...]:
+    """改价**业务意图指纹**:资源 + 外部引用 + ``target_price`` + ``currency``。
+
+    写路径据此判定"同一个 ``operation_id`` 是不是同一个业务动作":同一 Listing
+    上改不同的价、或换币种,都是**不同命令**,必须确定失败而不是回放旧成功。
+    刻意排除 ``expected_version``——重复提交会重读资源使版本自然 +1,那属于
+    **同一次**操作,纳入会把正常重复提交误判成冲突。
+    """
+    return (
+        *_price_resource_identity(command.workspace_id, command.listing_id),
+        command.external_store_ref,
+        command.external_product_ref,
+        str(command.target_price),
+        command.currency,
+    )
+
+
+def _inventory_operation_intent(command: AdjustInventoryCommand) -> tuple[str, ...]:
+    """库存**业务意图指纹**:资源 + 外部引用 + ``delta`` + 预期结果 + ``reason``。
+
+    ``expected_quantity_after`` 由写前持久化的 ``quantity_before`` 与 ``delta``
+    确定,重复提交时保持不变;调整原因属业务语义,同样不能排除。排除
+    ``expected_version`` 的理由与改价一致。
+    """
+    return (
+        *_inventory_resource_identity(
+            command.workspace_id, command.location_id, command.product_id
+        ),
+        command.external_store_ref,
+        command.external_location_ref,
+        command.external_product_ref,
+        str(command.delta),
+        str(command.expected_quantity_after),
+        command.reason,
+    )
 
 
 def _receipt(
