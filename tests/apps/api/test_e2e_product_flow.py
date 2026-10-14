@@ -120,8 +120,6 @@ async def _cleanup_seeded_rows(engine: AsyncEngine, seed: dict[str, Any]) -> Non
         "DELETE FROM model_config_versions WHERE workspace_id = :ws",
         "DELETE FROM model_connections WHERE workspace_id = :ws",
         "DELETE FROM workspace_memberships WHERE workspace_id = :ws",
-        "DELETE FROM business_policy_versions WHERE workspace_id = :ws",
-        "DELETE FROM business_policies WHERE workspace_id = :ws",
         "DELETE FROM workspaces WHERE id = :ws",
         "DELETE FROM users WHERE login = 'e2e-operator'",
     )

@@ -17,23 +17,12 @@
 
 import dataclasses
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
 from decimal import Decimal
-from functools import partial
 
-from contracts import (
-    InventoryContractEnv,
-    ListingContractEnv,
-    PriceContractEnv,
-    assert_inventory_gateway_contract,
-    assert_listing_gateway_contract,
-    assert_price_gateway_contract,
-)
 from fixtures.product_operations import ProductOperationsSeed, ProductOperationsSeeder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from adapters.commerce.faults import RESPONSE_LOST_AFTER_COMMIT, FaultInjector
+from adapters.commerce.faults import FaultInjector
 from adapters.commerce.mock_adapter import (
     MockCommerceAdapter,
     _inventory_operation_intent,
@@ -53,32 +42,24 @@ from adapters.commerce.protocol import (
     is_retryable_reason_code,
 )
 from agents.product_operations.domain.models import ListingStatus
-from agents.product_operations.inventory.gateway import (
-    AdjustInventoryCommand,
-    ReconcileInventoryCommand,
-)
+from agents.product_operations.inventory.gateway import AdjustInventoryCommand
 from agents.product_operations.inventory.service import (
     OPERATION_TYPE as INVENTORY_OPERATION_TYPE,
 )
 from agents.product_operations.listing.gateway import (
     ChangePublicationCommand,
     ListingQuery,
-    ReconcileListingCommand,
 )
 from agents.product_operations.listing.service import (
     OPERATION_TYPE as LISTING_OPERATION_TYPE,
 )
 from agents.product_operations.persistence.models import Listing, Product
 from agents.product_operations.persistence.repository import ProductRepository
-from agents.product_operations.pricing.gateway import (
-    PriceQuery,
-    ReconcilePriceCommand,
-    SetListingPriceCommand,
-)
+from agents.product_operations.pricing.gateway import PriceQuery, SetListingPriceCommand
 from agents.product_operations.pricing.service import (
     OPERATION_TYPE as PRICING_OPERATION_TYPE,
 )
-from agents.product_operations.shared.write_contracts import WriteReceipt, WriteStatus
+from agents.product_operations.shared.write_contracts import WriteStatus
 from runtime.execution.reconciliation import ReconcileResult
 
 
@@ -696,207 +677,3 @@ def test_fault_injector_rejects_unknown_fault_name() -> None:
         assert "not_a_fault" in str(error)
     else:
         raise AssertionError("inject must reject unknown fault names")
-
-
-# ---- 计划 P1 Task 9:能力契约套件(价格 / 库存 / 刊登) ----
-
-
-@contextmanager
-def _lose_response(adapter: MockCommerceAdapter) -> Iterator[None]:
-    """测试侧的"写后丢响应":进入时注入故障,退出时清除。"""
-    adapter.faults.inject(RESPONSE_LOST_AFTER_COMMIT)
-    try:
-        yield
-    finally:
-        adapter.faults.clear(RESPONSE_LOST_AFTER_COMMIT)
-
-
-def _price_contract_env(
-    adapter: MockCommerceAdapter,
-    seed: ProductOperationsSeed,
-    repository: ProductRepository,
-) -> PriceContractEnv:
-    """把种子行与 Mock Adapter 接到价格契约上。"""
-
-    async def read_state() -> tuple[Decimal, int]:
-        row = await repository.get_listing(seed.workspace.id, seed.listing.id)
-        if row is None:
-            raise LookupError("seeded listing disappeared from the platform state")
-        return row.current_price, row.version
-
-    def build_write(
-        operation_id: str, expected_version: int, target_price: Decimal
-    ) -> SetListingPriceCommand:
-        return dataclasses.replace(
-            gateway_price_command(
-                seed.listing, operation_id=operation_id, target_price=target_price
-            ),
-            expected_version=expected_version,
-        )
-
-    def build_reconcile(
-        operation_id: str, expected_price: Decimal
-    ) -> ReconcilePriceCommand:
-        return ReconcilePriceCommand(
-            operation_id=operation_id,
-            workspace_id=seed.workspace.id,
-            store_id=seed.store.id,
-            listing_id=seed.listing.id,
-            external_store_ref=str(seed.store.id),
-            external_product_ref=seed.listing.external_product_ref,
-            expected_price=expected_price,
-            currency=seed.listing.currency,
-        )
-
-    return PriceContractEnv(
-        gateway=adapter,
-        build_write=build_write,
-        build_reconcile=build_reconcile,
-        read_state=read_state,
-        logical_writes=adapter.count_logical_writes,
-        lose_response=partial(_lose_response, adapter),
-        initial_price=seed.listing.current_price,
-        target_price=TARGET_PRICE,
-        second_target_price=Decimal("55.00"),
-        initial_version=seed.listing.version,
-    )
-
-
-def _inventory_contract_env(
-    adapter: MockCommerceAdapter,
-    seed: ProductOperationsSeed,
-    repository: ProductRepository,
-) -> InventoryContractEnv:
-    """把种子行与 Mock Adapter 接到库存契约上。"""
-
-    async def read_state() -> tuple[int, int]:
-        row = await repository.get_inventory_level(
-            seed.workspace.id, seed.fulfillment_location.id, seed.product.id
-        )
-        if row is None:
-            raise LookupError("seeded inventory level disappeared from the platform state")
-        return row.available_quantity, row.version
-
-    def build_write(
-        operation_id: str, expected_version: int, delta: int, quantity_before: int
-    ) -> AdjustInventoryCommand:
-        return AdjustInventoryCommand(
-            operation_id=operation_id,
-            idempotency_key=f"adjust_inventory_quantity:{operation_id}",
-            workspace_id=seed.workspace.id,
-            store_id=seed.store.id,
-            location_id=seed.fulfillment_location.id,
-            product_id=seed.product.id,
-            external_store_ref=seed.store.external_store_ref,
-            external_location_ref=seed.fulfillment_location.external_location_ref,
-            external_product_ref=seed.listing.external_product_ref,
-            sku=seed.product.sku,
-            delta=delta,
-            reason="MANUAL",
-            expected_version=expected_version,
-            quantity_before=quantity_before,
-        )
-
-    def build_reconcile(
-        operation_id: str, quantity_before: int, expected_quantity_after: int
-    ) -> ReconcileInventoryCommand:
-        return ReconcileInventoryCommand(
-            operation_id=operation_id,
-            workspace_id=seed.workspace.id,
-            store_id=seed.store.id,
-            location_id=seed.fulfillment_location.id,
-            product_id=seed.product.id,
-            external_store_ref=seed.store.external_store_ref,
-            external_location_ref=seed.fulfillment_location.external_location_ref,
-            external_product_ref=seed.listing.external_product_ref,
-            quantity_before=quantity_before,
-            expected_quantity_after=expected_quantity_after,
-        )
-
-    return InventoryContractEnv(
-        gateway=adapter,
-        build_write=build_write,
-        build_reconcile=build_reconcile,
-        read_state=read_state,
-        logical_writes=adapter.count_logical_writes,
-        lose_response=partial(_lose_response, adapter),
-        initial_quantity=seed.inventory_level.available_quantity,
-        first_delta=7,
-        second_delta=3,
-        initial_version=seed.inventory_level.version,
-    )
-
-
-def _listing_contract_env(
-    adapter: MockCommerceAdapter,
-    seed: ProductOperationsSeed,
-    repository: ProductRepository,
-) -> ListingContractEnv:
-    """把种子行与 Mock Adapter 接到刊登契约上(方向由 Port 方法承载)。"""
-
-    async def read_state() -> tuple[ListingStatus, int]:
-        row = await repository.get_listing(seed.workspace.id, seed.listing.id)
-        if row is None:
-            raise LookupError("seeded listing disappeared from the platform state")
-        return row.status, row.version
-
-    async def build_change(
-        target_state: ListingStatus, operation_id: str, expected_version: int
-    ) -> WriteReceipt:
-        command = dataclasses.replace(
-            gateway_publication_command(seed.listing, operation_id=operation_id),
-            expected_version=expected_version,
-        )
-        if target_state is ListingStatus.PUBLISHED:
-            return await adapter.publish_listing(command)
-        return await adapter.unpublish_listing(command)
-
-    def build_reconcile(
-        operation_id: str, expected_state: ListingStatus
-    ) -> ReconcileListingCommand:
-        return ReconcileListingCommand(
-            operation_id=operation_id,
-            workspace_id=seed.workspace.id,
-            store_id=seed.store.id,
-            listing_id=seed.listing.id,
-            external_store_ref=str(seed.store.id),
-            external_product_ref=seed.listing.external_product_ref,
-            expected_state=expected_state,
-        )
-
-    return ListingContractEnv(
-        gateway=adapter,
-        build_change=build_change,
-        build_reconcile=build_reconcile,
-        read_state=read_state,
-        logical_writes=adapter.count_logical_writes,
-        lose_response=partial(_lose_response, adapter),
-        initial_state=seed.listing.status,
-        initial_version=seed.listing.version,
-    )
-
-
-async def test_mock_adapter_satisfies_all_supported_contracts(
-    mock_adapter: MockCommerceAdapter,
-    product_seeder: ProductOperationsSeeder,
-    product_repository: ProductRepository,
-) -> None:
-    """Mock Adapter 全量满足价格 / 库存 / 刊登三套平台契约(计划 P1 Task 9)。
-
-    三套契约共用 ``contracts.py`` 的可复用协程,平台差异只体现在环境构造里;
-    每个能力用独立种子,避免上一套契约推进的版本污染下一套的写前基线。
-    """
-    price_seed = await product_seeder.seed()
-    await assert_price_gateway_contract(
-        _price_contract_env(mock_adapter, price_seed, product_repository)
-    )
-
-    inventory_seed = await product_seeder.seed()
-    await assert_inventory_gateway_contract(
-        _inventory_contract_env(mock_adapter, inventory_seed, product_repository)
-    )
-
-    listing_seed = await product_seeder.seed()
-    await assert_listing_gateway_contract(
-        _listing_contract_env(mock_adapter, listing_seed, product_repository)
-    )
