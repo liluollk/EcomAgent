@@ -2147,11 +2147,29 @@ git commit -m "test: lock idempotency capability namespaces"
 - Modify: `adapters/commerce/rest_adapter.py`
 - Modify: `adapters/commerce/__init__.py`
 
-- [ ] **Step 1: 提取共享契约测试**
+- [x] **Step 1: 提取共享契约测试**
 
 `contracts.py` 提供三个可复用协程：`assert_price_gateway_contract`、`assert_inventory_gateway_contract`、`assert_listing_gateway_contract`。每个协程接收 Gateway 和对应 Fixture，并顺序执行成功写入、旧版本冲突、同 `operation_id` 重复提交、写后丢响应、按该 `operation_id` 回查五个断言；每一步都断言最终资源状态和逻辑写次数。
 
-- [ ] **Step 2: Mock Adapter 跑三套契约**
+**实际实现**：契约参数化为 `PriceContractEnv` / `InventoryContractEnv` /
+`ListingContractEnv`（frozen dataclass）。它们把"命令怎么构造、权威状态怎么读、
+逻辑写怎么数、响应怎么丢"全部留给测试侧，因此契约本身不 import 任何具体 Adapter。
+三个协程共用同一套五步顺序，每步同时断言**回执**、**平台权威状态**与**逻辑写次数**。
+
+两处与原始描述不同的实现决定（均为让契约本身站得住）：
+
+1. **写前基线改为显式读取**：版本（以及库存的 `quantity_before`）不再由 Fixture 硬编码，
+   而由协程开头的一次 `read_state()` 确定，再据以推导后续版本断言。硬编码版本会让
+   "上一套契约推进了版本"悄悄污染下一套的基线。
+2. **重复提交必须是同一条已冻结命令**：库存的业务意图指纹包含
+   `expected_quantity_after`（由写前 `quantity_before` 推导），所以"重读后再提交"会
+   改变意图、被判 `IDEMPOTENCY_KEY_REUSED`。协程改为重放**同一条**命令，与两阶段
+   协议"重试 `execute_prepared`"的真实链路一致。
+3. 刊登契约的两个方向**交替**使用（初始状态 → 另一侧 → 回到初始状态）：同目标写入是
+   幂等 no-op 且不推进版本，只有真正的状态迁移才能被"版本 +1 / 零逻辑写"观察到。
+   步骤 2 的冲突方向必须回到初始状态，否则会先撞上"同目标 no-op"而不是 CAS。
+
+- [x] **Step 2: Mock Adapter 跑三套契约**
 
 ```python
 async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixture) -> None:
@@ -2160,11 +2178,37 @@ async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixt
     await assert_listing_gateway_contract(mock_adapter, fixture.listing)
 ```
 
-- [ ] **Step 3: REST Adapter 明确能力范围**
+**实际实现**：`test_mock_adapter_satisfies_all_supported_contracts` 用一个 Adapter
+实例依次跑完三套契约，但**每个能力使用独立种子**（`product_seeder.seed()` 各调一次），
+避免上一套契约推进的版本污染下一套的写前基线。
+
+**RED 证据（证明契约有证明力）**：把 `_reconcile_price` 中"记录不存在或未提交"的
+分支临时改成返回 `APPLIED`，契约在第 5 步 `contracts.py:191` 失败
+（`never-seen operation_id` 必须 `NOT_APPLIED`）；恢复实现后通过。
+
+- [x] **Step 3: REST Adapter 明确能力范围**
 
 P1 的 REST Adapter 只声明 `pricing` 能力。库存和 Listing 方法若被误调用，返回结构化 `CAPABILITY_UNSUPPORTED`，不构造猜测性 URL。不要为了契约测试虚构第三方库存或刊登端点。
 
-- [ ] **Step 4: 运行 Adapter 测试并提交**
+**实际实现**：`adapters/commerce/rest_adapter.py` 新增
+`CAPABILITIES = frozenset({"pricing"})` 与 `CapabilityUnsupportedError`
+（`LookupError` 家族，`reason_code` 固定为 `CAPABILITY_UNSUPPORTED`），类上声明
+`supported_capabilities`。两类失败通道按 Port 语义分开：
+
+- **读**抛 `CapabilityUnsupportedError`——与 `InventoryUnavailable` /
+  `ListingUnavailable` 同属 `LookupError`，读失败通道不变；
+- **写**返回 `FAILED` + `CAPABILITY_UNSUPPORTED` 回执（零观测）——写路径的确定失败
+  本就以回执承载，且天然"绝不重试"；
+- **回查**返回 `NOT_APPLIED`（能力不支持的写不可能生效），不发起任何请求。
+
+`TYPE_CHECKING` 块追加三个 Port 的结构一致性断言：声明"能力范围"不等于"接口形状
+可以不合"。`adapters/commerce/__init__.py` 导出 `CAPABILITIES` /
+`CapabilityUnsupportedError` / `RestCommerceAdapter`。
+
+测试 `test_unsupported_capabilities_fail_closed_without_network` 用
+`AssertionError` 型 handler 保证九个方法**一次请求都没发出**。
+
+- [x] **Step 4: 运行 Adapter 测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/adapters/commerce -q
@@ -2173,6 +2217,12 @@ git commit -m "test: add commerce gateway contract suites"
 ```
 
 Expected: PASS，提交成功。
+
+**实际结果**：PASS。`tests/adapters/commerce` → `42 passed in 3.58s`
+（旧 41 + 新增 1）；`ruff check .` 通过；`mypy runtime agents adapters apps eval`
+244 files 通过。`mypy tests/adapters/commerce` 仅剩 **2 条既有的** `no-untyped-def`
+（`test_rest_adapter.py:59` 的 `make_adapter(handler, **kwargs)`、
+`test_pricing_gateway.py:152`），均在本任务的改动区域之外，未纳入。
 
 ---
 
