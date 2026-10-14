@@ -503,3 +503,55 @@ async def test_reused_operation_id_on_another_location_fails_closed(
     # 冲突不得产生第二次逻辑写。
     assert await adapter.count_logical_writes("op-1") == 1
 
+
+@pytest.mark.parametrize(
+    ("delta", "reason"),
+    [(10, "RECEIPT"), (5, "DAMAGE")],
+)
+async def test_reused_operation_id_with_different_intent_fails_closed(
+    inventory_env: InventoryEnv, delta: int, reason: str
+) -> None:
+    """同一 operation_id、同一资源,但改了增量或原因 → 确定失败,不回放旧成功。
+
+    只比较资源身份的旧实现会把"另一个业务动作"回放成本次成功;写路径必须比对
+    业务意图指纹(delta / expected_quantity_after / reason 都在其中)。
+    """
+    adapter = MockCommerceAdapter(inventory_env.session)
+    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
+
+    conflicting = await adapter.adjust_inventory(
+        dataclasses.replace(
+            _command(
+                inventory_env,
+                operation_id="op-1",
+                quantity_before=base_quantity,
+                expected_version=inventory_env.level.version,
+            ),
+            delta=delta,
+            reason=reason,
+        )
+    )
+
+    assert conflicting.status is WriteStatus.FAILED
+    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
+    assert await adapter.count_logical_writes("op-1") == 1
+
+
+async def test_duplicate_submit_with_reread_version_still_replays(
+    inventory_env: InventoryEnv,
+) -> None:
+    """对照面:意图相同、仅 expected_version 因重读变化的重复提交仍回放旧回执。"""
+    adapter = MockCommerceAdapter(inventory_env.session)
+    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
+    replay_command = _command(
+        inventory_env,
+        operation_id="op-1",
+        quantity_before=base_quantity,
+        expected_version=inventory_env.level.version + 1,
+    )
+
+    replay = await adapter.adjust_inventory(replay_command)
+
+    assert replay.status is WriteStatus.APPLIED
+    assert await adapter.count_logical_writes("op-1") == 1
+

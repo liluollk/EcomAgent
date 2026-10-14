@@ -227,6 +227,60 @@ async def test_reused_operation_id_on_another_listing_fails_closed(
     assert await mock_adapter.count_logical_writes("op-1") == 1
 
 
+async def test_reused_operation_id_with_different_target_price_fails_closed(
+    mock_adapter: MockCommerceAdapter, listing: Listing
+) -> None:
+    """同一个 operation_id 在同一 Listing 上改不同的价 → 确定失败,不回放旧成功。
+
+    只比较资源身份的旧实现会把这个"另一个业务动作"回放成本次成功。
+    """
+    first = await mock_adapter.execute(update_command(listing, operation_id="op-1"))
+    assert first.status == ExecutionStatus.APPLIED
+
+    conflicting = await mock_adapter.execute(
+        update_command(listing, operation_id="op-1", target_price=Decimal("199.00"))
+    )
+
+    assert conflicting.status == ExecutionStatus.FAILED
+    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
+    assert await mock_adapter.count_logical_writes("op-1") == 1
+
+
+async def test_reused_operation_id_with_different_currency_fails_closed(
+    mock_adapter: MockCommerceAdapter, listing: Listing
+) -> None:
+    """同一个 operation_id 换币种 → 在币种校验之前就确定失败,不回放旧成功。"""
+    first = await mock_adapter.execute(update_command(listing, operation_id="op-1"))
+    assert first.status == ExecutionStatus.APPLIED
+
+    conflicting = await mock_adapter.execute(
+        dataclasses.replace(update_command(listing, operation_id="op-1"), currency="USD")
+    )
+
+    assert conflicting.status == ExecutionStatus.FAILED
+    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
+    assert await mock_adapter.count_logical_writes("op-1") == 1
+
+
+async def test_duplicate_submit_with_reread_version_still_replays(
+    mock_adapter: MockCommerceAdapter, listing: Listing
+) -> None:
+    """对照面:意图相同的重复提交(仅 expected_version 因重读 +1)仍回放旧回执。
+
+    ``expected_version`` 属于"基于哪次读取"的乐观锁版本,不属于业务意图;
+    纳入指纹会把正常重复提交误判成冲突。
+    """
+    first = await mock_adapter.execute(update_command(listing, operation_id="op-1"))
+    assert first.status == ExecutionStatus.APPLIED
+
+    replay = await mock_adapter.execute(
+        update_command(listing, operation_id="op-1", expected_version=listing.version + 1)
+    )
+
+    assert replay == first
+    assert await mock_adapter.count_logical_writes("op-1") == 1
+
+
 
 async def test_cas_version_conflict_rejects_write_without_logical_write(
     mock_adapter: MockCommerceAdapter,
