@@ -26,6 +26,7 @@ from adapters.commerce.faults import FaultInjector
 from adapters.commerce.mock_adapter import MockCommerceAdapter
 from adapters.commerce.protocol import (
     REASON_CURRENCY_MISMATCH,
+    REASON_IDEMPOTENCY_CONFLICT,
     REASON_LISTING_NOT_FOUND,
     REASON_PLATFORM_FAILURE,
     REASON_VERSION_CONFLICT,
@@ -89,6 +90,39 @@ def reconciliation_command(
     )
 
 
+async def add_twin_listing(
+    db_session: AsyncSession,
+    seed: ProductOperationsSeed,
+    *,
+    current_price: Decimal = TARGET_PRICE,
+) -> Listing:
+    """同 Workspace/店铺下再建一个 Listing(独立商品),用于"错目标"反例。
+
+    价格默认等于目标价,构成"只看价格/数量就会被骗过"的陷阱。
+    """
+    twin_product = Product(
+        id=uuid.uuid4(),
+        workspace_id=seed.workspace.id,
+        sku=f"SKU-{uuid.uuid4()}",
+        title="twin-product",
+    )
+    db_session.add(twin_product)
+    await db_session.flush()
+    twin_listing = Listing(
+        id=uuid.uuid4(),
+        workspace_id=seed.workspace.id,
+        store_id=seed.store.id,
+        product_id=twin_product.id,
+        external_product_ref=f"item-{uuid.uuid4()}",
+        currency="CNY",
+        current_price=current_price,
+        cost_price=Decimal("88.00"),
+    )
+    db_session.add(twin_listing)
+    await db_session.flush()
+    return twin_listing
+
+
 async def test_response_loss_does_not_duplicate_price_write(
     mock_adapter: MockCommerceAdapter, listing: Listing
 ) -> None:
@@ -143,27 +177,7 @@ async def test_reconcile_rejects_other_listing_with_same_price(
     assert first.status == ExecutionStatus.APPLIED
     assert first.after_price == TARGET_PRICE
 
-    # 同一 Workspace/店铺下的另一 Listing,价格恰等于目标价(陷阱)。
-    twin_product = Product(
-        id=uuid.uuid4(),
-        workspace_id=product_seed.workspace.id,
-        sku=f"SKU-{uuid.uuid4()}",
-        title="twin-product",
-    )
-    db_session.add(twin_product)
-    await db_session.flush()
-    twin_listing = Listing(
-        id=uuid.uuid4(),
-        workspace_id=product_seed.workspace.id,
-        store_id=product_seed.store.id,
-        product_id=twin_product.id,
-        external_product_ref=f"item-{uuid.uuid4()}",
-        currency="CNY",
-        current_price=TARGET_PRICE,
-        cost_price=Decimal("88.00"),
-    )
-    db_session.add(twin_listing)
-    await db_session.flush()
+    twin_listing = await add_twin_listing(db_session, product_seed)
 
     # 自证陷阱有效:另一个 Listing 的价格确实等于目标价,只看价格的旧实现会被骗过。
     twin = await product_repository.get_listing(
@@ -182,6 +196,36 @@ async def test_reconcile_rejects_other_listing_with_same_price(
         currency="CNY",
     )
     assert await mock_adapter.reconcile(misrouted) is ReconcileResult.NOT_APPLIED
+
+
+async def test_reused_operation_id_on_another_listing_fails_closed(
+    mock_adapter: MockCommerceAdapter,
+    product_seed: ProductOperationsSeed,
+    db_session: AsyncSession,
+) -> None:
+    """同一 operation_id 作用到另一个 Listing → 确定失败,不回放旧成功回执。
+
+    写路径必须抵御错路由:同一个 ``operation_id`` 换了目标资源时,回放旧回执
+    会把"另一处已成功"伪装成"本次已生效"。
+    """
+    first = await mock_adapter.execute(
+        update_command(product_seed.listing, operation_id="op-1")
+    )
+    assert first.status == ExecutionStatus.APPLIED
+
+    twin_listing = await add_twin_listing(
+        db_session, product_seed, current_price=Decimal("77.00")
+    )
+    conflicting = await mock_adapter.execute(
+        update_command(twin_listing, operation_id="op-1")
+    )
+
+    assert conflicting.status == ExecutionStatus.FAILED
+    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
+    assert not is_retryable_reason_code(conflicting.reason_code)
+    # 冲突不得产生第二次逻辑写,也不得改动另一个 Listing。
+    assert await mock_adapter.count_logical_writes("op-1") == 1
+
 
 
 async def test_cas_version_conflict_rejects_write_without_logical_write(

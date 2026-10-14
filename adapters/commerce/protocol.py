@@ -42,22 +42,19 @@ REASON_RESPONSE_LOST_AFTER_COMMIT: Final = "RESPONSE_LOST_AFTER_COMMIT"
 """回执 ``reason_code``:不参与状态迁移,供 Runtime 记录与诊断。"""
 
 REASON_IDEMPOTENCY_CONFLICT: Final = "IDEMPOTENCY_KEY_REUSED"
-"""同一 ``operation_id`` 被用于**不同业务动作**时的确定失败码(平台侧 fail closed)。
+"""同一 ``operation_id`` 被用于**不同资源目标**时的确定失败码(平台侧 fail closed)。
 
-幂等去重表按 ``operation_id`` 记录"这条命令是哪个业务动作"。正常链路里一个
+幂等去重表按 ``operation_id`` 记录"这条命令作用在哪个资源上"。正常链路里一个
 ``operation_id`` 只对应一个逻辑操作,因此重复提交应当回放旧回执(见
 :data:`RETRYABLE_REASON_CODES` 关于"重复提交只回放旧结论"的说明)。但装配错误、
-错路由或脏数据可能让同一个 ``operation_id`` 指向**另一个资源或另一组目标值**:
-此时回放旧回执会把别处操作的成功伪装成本次操作的成功,调用方还会据此认为
-"我这次的目标已生效"。
+错路由或脏数据可能让同一个 ``operation_id`` 指向**另一个**资源:此时回放旧回执
+会把别处操作的成功伪装成本次操作的成功,调用方还会据此认为"我这次的目标已生效"。
 
-因此平台必须确定失败,而不是回放旧结论。判定比对**业务意图指纹**
-(价格侧 ``workspace_id + listing_id + 外部引用 + target_price + currency``,
-库存侧 ``workspace_id + location_id + product_id + 外部引用 + delta +
-expected_quantity_after + reason``),但**排除** ``expected_version`` 等会随首次
-写入自然变化的乐观锁字段——否则同一次重复提交(重读版本后 ``expected_version``
-已 +1)会被误判成冲突。该码不允许重试:正确做法是修正上游路由后以新的
-``operation_id`` 重新发起。
+因此平台必须确定失败,而不是回放旧结论。判定只比对**资源身份**
+(价格侧 ``workspace_id + listing_id``,库存侧 ``workspace_id + location_id +
+product_id``),不比对 ``expected_version`` 等会随首次写入自然变化的载荷字段——
+否则同一次重复提交(重读版本后 ``expected_version`` 已 +1)会被误判成冲突。
+该码不允许重试:正确做法是修正上游路由后以新的 ``operation_id`` 重新发起。
 """
 
 RETRYABLE_REASON_CODES: Final[frozenset[str]] = frozenset()

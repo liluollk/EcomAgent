@@ -18,6 +18,7 @@ import pytest
 from _support import InventoryEnv, add_active_location
 
 from adapters.commerce.mock_adapter import MockCommerceAdapter
+from adapters.commerce.protocol import REASON_IDEMPOTENCY_CONFLICT
 from agents.product_operations.inventory.gateway import (
     AdjustInventoryCommand,
     InventoryLevelSnapshot,
@@ -463,4 +464,42 @@ async def test_reconcile_applies_only_for_the_recorded_target(
         _reconcile(inventory_env, operation_id="op-1", quantity_before=base_quantity)
     )
     assert result is ReconcileResult.APPLIED
+
+
+async def test_reused_operation_id_on_another_location_fails_closed(
+    inventory_env: InventoryEnv,
+) -> None:
+    """同一 operation_id 作用到另一个位置 → 确定失败,不回放旧成功回执。
+
+    写路径与回查路径同样要抵御错路由:同一 ``operation_id`` 换了资源目标时,
+    回放旧回执会把"另一处已成功"伪装成"本次已生效"。
+    """
+    adapter = MockCommerceAdapter(inventory_env.session)
+    base_quantity = await _apply_delta(adapter, inventory_env, operation_id="op-1")
+
+    other_location = await add_active_location(
+        inventory_env.session,
+        inventory_env.workspace_id,
+        inventory_env.store.id,
+        name="二号仓",
+    )
+    await inventory_env.session.commit()
+
+    conflicting = await adapter.adjust_inventory(
+        dataclasses.replace(
+            _command(
+                inventory_env,
+                operation_id="op-1",
+                quantity_before=base_quantity,
+                expected_version=inventory_env.level.version,
+            ),
+            location_id=other_location.id,
+            external_location_ref=other_location.external_location_ref,
+        )
+    )
+
+    assert conflicting.status is WriteStatus.FAILED
+    assert conflicting.reason_code == REASON_IDEMPOTENCY_CONFLICT
+    # 冲突不得产生第二次逻辑写。
+    assert await adapter.count_logical_writes("op-1") == 1
 
