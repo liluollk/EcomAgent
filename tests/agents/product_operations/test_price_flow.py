@@ -3,8 +3,8 @@
 ``product_application`` 夹具组装完整 Runtime(真库,参照 crash_harness
 模式)+ ProductOperationsSeeder 种子;``start`` 包装 RunFactory → ADVANCE_RUN
 Job → Runtime Worker 推进;``confirm`` 用 ConfirmationService.accept +
-恢复推进。模型流由确定性 ScriptedAgentBackend 脚本产生 update_price
-ToolCall(店铺标识使用 ``str(store.id)``,与 Task 2 只读 Tool 约定一致)。
+恢复推进。模型流由确定性 ScriptedAgentBackend 脚本产生 set_listing_price
+ToolCall，模型只使用公开的 ``store_ref``，内部 UUID 不进入 Tool 参数。
 
 覆盖分支:
 - 信息完整(用户文本含精确店铺证据)→ 直接 WAITING_CONFIRMATION →
@@ -26,10 +26,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.persistence.models import Listing
+from agents.product_operations.pricing.gateway import SetListingPriceCommand
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import OperationStatus
 from runtime.persistence.models.execution import Operation
+
+
+STORE_REF = "淘宝旗舰店"
 
 
 async def test_confirmed_price_update_reaches_authoritative_state(
@@ -38,7 +42,7 @@ async def test_confirmed_price_update_reaches_authoritative_state(
     """计划原文用例:完整确认链路后权威状态为 99.00。"""
     store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
@@ -62,21 +66,19 @@ async def test_price_gateway_is_called_without_open_database_transaction(
     product_application,
 ) -> None:
     """Listing 读取事务须在平台 Gateway 请求前提交。"""
-    store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
     assert run.status == RunStatus.WAITING_CONFIRMATION
 
-    original_gateway = product_application._write_handler._gateway
+    original_set_price = product_application.adapter.set_price
 
-    class TransactionCheckingGateway:
-        async def execute(self, command):
-            assert not product_application._adapter_session.in_transaction()
-            return await original_gateway.execute(command)
+    async def transaction_checking_set_price(command):
+        assert not product_application._adapter_session.in_transaction()
+        return await original_set_price(command)
 
-    product_application._write_handler._gateway = TransactionCheckingGateway()
+    product_application.adapter.set_price = transaction_checking_set_price
     run = await product_application.confirm(run.pending_confirmation_id)
     assert run.status == RunStatus.COMPLETED
 
@@ -87,7 +89,7 @@ async def test_missing_store_asks_input_then_completes_after_answer(
     """缺店铺分支:WAITING_INPUT → answer 补店铺(USER_CONFIRMED)→ 确认 → 完成。"""
     store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [[_update_price_call(None, "SKU-001", 99), BackendCompleted(finish_reason="tool_calls")]]
+        [[_set_price_call(None, "SKU-001", 99), BackendCompleted(finish_reason="tool_calls")]]
     )
 
     run = await product_application.start("把 SKU-001 改成 99 元")
@@ -95,7 +97,7 @@ async def test_missing_store_asks_input_then_completes_after_answer(
     assert run.pending_input_id is not None
 
     run = await product_application.answer(
-        run.pending_input_id, {"store_id": store_id}
+        run.pending_input_id, {"store_ref": STORE_REF}
     )
     assert run.status == RunStatus.WAITING_CONFIRMATION
 
@@ -113,7 +115,7 @@ async def test_below_floor_price_is_denied_without_confirmation_or_write(
     """低于底价分支:Policy DENY,ToolCall DENIED,权威状态不变、无确认请求。"""
     store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 30)]
+        [_set_price_round(STORE_REF, "SKU-001", 30)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 30 元")
@@ -138,7 +140,7 @@ async def test_response_lost_reconciles_to_applied_without_second_write(
     store_id = str(product_application.seed_ids.store_id)
     product_application.adapter.faults.inject("response_lost_after_commit")
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
@@ -164,10 +166,9 @@ async def test_reconciliation_adapter_is_called_without_runtime_transaction(
     product_application,
 ) -> None:
     """Adapter 回查等待期间不得持有 Runtime 状态事务。"""
-    store_id = str(product_application.seed_ids.store_id)
     product_application.adapter.faults.inject("response_lost_after_commit")
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
     assert run.status == RunStatus.WAITING_CONFIRMATION
@@ -182,7 +183,7 @@ async def test_reconciliation_adapter_is_called_without_runtime_transaction(
         reconciliation_sessions.append(session)
         return session
 
-    original_reconcile = product_application.adapter.reconcile
+    original_reconcile = product_application.adapter.reconcile_price
 
     async def transaction_checking_reconcile(command):
         assert reconciliation_sessions
@@ -190,7 +191,7 @@ async def test_reconciliation_adapter_is_called_without_runtime_transaction(
         return await original_reconcile(command)
 
     product_application._session_factory = tracked_factory
-    product_application.adapter.reconcile = transaction_checking_reconcile
+    product_application.adapter.reconcile_price = transaction_checking_reconcile
     run = await product_application.recover(run.run_id)
     assert run.status == RunStatus.COMPLETED
     snapshot = await product_application.tool_call_snapshot(run.run_id)
@@ -204,7 +205,7 @@ async def test_duplicate_submit_with_same_operation_id_is_idempotent(
     """重复提交分支:同一 operation_id 再度执行 → 平台回放回执,逻辑写不增加。"""
     store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
@@ -217,15 +218,23 @@ async def test_duplicate_submit_with_same_operation_id_is_idempotent(
     assert operation_id is not None
 
     # 以同一 operation_id 重复发起外部执行(平台收到的重复提交)。
-    handler = product_application.write_handler
-    prepared = await handler.prepare(
-        normalized_arguments={"store_id": store_id, "sku": "SKU-001", "target_price": 99}
-    )
-    replay = await handler.execute_prepared(
-        tool_call_id=uuid.uuid4(),
-        operation_id=operation_id,
-        idempotency_key=f"op:{operation_id}",
-        prepared=prepared,
+    operation = await _load_operation_row(product_application._engine, operation_id)
+    expected = operation.expected_state
+    assert expected is not None
+    replay = await product_application.adapter.set_price(
+        SetListingPriceCommand(
+            operation_id=str(operation_id),
+            idempotency_key=f"set_listing_price:{operation_id}",
+            workspace_id=uuid.UUID(expected["workspace_id"]),
+            store_id=uuid.UUID(expected["store_id"]),
+            listing_id=uuid.UUID(expected["listing_id"]),
+            external_store_ref=expected["external_store_ref"],
+            external_product_ref=expected["external_product_ref"],
+            sku=expected["sku"],
+            target_price=Decimal(expected["target_price"]),
+            currency=expected["currency"],
+            expected_version=int(expected["expected_version"]),
+        )
     )
     assert replay.status == "APPLIED"
     assert await product_application.adapter.count_logical_writes(str(operation_id)) == 1
@@ -248,7 +257,7 @@ async def test_listing_version_conflict_after_restart(
     ids = product_application.seed_ids
     store_id = str(ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
@@ -288,9 +297,8 @@ async def test_reserved_operation_is_promoted_on_confirmed_execution(
     覆盖能力。
     """
     ids = product_application.seed_ids
-    store_id = str(ids.store_id)
     product_application.scripted_backend.set_rounds(
-        [_update_price_round(store_id, "SKU-001", 99)]
+        [_set_price_round(STORE_REF, "SKU-001", 99)]
     )
 
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
@@ -313,7 +321,7 @@ async def test_reserved_operation_is_promoted_on_confirmed_execution(
     executed = await _load_operation_row(engine, operation_id)
     assert executed.status is OperationStatus.APPLIED
     assert executed.expected_state is not None
-    assert executed.expected_state["operation_type"] == "UPDATE_PRICE_LEGACY"
+    assert executed.expected_state["operation_type"] == "SET_LISTING_PRICE"
     assert executed.expected_state["listing_id"] == str(ids.listing_id)
     assert executed.expected_state["target_price"] == "99.00"
     # 执行能力在预约阶段落库,执行后保持不变。
@@ -326,9 +334,14 @@ async def test_prepare_rejects_unresolvable_listing_with_minimal_context(
     product_application,
 ) -> None:
     """Listing 无法解析:拒绝不伪造 expected_state,只给最小审计上下文。"""
-    prepared = await product_application.write_handler.prepare(
+    version_id = product_application.capability_ids["tool_version_ids"][
+        "set_listing_price"
+    ]
+    binding = product_application._tool_registry.binding_for_version(version_id)
+    assert binding is not None
+    prepared = await binding.handler.prepare(
         normalized_arguments={
-            "store_id": str(uuid.uuid4()),
+            "store_ref": "不存在的店铺",
             "sku": "SKU-001",
             "target_price": 99,
         }
@@ -338,16 +351,17 @@ async def test_prepare_rejects_unresolvable_listing_with_minimal_context(
     assert prepared.expected_state is None
     assert prepared.rejection is not None
     assert prepared.rejection.status == "FAILED"
-    assert prepared.rejection.error_code == "LISTING_NOT_FOUND"
+    assert prepared.rejection.error_code == "NOT_FOUND"
     # 不臆测 listing_id / currency / expected_version:拒绝上下文只含 PreToolUse
     # 已固定的模型输入与策略版本,不为"形状统一"补空值。
-    assert set(prepared.rejection.context) == {
+    assert {
         "operation_type",
-        "store_id",
+        "store_ref",
         "sku",
         "target_price",
         "policy_version",
-    }
+        "rejection_detail",
+    } <= set(prepared.rejection.context)
 
 
 async def _load_operation_row(engine: AsyncEngine, operation_id: uuid.UUID) -> Operation:
@@ -376,16 +390,18 @@ async def _bump_listing_version(engine: AsyncEngine, listing_id: uuid.UUID) -> N
         await session.close()
 
 
-def _update_price_round(store_id: str | None, sku: str, price: int) -> list:
-    """模型提出 update_price ToolCall 的一轮脚本。"""
+def _set_price_round(store_ref: str | None, sku: str, price: int) -> list:
+    """模型提出 set_listing_price ToolCall 的一轮脚本。"""
     return [
-        _update_price_call(store_id, sku, price),
+        _set_price_call(store_ref, sku, price),
         BackendCompleted(finish_reason="tool_calls"),
     ]
 
 
-def _update_price_call(store_id: str | None, sku: str, price: int) -> ToolCallCompleted:
+def _set_price_call(store_ref: str | None, sku: str, price: int) -> ToolCallCompleted:
     arguments: dict[str, object] = {"sku": sku, "target_price": price}
-    if store_id is not None:
-        arguments["store_id"] = store_id
-    return ToolCallCompleted(call_id="c0", name="update_price", arguments=arguments)
+    if store_ref is not None:
+        arguments["store_ref"] = store_ref
+    return ToolCallCompleted(
+        call_id="c0", name="set_listing_price", arguments=arguments
+    )

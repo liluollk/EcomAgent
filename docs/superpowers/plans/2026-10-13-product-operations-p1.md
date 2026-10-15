@@ -2514,7 +2514,7 @@ Expected: PASS，提交成功。
 - Create: `tests/composition/test_product_operations_bindings.py`
 - Create: `tests/composition/test_product_operations_recovery.py`
 
-- [ ] **Step 1: 写组合根边界失败测试**
+- [x] **Step 1: 写组合根边界失败测试**
 
 ```python
 def test_composition_has_no_domain_dispatch_or_policy_classes() -> None:
@@ -2524,7 +2524,7 @@ def test_composition_has_no_domain_dispatch_or_policy_classes() -> None:
     assert "ReconciliationCommand(" not in source
 ```
 
-- [ ] **Step 2: 建立声明式 Binding 工厂**
+- [x] **Step 2: 建立声明式 Binding 工厂**
 
 `product_operations_bindings.py` 暴露：
 
@@ -2543,15 +2543,15 @@ def build_product_tool_bindings(deps: ProductOperationsDependencies) -> tuple[Ve
 
 返回前展平并校验 version_id 唯一；不得按 stable key 运行时分支。
 
-- [ ] **Step 3: 建立恢复应用服务**
+- [x] **Step 3: 建立恢复应用服务**
 
 `product_operations_recovery.py` 从 Operation 读取 `expected_state.operation_type`，经 `OperationReconcilerRegistry` 查找 Reconciler，再把结果交给 `Runtime ReconciliationService.apply_result()`。
 
-- [ ] **Step 4: 收缩 `composition/product_operations.py`**
+- [x] **Step 4: 收缩 `composition/product_operations.py`**
 
 最终只保留：读取已发布快照、创建 Adapter/Service/Registry/Runtime、连接依赖、返回 `ProductOperationsApplication`。删除价格命令转换、读 Tool 分发和领域回查判断。
 
-- [ ] **Step 5: 运行组合与架构测试并提交**
+- [x] **Step 5: 运行组合与架构测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/composition tests/architecture/test_dependency_boundaries.py -q
@@ -2560,6 +2560,10 @@ git commit -m "refactor: reduce product operations composition root"
 ```
 
 Expected: PASS，提交成功。
+
+实际验收：商品域、组合层与架构边界测试共 **340 passed**；同时把仍通过新
+Agent 发起旧 Tool 的 Runtime 路径测试迁移到 `store_ref` / `store_refs` 与
+`set_listing_price` / `get_listing`，未把 compatibility Tool 重新暴露给新 Run。
 
 ---
 

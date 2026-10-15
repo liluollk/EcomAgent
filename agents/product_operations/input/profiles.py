@@ -64,6 +64,7 @@ P1_TOOL_ARGUMENT_FIELDS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 BusinessPolicyFactory = Callable[[PreToolProfileContext], Any]
+AuthorizationResourceResolverFactory = Callable[[PreToolProfileContext], Any]
 
 #: 需要"来源守卫"的关键字段:已提供但来源不可信时必须退回 Input Request。
 #: 取值来自架构文档 §5:店铺与 SKU 是可被模型猜测的写目标;金额由确定性
@@ -111,10 +112,12 @@ class ProductPreToolProfileFactory:
         fields: Sequence[str],
         business_policy_factory: BusinessPolicyFactory | None = None,
         resource_resolver: Any | None = None,
+        resource_resolver_factory: AuthorizationResourceResolverFactory | None = None,
     ) -> None:
         self._fields = tuple(fields)
         self._business_policy_factory = business_policy_factory
         self._resource_resolver = resource_resolver or NoAuthorizationResources()
+        self._resource_resolver_factory = resource_resolver_factory
 
     async def create(self, context: PreToolProfileContext) -> PreToolProfile:
         resolver = ProductInputRequirementResolver(context.session)
@@ -125,6 +128,11 @@ class ProductPreToolProfileFactory:
             self._business_policy_factory(context)
             if self._business_policy_factory is not None
             else NoBusinessPolicy()
+        )
+        resource_resolver = (
+            self._resource_resolver_factory(context)
+            if self._resource_resolver_factory is not None
+            else self._resource_resolver
         )
         return PreToolProfile(
             input_normalizer=ProductPreToolNormalizer(
@@ -148,7 +156,7 @@ class ProductPreToolProfileFactory:
                 user_message=user_message,
                 answered=context.answered,
             ),
-            authorization_resource_resolver=self._resource_resolver,
+            authorization_resource_resolver=resource_resolver,
             business_policy=business_policy,
             provenance_guard_fields=tuple(
                 field for field in self._fields if field in PROVENANCE_GUARD_FIELDS
@@ -163,6 +171,7 @@ def product_registration(
     resource_mode: str = "WORKSPACE",
     business_policy_factory: BusinessPolicyFactory | None = None,
     resource_resolver: Any | None = None,
+    resource_resolver_factory: AuthorizationResourceResolverFactory | None = None,
 ) -> PreToolProfileRegistration:
     """构造商品 Tool 的启动期注册描述(供组合根与 ToolBinding 常量复用)。"""
     return PreToolProfileRegistration(
@@ -170,6 +179,7 @@ def product_registration(
             fields=fields,
             business_policy_factory=business_policy_factory,
             resource_resolver=resource_resolver,
+            resource_resolver_factory=resource_resolver_factory,
         ),
         policy_mode=policy_mode,  # type: ignore[arg-type]
         resource_mode=resource_mode,  # type: ignore[arg-type]
@@ -197,6 +207,7 @@ def p1_fields_for(stable_key: str) -> tuple[str, ...]:
 __all__ = [
     "P1_TOOL_ARGUMENT_FIELDS",
     "TOOL_ARGUMENT_FIELDS",
+    "AuthorizationResourceResolverFactory",
     "BusinessPolicyFactory",
     "ProductPreToolProfileFactory",
     "current_user_message",

@@ -139,6 +139,9 @@ class ProductOperationsCapabilities:
     compatibility_tool_version_ids: Mapping[str, tuple[uuid.UUID, ...]] = field(
         default_factory=dict
     )
+    compatibility_agent_ids: Mapping[uuid.UUID, uuid.UUID] = field(
+        default_factory=dict
+    )
 
     def as_ids(self) -> dict[str, Any]:
         """兼容既有字典式访问(测试断言与清理使用)。"""
@@ -161,6 +164,10 @@ class ProductOperationsCapabilities:
             "compatibility_tool_version_ids": {
                 key: list(version_ids)
                 for key, version_ids in self.compatibility_tool_version_ids.items()
+            },
+            "compatibility_agent_ids": {
+                str(version_id): agent_id
+                for version_id, agent_id in self.compatibility_agent_ids.items()
             },
         }
 
@@ -244,7 +251,7 @@ class ProductOperationsProvisioner:
                     name="ProductOperationsAgent",
                     definition=PRODUCT_AGENT_DEFINITION,
                 )
-                _, legacy_agent_version_id = await self._provision_agent(
+                legacy_agent_id, legacy_agent_version_id = await self._provision_agent(
                     session,
                     stable_key=LEGACY_AGENT_KEY,
                     version=LEGACY_AGENT_VERSION,
@@ -284,6 +291,9 @@ class ProductOperationsProvisioner:
                 pricing_policy_version_id=published_policy.version_id,
                 pricing_policy_config_hash=published_policy.config_hash,
                 compatibility_agent_version_ids=(legacy_agent_version_id,),
+                compatibility_agent_ids={
+                    legacy_agent_version_id: legacy_agent_id
+                },
                 compatibility_skill_version_ids=(legacy_skill_version_id,),
                 compatibility_tool_version_ids={
                     key: (version_id,)

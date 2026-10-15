@@ -20,9 +20,7 @@ async def commerce_adapter_for_application() -> AsyncIterator[RestCommerceAdapte
     async def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         body = json.loads(request.content)
-        operation_id = request.headers["Idempotency-Key"].removeprefix(
-            "update_price:"
-        )
+        operation_id = request.headers["Idempotency-Key"].split(":", 1)[1]
         return httpx.Response(
             200,
             json={
@@ -52,15 +50,14 @@ async def commerce_adapter_for_application() -> AsyncIterator[RestCommerceAdapte
 async def test_injected_rest_adapter_runs_after_runtime_confirmation(
     product_application, commerce_adapter_for_application: RestCommerceAdapter
 ) -> None:
-    store_id = str(product_application.seed_ids.store_id)
     product_application.scripted_backend.set_rounds(
         [
             [
                 ToolCallCompleted(
                     call_id="price-call",
-                    name="update_price",
+                    name="set_listing_price",
                     arguments={
-                        "store_id": store_id,
+                        "store_ref": "淘宝旗舰店",
                         "sku": "SKU-001",
                         "target_price": 99,
                     },
@@ -83,7 +80,7 @@ async def test_injected_rest_adapter_runs_after_runtime_confirmation(
     assert request.method == "PATCH"
     assert request.url.path.endswith("/price")
     assert request.headers["Authorization"] == "Bearer test-secret"
-    assert request.headers["Idempotency-Key"].startswith("update_price:")
+    assert request.headers["Idempotency-Key"].startswith("op:")
     assert json.loads(request.content) == {
         "price": "99.00",
         "currency": "CNY",

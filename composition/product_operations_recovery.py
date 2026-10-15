@@ -1,0 +1,186 @@
+"""ProductOperations 的模块化 Operation 回查应用服务。"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable, Mapping
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from agents.product_operations.inventory.gateway import InventoryGateway
+from agents.product_operations.inventory.reconciliation import InventoryReconciler
+from agents.product_operations.inventory.service import OPERATION_TYPE as INVENTORY_OPERATION
+from agents.product_operations.listing.gateway import ListingGateway
+from agents.product_operations.listing.reconciliation import ListingReconciler
+from agents.product_operations.listing.service import OPERATION_TYPE as LISTING_OPERATION
+from agents.product_operations.pricing.gateway import PricingGateway
+from agents.product_operations.pricing.reconciliation import PriceReconciler
+from agents.product_operations.pricing.service import OPERATION_TYPE as PRICING_OPERATION
+from agents.product_operations.shared.reconciliation import OperationReconcilerRegistry
+from runtime.execution.reconciliation import ReconciliationService
+from runtime.jobs.lease_service import LeaseService
+from runtime.orchestration.limits import RunLimits
+from runtime.persistence.base import OperationStatus, RunJobKind, RunStatus
+from runtime.persistence.models.execution import Operation, ToolCall
+from runtime.persistence.repositories.jobs import JobRepository
+from runtime.persistence.repositories.runs import RunRepository
+
+
+def build_reconciler_registry(
+    *,
+    pricing_gateway: PricingGateway,
+    inventory_gateway: InventoryGateway,
+    listing_gateway: ListingGateway,
+    workspace_id: uuid.UUID,
+    operation_id: uuid.UUID,
+) -> OperationReconcilerRegistry:
+    """为单个持久化 Operation 构造三种受控 ``operation_type`` 的分发表。"""
+    registry = OperationReconcilerRegistry()
+    registry.register(
+        PRICING_OPERATION,
+        PriceReconciler(
+            pricing_gateway,
+            workspace_id=workspace_id,
+            operation_id=str(operation_id),
+        ),
+    )
+    registry.register(
+        INVENTORY_OPERATION,
+        InventoryReconciler(
+            inventory_gateway,
+            workspace_id=workspace_id,
+            operation_id=str(operation_id),
+        ),
+    )
+    registry.register(
+        LISTING_OPERATION,
+        ListingReconciler(
+            listing_gateway,
+            workspace_id=workspace_id,
+            operation_id=str(operation_id),
+        ),
+    )
+    return registry
+
+
+class ProductOperationsRecovery:
+    """领取 UNKNOWN Operation，并按持久化 ``operation_type`` 回查后提交结论。"""
+
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], AsyncSession],
+        workspace_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        pricing_gateway: PricingGateway,
+        inventory_gateway: InventoryGateway,
+        listing_gateway: ListingGateway,
+        run_limits: RunLimits,
+        before_external_call: Callable[[], None] | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._workspace_id = workspace_id
+        self._actor_id = actor_id
+        self._pricing_gateway = pricing_gateway
+        self._inventory_gateway = inventory_gateway
+        self._listing_gateway = listing_gateway
+        self._run_limits = run_limits
+        self._before_external_call = before_external_call
+
+    async def reconcile_once(self, run_id: uuid.UUID) -> bool:
+        """完成一次回查；返回是否应调度 ``ADVANCE_RUN``。"""
+        loaded = await self._load_unknown_operation(run_id)
+        if loaded is None:
+            return False
+        (
+            job_id,
+            lease_token,
+            operation_id,
+            expected_state,
+            expected_state_version,
+        ) = loaded
+        operation_type = expected_state.get("operation_type")
+        if not isinstance(operation_type, str):
+            raise TypeError("UNKNOWN operation expected_state has no operation_type")
+        registry = build_reconciler_registry(
+            pricing_gateway=self._pricing_gateway,
+            inventory_gateway=self._inventory_gateway,
+            listing_gateway=self._listing_gateway,
+            workspace_id=self._workspace_id,
+            operation_id=operation_id,
+        )
+        if self._before_external_call is not None:
+            self._before_external_call()
+        verdict = await registry.require(operation_type).reconcile(expected_state)
+
+        session = self._session_factory()
+        try:
+            async with session.begin():
+                outcome = await ReconciliationService(
+                    session,
+                    workspace_id=self._workspace_id,
+                    actor_id=self._actor_id,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    lease_token=lease_token,
+                    expected_state_version=expected_state_version,
+                    reconcile_budget=self._run_limits.reconcile_budget,
+                    write_retry_budget=self._run_limits.write_retry_budget,
+                ).apply_result(verdict)
+                await LeaseService(session).complete(job_id, lease_token)
+                return outcome.next_job_kind is RunJobKind.ADVANCE_RUN
+        finally:
+            await session.close()
+
+    async def _load_unknown_operation(
+        self, run_id: uuid.UUID
+    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, Mapping[str, Any], int] | None:
+        session = self._session_factory()
+        try:
+            async with session.begin():
+                await JobRepository(session).create(
+                    workspace_id=self._workspace_id,
+                    run_id=run_id,
+                    kind=RunJobKind.RECONCILE_OPERATION,
+                )
+                lease = await LeaseService(session).claim("product-reconciler")
+                if lease is None:
+                    return None
+                if lease.run_id != run_id or lease.workspace_id != self._workspace_id:
+                    return None
+                run = await RunRepository(session).get(self._workspace_id, run_id)
+                if run is None or run.status is not RunStatus.WAITING_RECONCILIATION:
+                    return None
+                operations = (
+                    await session.scalars(
+                        select(Operation)
+                        .join(ToolCall, ToolCall.id == Operation.tool_call_id)
+                        .where(
+                            Operation.workspace_id == self._workspace_id,
+                            ToolCall.workspace_id == self._workspace_id,
+                            ToolCall.run_id == run_id,
+                            Operation.status == OperationStatus.UNKNOWN,
+                        )
+                    )
+                ).all()
+                if len(operations) != 1:
+                    return None
+                operation = operations[0]
+                if operation.expected_state is None:
+                    raise ValueError(
+                        f"UNKNOWN operation {operation.operation_id} has no expected_state"
+                    )
+                return (
+                    lease.job_id,
+                    lease.lease_token,
+                    operation.operation_id,
+                    dict(operation.expected_state),
+                    run.state_version,
+                )
+        finally:
+            await session.close()
+
+
+__all__ = ["ProductOperationsRecovery", "build_reconciler_registry"]
