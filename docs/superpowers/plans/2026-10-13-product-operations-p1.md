@@ -2600,7 +2600,7 @@ async def test_eval_manifest_is_frozen_before_cases_run(eval_fixture) -> None:
 再加一条反例：隔离环境实际发布的 Tool/Policy hash 与 manifest 不一致时，必须在模型
 调用前返回 `CAPABILITY_MANIFEST_MISMATCH`；不得静默改用“当前最新版”。
 
-- [ ] **Step 2: 定义 EvalCapabilityManifest**
+- [x] **Step 2: 定义 EvalCapabilityManifest**（实际结果：`eval/capability_manifest.py`，stable key/version/hash 逻辑身份，fingerprint 为 canonical JSON SHA-256）
 
 Eval 每个 case/repetition 都创建独立 Workspace，Workspace 级 Model/Policy Version ID
 天然不同；因此 Manifest 冻结的是**逻辑能力身份**（stable key + version + 内容 hash），
@@ -2633,7 +2633,7 @@ class EvalCapabilityManifest(BaseModel):
 内容 hash，对 Policy 使用 `config_hash`。`dataset_hashes` 固定五个分区；
 `capability_fingerprint` 是除自身外全部字段的 canonical JSON SHA-256。
 
-- [ ] **Step 3: 删除 Eval 中复制的能力版本常量**
+- [x] **Step 3: 删除 Eval 中复制的能力版本常量**（实际结果：`_FIXED_*` 四组常量全部删除，schema fingerprint 只从 Manifest 派生）
 
 删除 `_FIXED_AGENT_VERSION`、`_FIXED_PROMPT_VERSION`、`_FIXED_SKILL_VERSIONS`、
 `_FIXED_TOOL_VERSIONS`。`EvalConfig` 只保留 Provider、采样参数、repetitions 与
@@ -2641,7 +2641,7 @@ scorer version；`eval/schema.py` 的 system/protocol fingerprint 显式接收 M
 不得继续从 `EvalConfig` 读取一份重复的能力版本。Provider 配置仍只负责模型连接和固定
 采样参数；Manifest 由 Provisioner 返回的已发布行与数据集文件派生。
 
-- [ ] **Step 4: 让隔离环境验证 Manifest，而不是重新选择最新版**
+- [x] **Step 4: 让隔离环境验证 Manifest，而不是重新选择最新版**（实际结果：`EvalRunner` 整轮接收单一不可变 Manifest，`IsolatedEnvironment.create()` 按 stable key/version/hash 校验，期间发布新版本不影响进行中的轮次）
 
 `EvalRunner` 在整轮开始前只接收一个不可变 Manifest，并传给每个
 `IsolatedEnvironment.create()`。每个隔离 Workspace 仍独立发布自己的 Model/Policy
@@ -2676,7 +2676,7 @@ Manifest 文件不含 API Key、数据库 URL、内部 Actor/Workspace ID 或临
 
 JSON 和 Markdown 报告必须记录完整 manifest 与协议指纹，确保两次成绩可以追溯到同一能力快照。
 
-- [ ] **Step 8: 运行 Eval 单元测试并提交**
+- [x] **Step 8: 运行 Eval 单元测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/eval -q
@@ -2685,6 +2685,8 @@ git commit -m "refactor: freeze eval capability manifest"
 ```
 
 Expected: PASS，提交成功。
+
+实际结果：tests/eval 144 passed（含 `test_capability_manifest.py` 7 项）；ruff 通过；mypy 253 源文件零错误。
 
 ---
 

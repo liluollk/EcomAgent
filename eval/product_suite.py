@@ -52,6 +52,7 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from adapters.model_backends.openai_backend import OpenAIBackend
+from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import (
     API_KEY_ENV_VAR,
     EvalConfig,
@@ -190,7 +191,11 @@ def _resolve_run_config() -> tuple[EvalConfig, str]:
 # ---------------------------------------------------------------------------
 
 
-def run_protocol_fingerprint(scenarios: Sequence[Scenario], config: EvalConfig) -> str:
+def run_protocol_fingerprint(
+    scenarios: Sequence[Scenario],
+    config: EvalConfig,
+    manifest: EvalCapabilityManifest,
+) -> str:
     """整轮协议指纹:canonical JSON(schema 版本 + 固定配置 + 各例指纹)的 SHA-256。
 
     单例指纹随场景结构而异;整轮可比性由"同集合 + 同配置"的派生指纹承载,
@@ -200,7 +205,7 @@ def run_protocol_fingerprint(scenarios: Sequence[Scenario], config: EvalConfig) 
         "schema_version": SCHEMA_VERSION,
         "config": config.model_dump(mode="json"),
         "scenario_fingerprints": sorted(
-            protocol_fingerprint(scenario, config) for scenario in scenarios
+            protocol_fingerprint(scenario, config, manifest) for scenario in scenarios
         ),
     }
     canonical = json.dumps(
@@ -244,6 +249,7 @@ async def _execute(
     scenarios: list[Scenario],
     config: EvalConfig,
     api_key: str,
+    manifest: EvalCapabilityManifest,
 ) -> tuple[dict[str, Any], bool]:
     """探测 → 固定 repetition 全集运行 → 判分 → 报告;返回 (报告, 是否干净)。"""
     client = openai.AsyncOpenAI(base_url=config.base_url, api_key=api_key)
@@ -256,17 +262,21 @@ async def _execute(
             )
             report = ReportBuilder().build(
                 [],
-                protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+                protocol_fingerprint=run_protocol_fingerprint(
+                    scenarios, config, manifest
+                ),
                 benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
-                system_fingerprint=system_fingerprint(config),
+                system_fingerprint=system_fingerprint(manifest),
                 infrastructure_errors=infrastructure_errors,
                 config=config,
+                capability_manifest=manifest,
             )
             return report, False
 
         runner = EvalRunner(
             engine,
             config=config,
+            manifest=manifest,
             backend_factory=lambda scenario: OpenAIBackend(
                 client,
                 config.model,
@@ -289,11 +299,12 @@ async def _execute(
         ]
         report = ReportBuilder().build(
             [*round_result.results, *scored],
-            protocol_fingerprint=run_protocol_fingerprint(scenarios, config),
+            protocol_fingerprint=run_protocol_fingerprint(scenarios, config, manifest),
             benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
-            system_fingerprint=system_fingerprint(config),
+            system_fingerprint=system_fingerprint(manifest),
             infrastructure_errors=infrastructure_errors,
             config=config,
+            capability_manifest=manifest,
         )
         clean = not (
             round_result.failed
@@ -311,6 +322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=(
             "Run the DeepSeek product agent eval suite and write a JSON report."
         ),
+    )
+    parser.add_argument(
+        "--capability-manifest",
+        type=Path,
+        required=True,
+        help="frozen EvalCapabilityManifest JSON shared by all splits",
     )
     parser.add_argument(
         "--split",
@@ -332,7 +349,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # 1) 数据集完整性(Core/Blind 哈希先行)。
     try:
-        scenarios, manifest = _load_split(args.split, Path(args.dataset_dir))
+        scenarios, dataset_manifest = _load_split(args.split, Path(args.dataset_dir))
+        capability_manifest = EvalCapabilityManifest.model_validate_json(
+            args.capability_manifest.read_text(encoding="utf-8")
+        )
+        dataset_path = Path(args.dataset_dir) / _SPLIT_FILES[args.split]
+        actual_dataset_hash = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+        expected_dataset_hash = capability_manifest.dataset_hashes[args.split]
+        if actual_dataset_hash != expected_dataset_hash:
+            raise ProductSuiteError(
+                "capability manifest dataset hash does not match "
+                f"{args.split}: expected {expected_dataset_hash}, "
+                f"got {actual_dataset_hash}"
+            )
     except (ProductSuiteError, ValueError, TypeError, OSError) as error:
         return _fail(f"dataset validation failed: {error}")
 
@@ -347,7 +376,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     _prepare_database(database_url)
     engine = create_async_engine(database_url)
     try:
-        report, clean = asyncio.run(_execute(engine, scenarios, config, api_key))
+        report, clean = asyncio.run(
+            _execute(engine, scenarios, config, api_key, capability_manifest)
+        )
     finally:
         asyncio.run(engine.dispose())
     report["dataset"] = {
@@ -355,7 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dataset_dir": str(Path(args.dataset_dir)),
         "scenario_count": len(scenarios),
         "frozen_sha256_verified": args.split in {"core", "blind"},
-        "manifest_scorer_version": manifest.scorer_version,
+        "manifest_scorer_version": dataset_manifest.scorer_version,
     }
 
     if args.output is not None:

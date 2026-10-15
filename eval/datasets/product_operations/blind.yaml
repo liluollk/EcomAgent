@@ -29,7 +29,7 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 保持上架状态，把 store-sigma 的 SKU-9111 售价更新成 126.66 元。}]
   expected_final_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '126.66', status: PUBLISHED}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-sigma/SKU-9111}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-sigma/SKU-9111}]
 
 - id: blind-relative-001
   category: relative_change
@@ -39,8 +39,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 查询 store-tau/SKU-9121 当前价，再下调 7.5% 并执行。}]
   expected_final_state: {listings: [{store_id: store-tau, sku: SKU-9121, price: '148.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-tau/SKU-9121}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-tau/SKU-9121}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: blind-relative-002
   category: relative_change
@@ -50,8 +50,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: store-upsilon 的 SKU-9131 按现价增加 18.25 元，结果精确到分。}]
   expected_final_state: {listings: [{store_id: store-upsilon, sku: SKU-9131, price: '100.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-upsilon/SKU-9131}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-upsilon/SKU-9131}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: blind-multistore-001
   category: multi_store_decision
@@ -68,8 +68,8 @@ scenarios:
     - {store_id: store-phi, sku: SKU-9141, price: '112.00'}
     - {store_id: store-chi, sku: SKU-9141, price: '114.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-chi/SKU-9141}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-chi/SKU-9141}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: blind-multistore-002
   category: multi_store_decision
@@ -86,8 +86,8 @@ scenarios:
     - {store_id: store-psi, sku: SKU-9151, price: '195.00'}
     - {store_id: store-omega2, sku: SKU-9151, price: '198.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-psi/SKU-9151}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-psi/SKU-9151}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: blind-composite-001
   category: composite_task
@@ -97,8 +97,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 查一下 store-rho/SKU-9161；如果当前价格超过 100 元，就改成 99 元。}]
   expected_final_state: {listings: [{store_id: store-rho, sku: SKU-9161, price: '99.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-rho/SKU-9161}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-rho/SKU-9161}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: blind-composite-002
   category: composite_task
@@ -115,8 +115,8 @@ scenarios:
     - {store_id: store-sigma, sku: SKU-9171, price: '73.50'}
     - {store_id: store-sigma, sku: SKU-9172, price: '79.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-sigma/SKU-9171}]
-  tool_order_constraints: [{before: search_products, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-sigma/SKU-9171}]
+  tool_order_constraints: [{before: search_products, after: set_listing_price}]
 
 - id: blind-multiturn-001
   category: multi_turn
@@ -135,7 +135,7 @@ scenarios:
     - {store_id: store-tau, sku: SKU-9181, price: '95.00'}
     - {store_id: store-upsilon, sku: SKU-9181, price: '101.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-tau/SKU-9181}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-tau/SKU-9181}]
 
 - id: blind-multiturn-002
   category: multi_turn
@@ -154,4 +154,4 @@ scenarios:
     - {store_id: store-phi, sku: SKU-9191, price: '139.90'}
     - {store_id: store-chi, sku: SKU-9192, price: '156.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-phi/SKU-9191}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-phi/SKU-9191}]

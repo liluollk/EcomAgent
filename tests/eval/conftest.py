@@ -13,10 +13,16 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from apps.worker.e2e import E2EScriptedBackend
+from eval.capability_manifest import (
+    EvalCapabilityManifest,
+    build_eval_capability_manifest,
+    dataset_hashes,
+)
 from eval.config import EvalConfig, fixed_eval_config
+from eval.fixtures import IsolatedEnvironment
 from eval.runner import EvalProviderError, EvalRunner
 from eval.schema import Scenario
 from runtime.backend.protocol import (
@@ -54,13 +60,13 @@ def _price_scenario_dict(scenario_id: str, *, target_price: str) -> dict[str, An
         "messages": [
             {"role": "user", "content": f"把 SKU-001 改成 {target_price} 元"},
         ],
-        "interactions": [{"kind": "input", "values": {"store_id": "store-1"}}],
+        "interactions": [{"kind": "input", "values": {"store_ref": "store-1"}}],
         "expected_final_state": {
             "listings": [{"store_id": "store-1", "sku": "SKU-001", "price": target_price}],
             "max_logical_writes": 1,
         },
         "allowed_side_effects": [
-            {"tool": "update_price", "target": "store-1/SKU-001"},
+            {"tool": "set_listing_price", "target": "store-1/SKU-001"},
         ],
     }
 
@@ -72,22 +78,55 @@ def eval_config() -> EvalConfig:
 
 
 @pytest.fixture()
-def eval_runner(engine: AsyncEngine, eval_config: EvalConfig) -> EvalRunner:
+async def eval_manifest(
+    engine: AsyncEngine, valid_case: Scenario, eval_config: EvalConfig
+) -> EvalCapabilityManifest:
+    """经正式 Provisioner 生成测试轮次使用的逻辑能力快照。"""
+    environment = await IsolatedEnvironment.create(
+        engine,
+        valid_case,
+        backend=E2EScriptedBackend(),
+        execution_mode=ExecutionMode.AUTO_EXECUTE,
+    )
+    try:
+        return await build_eval_capability_manifest(
+            lambda: AsyncSession(engine, expire_on_commit=False),
+            environment.capabilities,
+            dataset_hashes_by_split=dataset_hashes(),
+            scorer_version=eval_config.scorer_version,
+        )
+    finally:
+        await environment.aclose()
+        await environment.cleanup()
+
+
+@pytest.fixture()
+def eval_runner(
+    engine: AsyncEngine,
+    eval_config: EvalConfig,
+    eval_manifest: EvalCapabilityManifest,
+) -> EvalRunner:
     """能力评测 Runner 默认自动执行,注入脚本 Backend 且单次重复。"""
     return EvalRunner(
         engine,
         config=eval_config,
+        manifest=eval_manifest,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=1,
     )
 
 
 @pytest.fixture()
-def confirm_eval_runner(engine: AsyncEngine, eval_config: EvalConfig) -> EvalRunner:
+def confirm_eval_runner(
+    engine: AsyncEngine,
+    eval_config: EvalConfig,
+    eval_manifest: EvalCapabilityManifest,
+) -> EvalRunner:
     """确认交互专用 Runner;用于验证 Runtime 的 CONFIRM_WRITES 语义。"""
     return EvalRunner(
         engine,
         config=eval_config,
+        manifest=eval_manifest,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=1,
         execution_mode=ExecutionMode.CONFIRM_WRITES,

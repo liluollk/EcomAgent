@@ -48,6 +48,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from composition.product_operations import ProductApplication
+from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import EvalConfig
 from eval.fixtures import IsolatedEnvironment
 from eval.results import (
@@ -193,6 +194,7 @@ class EvalRunner:
         engine: AsyncEngine,
         *,
         config: EvalConfig,
+        manifest: EvalCapabilityManifest,
         backend_factory: Callable[[Scenario], AgentBackend],
         repetitions: int | None = None,
         cleanup_environments: bool = True,
@@ -201,6 +203,8 @@ class EvalRunner:
         self._engine = engine
         self.config = config
         """固定运行配置(协议指纹的配置分量;只读暴露)。"""
+        self.manifest = manifest
+        """整轮 Eval 共用的不可变逻辑能力快照。"""
         self._backend_factory = backend_factory
         self._repetitions = config.repetitions if repetitions is None else repetitions
         self._cleanup_environments = cleanup_environments
@@ -237,7 +241,7 @@ class EvalRunner:
         环境创建、推进与捕获中的基础设施失败单独分类;其余意外异常按
         FAILED 处理;两种失败路径均 best-effort 捕获已产生的持久痕迹。
         """
-        fingerprint = protocol_fingerprint(case, self.config)
+        fingerprint = protocol_fingerprint(case, self.config, self.manifest)
         resolved_backend = backend if backend is not None else self._backend_factory(case)
         observing = _ObservingBackend(resolved_backend)
         state = _DriveState(observed=observing, run_ids=[])
@@ -246,6 +250,7 @@ class EvalRunner:
                 self._engine,
                 case,
                 backend=observing,
+                manifest=self.manifest,
                 execution_mode=self._execution_mode,
             )
         except _INFRASTRUCTURE_EXCEPTIONS as error:
@@ -395,6 +400,8 @@ class EvalRunner:
                     view = await application.reject_confirmation(
                         view.pending_confirmation_id
                     )
+            elif view.status is RunStatus.WAITING_RECONCILIATION:
+                view = await application.recover(view.run_id)
             elif view.status is RunStatus.COMPLETED:
                 return view, interaction_index
             elif view.status in _TERMINAL_RUN_STATUSES:
@@ -684,7 +691,7 @@ class EvalRunner:
             repetition=repetition,
             status="SKIPPED",
             included_in_quality_score=False,
-            fingerprint=protocol_fingerprint(case, self.config),
+            fingerprint=protocol_fingerprint(case, self.config, self.manifest),
         )
 
     def _result_of_failure(

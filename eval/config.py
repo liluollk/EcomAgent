@@ -1,6 +1,6 @@
 """固定 Eval 运行配置与 Provider 配置加载(计划 05 Task 1)。
 
-- ``EvalConfig``:一次 Eval 运行的完整固定配置,全部字段参与协议指纹;
+- ``EvalConfig``:只保存 Provider、采样参数、重复次数与 Scorer 版本；
 - ``fixed_eval_config``:全仓库唯一的固定运行配置,Provider 连接字段来自
   随库 ``eval/providers/deepseek.json``,版本字段与商品 Agent 实际发布版本
   对齐(提示词版本见 ``agents.product_operations.agent``);
@@ -25,16 +25,6 @@ API_KEY_ENV_VAR: Final[str] = "EVAL_API_KEY"
 PROVIDERS_DIR: Final[Path] = Path(__file__).resolve().parent / "providers"
 DEEPSEEK_CONFIG_PATH: Final[Path] = PROVIDERS_DIR / "deepseek.json"
 
-_FIXED_AGENT_VERSION: Final[str] = "4"
-_FIXED_PROMPT_VERSION: Final[str] = "product-agent-prompt-v4"
-_FIXED_SKILL_VERSIONS: Final[dict[str, str]] = {"product_maintenance": "4"}
-_FIXED_TOOL_VERSIONS: Final[dict[str, str]] = {
-    "load_skill": "1",
-    "search_products": "2",
-    "get_product_snapshot": "2",
-    "compare_listing_prices": "2",
-    "update_price": "3",
-}
 _FIXED_SCORER_VERSION: Final[str] = "v3"
 
 
@@ -51,10 +41,6 @@ class EvalConfig(BaseModel):
     base_url: str = Field(min_length=1)
     temperature: float = Field(ge=0.0, le=2.0)
     thinking_mode: Literal["disabled"]
-    agent_version: str = Field(min_length=1)
-    prompt_version: str = Field(min_length=1)
-    skill_versions: dict[str, str]
-    tool_versions: dict[str, str]
     repetitions: int = Field(ge=1)
     scorer_version: str = Field(min_length=1)
 
@@ -100,10 +86,6 @@ def _eval_config_from_document(path: Path, document: dict[str, object]) -> EvalC
         base_url=provider.base_url,
         temperature=provider.temperature,
         thinking_mode=provider.thinking_mode,
-        agent_version=_FIXED_AGENT_VERSION,
-        prompt_version=_FIXED_PROMPT_VERSION,
-        skill_versions=dict(_FIXED_SKILL_VERSIONS),
-        tool_versions=dict(_FIXED_TOOL_VERSIONS),
         repetitions=provider.repetitions,
         scorer_version=_FIXED_SCORER_VERSION,
     )

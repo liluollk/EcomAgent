@@ -53,6 +53,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -71,6 +72,7 @@ from adapters.commerce.faults import (
     TEMPORARY_RECONCILE_UNKNOWN,
 )
 from agents.product_operations.persistence.models import Listing
+from agents.product_operations.pricing.gateway import SetListingPriceCommand
 from composition.product_operations import ProductApplication
 from eval.fixtures import IsolatedEnvironment
 from eval.schema import SCHEMA_VERSION, Scenario
@@ -339,7 +341,7 @@ class RecoverySuiteReport(BaseModel):
 
 
 class _PriceWriteBackend:
-    """确定性脚本模型:首个模型轮发 update_price(缺店铺),其后一律收尾。
+    """确定性脚本模型:首个模型轮发 set_listing_price(缺店铺),其后一律收尾。
 
     与 apps/worker/e2e.py 的脚本同形(eval 不 import apps)。"首个模型轮"
     由后端状态计数:恢复推进(确认/回查后的重入)不重新提出 ToolCall,
@@ -367,7 +369,7 @@ class _PriceWriteBackend:
         self._proposed = True
         yield ToolCallCompleted(
             call_id=f"recovery-{uuid.uuid4().hex[:12]}",
-            name="update_price",
+            name="set_listing_price",
             arguments={"sku": self._sku, "target_price": self._target_price},
         )
         yield BackendCompleted(finish_reason="stop")
@@ -456,7 +458,7 @@ def _scenario(case_id: str) -> Scenario:
                 "max_logical_writes": 1,
             },
             "allowed_side_effects": [
-                {"tool": "update_price", "target": "store-1/SKU-001"},
+                {"tool": "set_listing_price", "target": "store-1/SKU-001"},
             ],
         }
     )
@@ -534,16 +536,16 @@ async def _input_values(
         field_paths = list(request.field_paths)
     finally:
         await session.close()
-    store_id: uuid.UUID | None = None
     for field_path in field_paths:
-        if field_path != "store_id":
+        if field_path != "store_ref":
             raise CaseFailure(f"unsupported input field {field_path!r}")
-        store_id = (
-            environment.store_id_for_sku(sku) if sku else environment.single_store_id
-        )
+    store_id = environment.store_id_for_sku(sku) if sku else environment.single_store_id
     if store_id is None:
         raise CaseFailure("no seeded store to answer the pending input request")
-    return {"store_id": str(store_id)}
+    symbol = environment.store_symbol_for_id(str(store_id))
+    if symbol is None:
+        raise CaseFailure("seeded store has no scenario symbol")
+    return {"store_ref": symbol}
 
 
 async def _accept_confirmation(
@@ -1239,22 +1241,30 @@ async def _case_duplicate_submit(engine: AsyncEngine) -> _CaseObservation:
         tool_call = await _single_tool_call(engine, env.workspace_id, pending.run_id)
         if tool_call.operation_id is None:
             raise CaseFailure("the executed write must carry a stable operation_id")
-        arguments = (
-            tool_call.normalized_arguments
-            if tool_call.normalized_arguments is not None
-            else tool_call.raw_arguments
-        )
+        operation = await _single_operation(engine, env.workspace_id, pending.run_id)
+        if operation is None:
+            raise CaseFailure("the executed write must persist an operation")
+        expected = operation.expected_state
+        if expected is None:
+            raise CaseFailure("the executed write must retain expected_state")
         # 重复提交:同 operation_id 经真实执行端点再次到达平台;平台按幂等键
         # 回放上次回执,不产生第二次逻辑写。
-        handler = env.application.write_handler
-        prepared = await handler.prepare(normalized_arguments=dict(arguments or {}))
-        receipt = await handler.execute_prepared(
-            tool_call_id=tool_call.id,
-            operation_id=tool_call.operation_id,
-            idempotency_key=f"update_price:{tool_call.operation_id}",
-            prepared=prepared,
+        receipt = await env.commerce_write_observer.set_price(
+            SetListingPriceCommand(
+                operation_id=str(tool_call.operation_id),
+                idempotency_key=f"op:{tool_call.operation_id}",
+                workspace_id=uuid.UUID(expected["workspace_id"]),
+                store_id=uuid.UUID(expected["store_id"]),
+                listing_id=uuid.UUID(expected["listing_id"]),
+                external_store_ref=expected["external_store_ref"],
+                external_product_ref=expected["external_product_ref"],
+                sku=expected["sku"],
+                target_price=Decimal(expected["target_price"]),
+                currency=expected["currency"],
+                expected_version=int(expected["expected_version"]),
+            )
         )
-        if receipt.status != "APPLIED":
+        if receipt.status.value != "APPLIED":
             raise CaseFailure(
                 f"duplicate submit must replay the applied receipt, got {receipt.status!r}"
             )

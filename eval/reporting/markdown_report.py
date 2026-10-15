@@ -19,6 +19,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"- protocol_fingerprint: `{report.get('protocol_fingerprint') or ''}`",
         f"- benchmark_fingerprint: `{report.get('benchmark_fingerprint') or ''}`",
         f"- system_fingerprint: `{report.get('system_fingerprint') or ''}`",
+        f"- capability_fingerprint: `{_manifest_fingerprint(report.get('capability_manifest'))}`",
     ]
     lines.extend(_config_lines(report.get("config")))
     totals = report.get("totals")
@@ -96,6 +97,13 @@ def _config_lines(config: Any) -> list[str]:
             scorer_version=_cell(config.get("scorer_version")),
         )
     ]
+
+
+def _manifest_fingerprint(manifest: Any) -> str:
+    if not isinstance(manifest, Mapping):
+        return ""
+    value = manifest.get("capability_fingerprint")
+    return value if isinstance(value, str) else ""
 
 
 def _metric_lines(metrics: Mapping[str, Any]) -> list[str]:

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import (
     DEEPSEEK_CONFIG_PATH,
     EvalConfig,
@@ -71,9 +72,9 @@ def valid_scenario() -> Scenario:
     data.update(
         {
             "faults": ["timeout_before_write"],
-            "allowed_side_effects": [{"tool": "update_price", "target": "store-1/sku-1"}],
+            "allowed_side_effects": [{"tool": "set_listing_price", "target": "store-1/sku-1"}],
             "forbidden_side_effects": [
-                {"tool": "update_price", "target": "store-1/sku-2"}
+                {"tool": "set_listing_price", "target": "store-1/sku-2"}
             ],
             "allowed_paths": [{"name": "reconcile", "steps": ["UNKNOWN", "APPLIED"]}],
         }
@@ -105,7 +106,7 @@ def test_scenario_accepts_complete_definition(valid_scenario: Scenario) -> None:
     assert valid_scenario.faults == ("timeout_before_write",)
     assert valid_scenario.expected_final_state.listings[0].price == Decimal("15.00")
     assert valid_scenario.expected_final_state.max_logical_writes == 1
-    assert valid_scenario.allowed_side_effects[0].tool == "update_price"
+    assert valid_scenario.allowed_side_effects[0].tool == "set_listing_price"
     assert valid_scenario.allowed_side_effects[0].target == "store-1/sku-1"
     assert valid_scenario.forbidden_side_effects[0].target == "store-1/sku-2"
     assert valid_scenario.allowed_paths[0].steps == ("UNKNOWN", "APPLIED")
@@ -120,36 +121,32 @@ def test_scenario_rejects_unknown_fields() -> None:
         Scenario.model_validate(data)
 
 
-def test_protocol_fingerprint_is_stable(valid_scenario: Scenario) -> None:
-    first = protocol_fingerprint(valid_scenario, fixed_eval_config())
-    second = protocol_fingerprint(valid_scenario, fixed_eval_config())
+def test_protocol_fingerprint_is_stable(
+    valid_scenario: Scenario, eval_manifest: EvalCapabilityManifest
+) -> None:
+    first = protocol_fingerprint(valid_scenario, fixed_eval_config(), eval_manifest)
+    second = protocol_fingerprint(valid_scenario, fixed_eval_config(), eval_manifest)
     assert first == second
     assert len(first) == 64
     int(first, 16)
 
 
-def test_fingerprint_is_sensitive_to_config_changes(valid_scenario: Scenario) -> None:
+def test_fingerprint_is_sensitive_to_config_changes(
+    valid_scenario: Scenario, eval_manifest: EvalCapabilityManifest
+) -> None:
     base_config = fixed_eval_config()
-    base = protocol_fingerprint(valid_scenario, base_config)
+    base = protocol_fingerprint(valid_scenario, base_config, eval_manifest)
     variants: dict[str, Any] = {
         "model": "deepseek-reasoner",
         "temperature": 0.7,
-        "agent_version": "5",
-        "prompt_version": "product-agent-prompt-v5",
         "repetitions": 5,
         "scorer_version": "v4",
     }
     for field, value in variants.items():
         changed = base_config.model_copy(update={field: value})
-        assert protocol_fingerprint(valid_scenario, changed) != base, field
-    changed = base_config.model_copy(update={"skill_versions": {"product_maintenance": "5"}})
-    assert protocol_fingerprint(valid_scenario, changed) != base
-    changed = base_config.model_copy(
-        update={"tool_versions": {**base_config.tool_versions, "update_price": "4"}}
-    )
-    assert protocol_fingerprint(valid_scenario, changed) != base
+        assert protocol_fingerprint(valid_scenario, changed, eval_manifest) != base, field
     changed = base_config.model_copy(update={"base_url": "https://api.example.com/v1"})
-    assert protocol_fingerprint(valid_scenario, changed) != base
+    assert protocol_fingerprint(valid_scenario, changed, eval_manifest) != base
 
 
 def test_benchmark_fingerprint_ignores_system_version_changes(
@@ -162,7 +159,7 @@ def test_benchmark_fingerprint_ignores_system_version_changes(
             "agent_version": "next-agent",
             "prompt_version": "next-prompt",
             "skill_versions": {"product_maintenance": "next-skill"},
-            "tool_versions": {"update_price": "next-tool"},
+            "tool_versions": {"set_listing_price": "next-tool"},
         }
     )
     assert benchmark_fingerprint(valid_scenario, changed) == base
@@ -181,28 +178,23 @@ def test_benchmark_fingerprint_tracks_eval_protocol_changes(
     ) != base
 
 
-def test_system_fingerprint_tracks_only_system_versions() -> None:
-    config = fixed_eval_config()
-    base = system_fingerprint(config)
-    assert system_fingerprint(
-        config.model_copy(update={"prompt_version": "next-prompt"})
-    ) != base
-    assert system_fingerprint(
-        config.model_copy(update={"model": "another-model"})
-    ) == base
+def test_system_fingerprint_is_the_frozen_capability_fingerprint(
+    eval_manifest: EvalCapabilityManifest,
+) -> None:
+    assert system_fingerprint(eval_manifest) == eval_manifest.capability_fingerprint
 
 
 def test_fingerprint_tracks_message_wording_and_structure(
-    valid_scenario: Scenario,
+    valid_scenario: Scenario, eval_manifest: EvalCapabilityManifest,
 ) -> None:
-    base = protocol_fingerprint(valid_scenario, fixed_eval_config())
+    base = protocol_fingerprint(valid_scenario, fixed_eval_config(), eval_manifest)
     reworded = valid_scenario.model_copy(
         update={"messages": (Message(role="user", content="please set sku-1 to 15.00"),)}
     )
-    assert protocol_fingerprint(reworded, fixed_eval_config()) != base
+    assert protocol_fingerprint(reworded, fixed_eval_config(), eval_manifest) != base
 
     structural = valid_scenario.model_copy(update={"faults": ()})
-    assert protocol_fingerprint(structural, fixed_eval_config()) != base
+    assert protocol_fingerprint(structural, fixed_eval_config(), eval_manifest) != base
     altered_state = valid_scenario.model_copy(
         update={
             "expected_final_state": valid_scenario.expected_final_state.model_copy(
@@ -210,11 +202,13 @@ def test_fingerprint_tracks_message_wording_and_structure(
             )
         }
     )
-    assert protocol_fingerprint(altered_state, fixed_eval_config()) != base
+    assert protocol_fingerprint(altered_state, fixed_eval_config(), eval_manifest) != base
 
 
-def test_fingerprint_tracks_explicit_user_decisions(valid_scenario: Scenario) -> None:
-    base = protocol_fingerprint(valid_scenario, fixed_eval_config())
+def test_fingerprint_tracks_explicit_user_decisions(
+    valid_scenario: Scenario, eval_manifest: EvalCapabilityManifest
+) -> None:
+    base = protocol_fingerprint(valid_scenario, fixed_eval_config(), eval_manifest)
     changed = valid_scenario.model_copy(
         update={
             "interactions": (
@@ -222,7 +216,7 @@ def test_fingerprint_tracks_explicit_user_decisions(valid_scenario: Scenario) ->
             )
         }
     )
-    assert protocol_fingerprint(changed, fixed_eval_config()) != base
+    assert protocol_fingerprint(changed, fixed_eval_config(), eval_manifest) != base
 
 
 def test_interaction_requires_explicit_input_or_confirmation_decision() -> None:
@@ -271,10 +265,6 @@ def test_eval_config_has_fixed_fields() -> None:
         "base_url",
         "temperature",
         "thinking_mode",
-        "agent_version",
-        "prompt_version",
-        "skill_versions",
-        "tool_versions",
         "repetitions",
         "scorer_version",
     }
@@ -284,17 +274,7 @@ def test_eval_config_has_fixed_fields() -> None:
     assert config.temperature == 0
     assert config.thinking_mode == "disabled"
     assert config.repetitions == 3
-    assert config.agent_version == "4"
-    assert config.prompt_version == "product-agent-prompt-v4"
     assert config.scorer_version
-    assert config.skill_versions == {"product_maintenance": "4"}
-    assert set(config.tool_versions) >= {
-        "load_skill",
-        "search_products",
-        "get_product_snapshot",
-        "compare_listing_prices",
-        "update_price",
-    }
 
 
 def test_deepseek_provider_file_is_fixed_and_keyless() -> None:

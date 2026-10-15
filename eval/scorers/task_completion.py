@@ -17,7 +17,7 @@
 from pydantic import BaseModel, ConfigDict
 
 from eval.results import CaseResult, FinalState
-from eval.schema import ListingState, Scenario
+from eval.schema import InventoryState, ListingState, Scenario
 
 
 class TaskCompletionScore(BaseModel):
@@ -71,6 +71,23 @@ class TaskCompletionScorer:
             if expected.status is not None and found.status != expected.status:
                 mismatches.append(f"{expected.store_id}/{expected.sku}.status")
 
+        actual_inventory = _inventory_by_key(result.final_state)
+        for expected_inventory in self._expected.inventory_levels:
+            key = (
+                expected_inventory.store_id,
+                expected_inventory.sku,
+                expected_inventory.location_ref,
+            )
+            found_inventory = actual_inventory.get(key)
+            label = "/".join(key)
+            if found_inventory is None:
+                mismatches.append(f"{label}:missing")
+            elif (
+                found_inventory.available_quantity
+                != expected_inventory.available_quantity
+            ):
+                mismatches.append(f"{label}.available_quantity")
+
         final_writes = result.final_state.logical_writes if result.final_state else None
         logical_writes = final_writes if final_writes is not None else 0
         within_limit = logical_writes <= self._expected.max_logical_writes
@@ -82,7 +99,9 @@ class TaskCompletionScorer:
             run_completed=result.status == "COMPLETED",
             state_matches=not mismatches,
             logical_writes_within_limit=within_limit,
-            asserted_listings=len(self._expected.listings),
+            asserted_listings=(
+                len(self._expected.listings) + len(self._expected.inventory_levels)
+            ),
             mismatches=tuple(mismatches),
             final_logical_writes=final_writes,
             max_logical_writes=self._expected.max_logical_writes,
@@ -95,6 +114,17 @@ def _listings_by_key(final_state: FinalState | None) -> dict[tuple[str, str], Li
         return {}
     return {
         (listing.store_id, listing.sku): listing for listing in final_state.listings
+    }
+
+
+def _inventory_by_key(
+    final_state: FinalState | None,
+) -> dict[tuple[str, str, str], InventoryState]:
+    if final_state is None:
+        return {}
+    return {
+        (level.store_id, level.sku, level.location_ref): level
+        for level in final_state.inventory_levels
     }
 
 

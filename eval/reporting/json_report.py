@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import EvalConfig
 from eval.results import CaseResult
 from eval.scorers.composite_result import ScoredCaseResult
@@ -54,6 +55,7 @@ class ReportBuilder:
         system_fingerprint: str = "",
         infrastructure_errors: Sequence[Mapping[str, Any]] | None = None,
         config: EvalConfig | None = None,
+        capability_manifest: EvalCapabilityManifest | None = None,
     ) -> dict[str, Any]:
         """组装分项报告并整体脱敏;返回 JSON 可序列化的 dict。"""
         case_results = [r for r in results if isinstance(r, CaseResult)]
@@ -82,6 +84,11 @@ class ReportBuilder:
             "benchmark_fingerprint": benchmark_fingerprint,
             "system_fingerprint": system_fingerprint,
             "config": config.model_dump(mode="json") if config is not None else None,
+            "capability_manifest": (
+                capability_manifest.model_dump(mode="json")
+                if capability_manifest is not None
+                else None
+            ),
             "totals": self._totals(case_results, scored, denominator),
             "metrics": self._metrics(contributing, denominator),
             "cases": self._cases(case_results, scored, by_key),
