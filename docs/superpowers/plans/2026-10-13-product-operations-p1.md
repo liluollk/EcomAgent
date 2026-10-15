@@ -2587,7 +2587,7 @@ Agent 发起旧 Tool 的 Runtime 路径测试迁移到 `store_ref` / `store_refs
 - Modify: `tests/eval/test_runner_isolation.py`
 - Modify: `tests/eval/test_reporting.py`
 
-- [ ] **Step 1: 写版本冻结失败测试**
+- [x] **Step 1: 写版本冻结失败测试**（实际结果：覆盖新 ToolVersion 发布后 Manifest 仍锁定版本 1，以及 Prompt hash 失配在执行前拒绝）
 
 ```python
 async def test_eval_manifest_is_frozen_before_cases_run(eval_fixture) -> None:
@@ -2652,11 +2652,11 @@ Manifest 指定版本解析。任何新版本在评测期间发布，都不能�
 case 因重新生成 UUID 而改变 Manifest；全局能力的比较以 stable key/version/hash 为准，
 并保持现有数据库隔离与清理能力。
 
-- [ ] **Step 5: 更新数据集 Tool 名称但不更新成绩**
+- [x] **Step 5: 更新数据集 Tool 名称但不更新成绩**（实际结果：五分区旧 Tool 断言迁移到新 stable key；Core 增加库存调整与刊登发布 Gold Case，Safety 增加库存/刊登无权限用例，Regression 增加两类响应丢失恢复用例；Core/Blind SHA-256 已重算，未生成新成绩）
 
 将用例中的旧 Tool 断言迁移到八个新 stable key；库存和刊登各增加核心正常任务、安全拒绝和恢复案例。更新 dataset hash。不要在本任务生成或手工修改任务完成率。
 
-- [ ] **Step 6: 提供一次生成、五次复用的 Manifest 文件入口**
+- [x] **Step 6: 提供一次生成、五次复用的 Manifest 文件入口**（实际结果：`eval.capability_manifest` 从正式 Provisioner 发布行生成清单；`product_suite` 必须接收同一文件并逐分区校验数据哈希）
 
 `eval.capability_manifest` 提供 CLI，把最终发布能力与五个数据集 hash 解析成一个 JSON
 文件；`eval.product_suite` 新增必填 `--capability-manifest`，只读取该文件并在任何模型
@@ -2672,7 +2672,7 @@ Python 常量拼一份“看起来一致”的 JSON。临时 Workspace/Version U
 
 Manifest 文件不含 API Key、数据库 URL、内部 Actor/Workspace ID 或临时 Version UUID。
 
-- [ ] **Step 7: 报告写入 Manifest**
+- [x] **Step 7: 报告写入 Manifest**（实际结果：JSON 保存完整 Manifest，Markdown 显示其 fingerprint；报告测试验证二者一致）
 
 JSON 和 Markdown 报告必须记录完整 manifest 与协议指纹，确保两次成绩可以追溯到同一能力快照。
 
@@ -2752,7 +2752,7 @@ Expected: 命中只允许出现在明确标注的 legacy compatibility、历史�
 
 只有全部门禁通过后，才将 ADR-002 状态改为“P0/P1 已实施，P2 待实施”，记录实际提交号、最终测试数量和验证命令。README 只描述已实现能力，不宣称接入真实第三方平台。
 
-- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**（待办：缺少 `EVAL_API_KEY` 等环境变量，按协议暂停等待凭据）
+- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**（待办：2026-10-15 检查当前进程，`EVAL_API_KEY`、`EVAL_BASE_URL`、`EVAL_MODEL` 均未设置；未发起模型请求、未产生费用，等待运行环境提供凭据）
 
 先检查三个环境变量，只允许从当前进程环境读取 Secret，不把 Key 写入仓库、命令历史、
 报告或日志：
@@ -2786,7 +2786,7 @@ $manifest = "reports/product-operations-p1-manifest.json"
   基于同一个 Manifest 完成，才允许比较新的任务完成率；安全分区单独报告越权拦截和
   误拒，不能混进业务任务完成率。
 
-- [ ] **Step 8: 提交验收文档与测试**
+- [x] **Step 8: 提交验收文档与测试**（提交 `0fd5b93 test: close product operations p1`）
 
 ```powershell
 git add tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py tests/agents/product_operations/test_p1_safety_matrix.py docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md README.md
@@ -2797,24 +2797,24 @@ git commit -m "test: close product operations p1"
 
 ## 最终验收清单
 
-- [ ] 新 Run 使用 `product-operations` 和八个冻结 Tool stable key；
-- [ ] 旧 Run 可以按旧 Version ID 恢复，旧 Tool 不向新 Agent 暴露；
-- [ ] ToolBinding 按 ToolVersion ID 绑定；
-- [ ] Operation.expected_state 在外部写入前持久化；
-- [ ] Pricing、Inventory、Listing 写操作都有 Reconciler；
-- [ ] 增量库存响应丢失后不会重复扣减或增加；
-- [ ] Runtime 写入重试预算上界生效：同一 Operation 的 `NOT_APPLIED` 重排不超过预算，
+- [x] 新 Run 使用 `product-operations` 和八个冻结 Tool stable key；
+- [x] 旧 Run 可以按旧 Version ID 恢复，旧 Tool 不向新 Agent 暴露；
+- [x] ToolBinding 按 ToolVersion ID 绑定；
+- [x] Operation.expected_state 在外部写入前持久化；
+- [x] Pricing、Inventory、Listing 写操作都有 Reconciler；
+- [x] 增量库存响应丢失后不会重复扣减或增加；
+- [x] Runtime 写入重试预算上界生效：同一 Operation 的 `NOT_APPLIED` 重排不超过预算，
   预算耗尽后 ToolCall 落 `FAILED`（实现于 Runtime，Pricing 只做验收）；
-- [ ] `unpublish_listing` 不删除 Product、Listing 或库存；
-- [ ] PricePolicyConfig 来自已发布 Workspace 配置；
-- [ ] Run 创建时持久化 `product-pricing` 的 Version ID 与 config hash，确认指纹绑定
+- [x] `unpublish_listing` 不删除 Product、Listing 或库存；
+- [x] PricePolicyConfig 来自已发布 Workspace 配置；
+- [x] Run 创建时持久化 `product-pricing` 的 Version ID 与 config hash，确认指纹绑定
   Policy revision，Operation.expected_state 可追溯该策略；
-- [ ] Task 8.2 的结构测试能杀死“仅靠字段取值域不相交”的旧幂等实现；
-- [ ] Eval 五个分区使用同一个 `EvalCapabilityManifest.capability_fingerprint`，隔离
+- [x] Task 8.2 的结构测试能杀死“仅靠字段取值域不相交”的旧幂等实现；
+- [x] Eval 五个分区使用同一个 `EvalCapabilityManifest.capability_fingerprint`，隔离
   Workspace 通过 stable key/version/hash 校验真实能力，不伪冻结临时 UUID；
-- [ ] Runtime 不导入 `agents.product_operations` 或 `adapters.commerce`；
-- [ ] 组合根不包含领域规则和按 Tool 业务分支；
-- [ ] Skill 只完成兼容版本更新，ADR-001 目标模型仍标记为未实施；
-- [ ] 全量 pytest、ruff、mypy 通过；
+- [x] Runtime 不导入 `agents.product_operations` 或 `adapters.commerce`；
+- [x] 组合根不包含领域规则和按 Tool 业务分支；
+- [x] Skill 只完成兼容版本更新，ADR-001 目标模型仍标记为未实施；
+- [x] 全量 pytest、ruff、mypy 通过；
 - [ ] P1 完成后重新运行真实模型评测；若缺凭据/Provider 不可用，代码交付仍完成，但
   最终报告必须明确标记外部阻塞，不得编造或沿用旧成绩。
