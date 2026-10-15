@@ -29,8 +29,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from agents.product_operations.domain.models import StorePlatform
-from agents.product_operations.persistence.models import Listing, Product, Store
+from agents.product_operations.domain.models import ListingStatus, StorePlatform
+from agents.product_operations.persistence.models import (
+    FulfillmentLocation,
+    InventoryLevel,
+    Listing,
+    Product,
+    Store,
+)
 from apps.api.dependencies import SessionDep
 from apps.worker.e2e import E2E_PRICE_CONFIG
 from composition.provisioning.product_operations import (
@@ -66,6 +72,8 @@ E2E_SKU: Final = "SKU-001"
 E2E_INITIAL_PRICE: Final = Decimal("128.00")
 E2E_COST_PRICE: Final = Decimal("88.00")
 E2E_CURRENCY: Final = "CNY"
+E2E_LOCATION_NAME: Final = "淘宝旗舰店-中央仓"
+E2E_INITIAL_INVENTORY: Final = 20
 
 E2E_MODEL_SPEC: Final = ModelConnectionProvisioningSpec(
     stable_key="product-scripted",
@@ -148,6 +156,16 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
                     workspace_id=workspace.id,
                     membership_id=membership.id,
                     permission="product.price.write",
+                ),
+                MembershipPermission(
+                    workspace_id=workspace.id,
+                    membership_id=membership.id,
+                    permission="product.inventory.write",
+                ),
+                MembershipPermission(
+                    workspace_id=workspace.id,
+                    membership_id=membership.id,
+                    permission="product.listing.write",
                 ),
                 MembershipResourceScopeMode(
                     workspace_id=workspace.id,
@@ -257,10 +275,54 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
                 seed_session.add(listing)
                 await seed_session.flush()
             else:
-                # 复位权威价,保证每次 E2E 从 128.00 开始。
+                # 复位权威价与发布状态,保证每次 E2E 从确定状态开始。
                 listing.current_price = E2E_INITIAL_PRICE
                 listing.cost_price = E2E_COST_PRICE
                 listing.currency = E2E_CURRENCY
+                listing.status = ListingStatus.PUBLISHED
+                await seed_session.flush()
+            location = (
+                await seed_session.scalars(
+                    select(FulfillmentLocation).where(
+                        FulfillmentLocation.workspace_id == workspace.id,
+                        FulfillmentLocation.store_id == store.id,
+                        FulfillmentLocation.name == E2E_LOCATION_NAME,
+                    )
+                )
+            ).one_or_none()
+            if location is None:
+                location = FulfillmentLocation(
+                    id=uuid.uuid4(),
+                    workspace_id=workspace.id,
+                    store_id=store.id,
+                    external_location_ref=f"e2e-loc-{uuid.uuid4().hex[:12]}",
+                    name=E2E_LOCATION_NAME,
+                    aliases=[E2E_LOCATION_NAME],
+                )
+                seed_session.add(location)
+                await seed_session.flush()
+            level = (
+                await seed_session.scalars(
+                    select(InventoryLevel).where(
+                        InventoryLevel.workspace_id == workspace.id,
+                        InventoryLevel.location_id == location.id,
+                        InventoryLevel.product_id == product.id,
+                    )
+                )
+            ).one_or_none()
+            if level is None:
+                level = InventoryLevel(
+                    id=uuid.uuid4(),
+                    workspace_id=workspace.id,
+                    location_id=location.id,
+                    product_id=product.id,
+                    available_quantity=E2E_INITIAL_INVENTORY,
+                )
+                seed_session.add(level)
+                await seed_session.flush()
+            else:
+                # 复位权威库存数量,保证每次 E2E 从 20 件开始。
+                level.available_quantity = E2E_INITIAL_INVENTORY
                 await seed_session.flush()
             return E2ESeedView(
                 workspace_id=workspace.id,
@@ -271,6 +333,9 @@ async def seed_e2e_environment(request: Request, session: SessionDep) -> E2ESeed
                 sku=E2E_SKU,
                 listing_id=listing.id,
                 initial_price=str(E2E_INITIAL_PRICE),
+                initial_publication_state=listing.status.value,
+                location_name=E2E_LOCATION_NAME,
+                initial_inventory=E2E_INITIAL_INVENTORY,
                 login=E2E_LOGIN,
                 password=E2E_PASSWORD,
             )

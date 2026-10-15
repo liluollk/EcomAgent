@@ -2699,7 +2699,7 @@ Expected: PASS，提交成功。
 - Modify: `docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: 增加四条端到端主路径**
+- [x] **Step 1: 增加四条端到端主路径**（实际结果：`tests/apps/api/test_e2e_product_flow.py` 六条用例——价格主路径 CONFIRM 模式（含缺店铺 Input + 确认参数断言）、价格全路径 AUTO 模式（搜索→比价→改价→回查）、库存路径 CONFIRM/AUTO、发布路径 CONFIRM、下架路径 AUTO；脚本后端 `E2EScriptedBackend` 扩展为任务表驱动的多步引擎；种子补充库存/位置/三类写权限
 
 覆盖：
 
@@ -2712,11 +2712,11 @@ Expected: PASS，提交成功。
 
 每条写路径同时验证 `AUTO_EXECUTE` 与 `REQUIRE_CONFIRMATION`，确认后必须重新校验权限、Policy 和资源版本。
 
-- [ ] **Step 2: 增加安全矩阵**
+- [x] **Step 2: 增加安全矩阵**（实际结果：`tests/agents/product_operations/test_p1_safety_matrix.py` 27 项——4 写工具 × 6 场景（无写权限/跨店铺/空资源范围/确认后版本变化/响应丢失/重复 operation_id）+ REST Adapter 能力边界 3 项；确认后版本变化统一为 DENIED + LISTING_VERSION_CONFLICT（通用资源版本守卫语义，已记入 ADR-002）
 
 对四个写 Tool 参数化验证：无写权限、跨店铺、缺少关键范围、确认后版本变化、响应丢失、重复 operation_id、Adapter 不支持能力。
 
-- [ ] **Step 3: 运行针对性测试**
+- [x] **Step 3: 运行针对性测试**（实际结果：416 passed）
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce tests/composition tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py tests/runtime/integration/test_crash_recovery.py -q
@@ -2724,7 +2724,7 @@ Expected: PASS，提交成功。
 
 Expected: PASS。
 
-- [ ] **Step 4: 运行全量质量门禁**
+- [x] **Step 4: 运行全量质量门禁**（实际结果：pytest 全量 1157 passed；ruff 通过；mypy 253 源文件 0 错误）
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -2740,7 +2740,7 @@ ruff: All checks passed!
 mypy: Success: no issues found
 ```
 
-- [ ] **Step 5: 检查旧命名残留**
+- [x] **Step 5: 检查旧命名残留**（实际结果：命中仅在 legacy 常量（`LEGACY_AGENT_KEY`）、兼容版本发布（`legacy_product_tool_definitions`）、旧工具模块本体与架构/设计文档的 legacy/历史段；workbench 前端测试的普通工具名已改 `set_listing_price`，`TOOL_UNKNOWN` 用例保留旧名（语义即旧工具被拒）；前端 Vitest 30 passed
 
 ```powershell
 rg -n "ProductMaintenanceAgent|product-maintenance|get_product_snapshot|update_price" agents composition apps eval README.md docs/架构
@@ -2748,11 +2748,11 @@ rg -n "ProductMaintenanceAgent|product-maintenance|get_product_snapshot|update_p
 
 Expected: 命中只允许出现在明确标注的 legacy compatibility、历史迁移说明和 ADR 当前事实段；新 Agent、Prompt、Eval 数据集和普通装配路径不得命中。
 
-- [ ] **Step 6: 更新架构事实**
+- [x] **Step 6: 更新架构事实**（实际结果：ADR-002 状态改为"P0/P1 已实施，P2 待实施"并补 P1 实施记录（提交序列 + 门禁结果 + 实施差异）；README 更新为四能力模块事实描述与最新验证数字）
 
 只有全部门禁通过后，才将 ADR-002 状态改为“P0/P1 已实施，P2 待实施”，记录实际提交号、最终测试数量和验证命令。README 只描述已实现能力，不宣称接入真实第三方平台。
 
-- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**
+- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**（待办：缺少 `EVAL_API_KEY` 等环境变量，按协议暂停等待凭据）
 
 先检查三个环境变量，只允许从当前进程环境读取 Secret，不把 Key 写入仓库、命令历史、
 报告或日志：
