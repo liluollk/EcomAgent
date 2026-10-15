@@ -30,10 +30,11 @@ adapters 已依赖 agents(:mod:`adapters.commerce.mock_adapter` 先例),故
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -50,11 +51,39 @@ from adapters.commerce.protocol import (
 from agents.product_operations.agent import (
     AGENT_KEY,
     AGENT_VERSION,
+    LEGACY_AGENT_KEY,
+    LEGACY_AGENT_VERSION,
+    LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION,
     PRODUCT_AGENT_DEFINITION,
+)
+from agents.product_operations.catalog.tools import (
+    SEARCH_PRODUCTS_DEFINITION,
+    search_products,
 )
 from agents.product_operations.input.profiles import (
     TOOL_ARGUMENT_FIELDS,
+    p1_fields_for,
     product_registration,
+)
+from agents.product_operations.inventory.gateway import InventoryGateway
+from agents.product_operations.inventory.policy import InventoryPolicyConfig
+from agents.product_operations.inventory.service import AdjustInventoryQuantityHandler
+from agents.product_operations.inventory.tools import (
+    ADJUST_INVENTORY_QUANTITY_DEFINITION,
+    GET_INVENTORY_LEVEL_DEFINITION,
+    get_inventory_level,
+)
+from agents.product_operations.listing.gateway import ListingGateway
+from agents.product_operations.listing.policy import ListingPolicyConfig
+from agents.product_operations.listing.service import (
+    PublishListingHandler,
+    UnpublishListingHandler,
+)
+from agents.product_operations.listing.tools import (
+    GET_LISTING_DEFINITION,
+    PUBLISH_LISTING_DEFINITION,
+    UNPUBLISH_LISTING_DEFINITION,
+    get_listing,
 )
 from agents.product_operations.persistence.models import Listing, Product, Store
 from agents.product_operations.policy.price_pretool import PricePreToolPolicy
@@ -66,17 +95,30 @@ from agents.product_operations.pricing.configuration import (
     PRICING_POLICY_STABLE_KEY,
     PublishedPricingPolicy,
 )
+from agents.product_operations.pricing.gateway import PricingGateway
+from agents.product_operations.pricing.service import SetListingPriceHandler
+from agents.product_operations.pricing.tools import (
+    COMPARE_LISTING_PRICES_DEFINITION,
+    SET_LISTING_PRICE_DEFINITION,
+    compare_listing_prices,
+)
 from agents.product_operations.prompt import PRODUCT_AGENT_PROMPT
 from agents.product_operations.skill import (
+    LEGACY_PRODUCT_MAINTENANCE_SKILL,
+    LEGACY_SKILL_VERSION,
     PRODUCT_MAINTENANCE_SKILL,
     PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS,
     SKILL_KEY,
     SKILL_VERSION,
 )
 from agents.product_operations.tools.definitions import (
-    COMPARE_LISTING_PRICES_DEFINITION,
-    GET_PRODUCT_SNAPSHOT_DEFINITION,
-    SEARCH_PRODUCTS_DEFINITION,
+    COMPARE_LISTING_PRICES_DEFINITION as LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    GET_PRODUCT_SNAPSHOT_DEFINITION as LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    SEARCH_PRODUCTS_DEFINITION as LEGACY_SEARCH_PRODUCTS_DEFINITION,
 )
 from agents.product_operations.tools.handlers import (
     CompareListingPricesHandler,
@@ -91,11 +133,12 @@ from agents.product_operations.tools.update_price import (
 )
 from composition.provisioning.product_operations import (
     ProductOperationsCapabilities,
+    legacy_product_tool_definitions,
     load_published_pricing_policy,
     product_tool_definitions,
     require_published_capabilities,
 )
-from runtime.access.actor import ActorContextBuilder
+from runtime.access.actor import ActorContext, ActorContextBuilder
 from runtime.access.authorization import Authorizer
 from runtime.backend.protocol import (
     AgentBackend,
@@ -143,6 +186,7 @@ from runtime.execution.pretool.profiles import (
 from runtime.execution.pretool.schema_validation import RuntimeSchemaValidator
 from runtime.execution.reconciliation import ReconciliationService
 from runtime.execution.tool_registry import RuntimeToolRegistry
+from runtime.execution.tool_result_processor import ToolExecutionReceipt
 from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
@@ -162,6 +206,7 @@ from runtime.persistence.base import (
     RunJobKind,
     ToolEffect,
 )
+from runtime.persistence.models.configuration import AgentVersion as AgentVersionRow
 from runtime.persistence.models.execution import Operation, ToolCall
 from runtime.persistence.models.identity import Workspace as WorkspaceRow
 from runtime.persistence.models.interaction import (
@@ -250,6 +295,162 @@ class _ScopeHolder:
         if self._current is None:
             raise RuntimeError("no advance scope is active; pipeline factory misuse")
         return self._current
+
+
+ReadToolInvoker = Callable[
+    [ActorContext, AsyncSession, Mapping[str, Any]], Awaitable[Any]
+]
+
+
+class _P1ReadHandler:
+    """把 P1 只读 Service 适配到 Runtime 的 ``read`` Handler 协议。"""
+
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], AsyncSession],
+        workspace_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        invoke: ReadToolInvoker,
+    ) -> None:
+        self._session_factory = session_factory
+        self._workspace_id = workspace_id
+        self._actor_id = actor_id
+        self._invoke = invoke
+
+    async def read(
+        self,
+        *,
+        tool_call_id: uuid.UUID,
+        normalized_arguments: Mapping[str, Any],
+        deadline: datetime,
+    ) -> Any:
+        del deadline
+        session = self._session_factory()
+        try:
+            actor = await ActorContextBuilder(session).build(
+                actor_id=self._actor_id,
+                workspace_id=self._workspace_id,
+                request_id=f"read-{tool_call_id}",
+            )
+            result = await self._invoke(actor, session, normalized_arguments)
+            return ToolExecutionReceipt(
+                tool_call_id=tool_call_id,
+                status="OK",
+                payload=result.model_dump(mode="json"),
+            )
+        finally:
+            await session.close()
+
+
+WriteHandlerFactory = Callable[[ActorContext], Any]
+
+
+class _ScopedWriteHandler:
+    """延迟构造请求 Actor，避免应用装配依赖尚未建立的成员上下文。"""
+
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        workspace_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        factory: WriteHandlerFactory,
+    ) -> None:
+        self._session = session
+        self._workspace_id = workspace_id
+        self._actor_id = actor_id
+        self._factory = factory
+
+    async def _handler(self, request_id: str) -> Any:
+        actor = await ActorContextBuilder(self._session).build(
+            actor_id=self._actor_id,
+            workspace_id=self._workspace_id,
+            request_id=request_id,
+        )
+        await self._session.rollback()
+        return self._factory(actor)
+
+    async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> Any:
+        handler = await self._handler(f"write-prepare-{uuid.uuid4()}")
+        return await handler.prepare(normalized_arguments=normalized_arguments)
+
+    async def execute_prepared(
+        self,
+        *,
+        tool_call_id: uuid.UUID,
+        operation_id: uuid.UUID,
+        idempotency_key: str,
+        prepared: Any,
+    ) -> Any:
+        handler = await self._handler(f"write-execute-{tool_call_id}")
+        return await handler.execute_prepared(
+            tool_call_id=tool_call_id,
+            operation_id=operation_id,
+            idempotency_key=idempotency_key,
+            prepared=prepared,
+        )
+
+
+def _string_sequence(value: Any) -> tuple[str, ...]:
+    if isinstance(value, Sequence) and not isinstance(value, str):
+        return tuple(str(item) for item in value)
+    return ()
+
+
+async def _search_products_read(
+    actor: ActorContext,
+    session: AsyncSession,
+    arguments: Mapping[str, Any],
+) -> Any:
+    query = arguments.get("query")
+    return await search_products(
+        actor=actor,
+        session=session,
+        query=query if isinstance(query, str) else None,
+        store_refs=_string_sequence(arguments.get("store_refs")),
+    )
+
+
+async def _get_listing_read(
+    actor: ActorContext,
+    session: AsyncSession,
+    arguments: Mapping[str, Any],
+) -> Any:
+    return await get_listing(
+        actor=actor,
+        session=session,
+        store_ref=str(arguments.get("store_ref", "")),
+        sku=str(arguments.get("sku", "")),
+    )
+
+
+async def _compare_listing_prices_read(
+    actor: ActorContext,
+    session: AsyncSession,
+    arguments: Mapping[str, Any],
+) -> Any:
+    return await compare_listing_prices(
+        actor=actor,
+        session=session,
+        sku=str(arguments.get("sku", "")),
+        store_refs=_string_sequence(arguments.get("store_refs")),
+    )
+
+
+async def _get_inventory_level_read(
+    actor: ActorContext,
+    session: AsyncSession,
+    arguments: Mapping[str, Any],
+) -> Any:
+    location_ref = arguments.get("location_ref")
+    return await get_inventory_level(
+        actor=actor,
+        session=session,
+        store_ref=str(arguments.get("store_ref", "")),
+        sku=str(arguments.get("sku", "")),
+        location_ref=location_ref if isinstance(location_ref, str) else None,
+    )
 
 
 class _NoopSummaryBackend:
@@ -986,6 +1187,30 @@ async def build_product_application(
             definition=PRODUCT_AGENT_DEFINITION,
         )
     )
+    compatibility_agent_ids: dict[uuid.UUID, uuid.UUID] = {}
+    if capabilities.compatibility_agent_version_ids:
+        compatibility_session = AsyncSession(engine, expire_on_commit=False)
+        try:
+            for version_id in capabilities.compatibility_agent_version_ids:
+                row = await compatibility_session.get(AgentVersionRow, version_id)
+                if row is not None:
+                    compatibility_agent_ids[version_id] = row.agent_id
+        finally:
+            await compatibility_session.close()
+    for version_id in capabilities.compatibility_agent_version_ids:
+        agent_id = compatibility_agent_ids.get(version_id)
+        if agent_id is None:
+            continue
+        agent_registry.register(
+            AgentVersionRecord(
+                stable_key=LEGACY_AGENT_KEY,
+                version_id=version_id,
+                version=LEGACY_AGENT_VERSION,
+                agent_id=agent_id,
+                definition=LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION,
+            ),
+            make_current=False,
+        )
     skill_registry = SkillRegistry()
     skill_registry.register(
         SkillVersionRecord(
@@ -996,6 +1221,17 @@ async def build_product_application(
             content=PRODUCT_MAINTENANCE_SKILL,
         )
     )
+    for version_id in capabilities.compatibility_skill_version_ids:
+        skill_registry.register(
+            SkillVersionRecord(
+                stable_key=SKILL_KEY,
+                version_id=version_id,
+                version=LEGACY_SKILL_VERSION,
+                workspace_id=None,
+                content=LEGACY_PRODUCT_MAINTENANCE_SKILL,
+            ),
+            make_current=False,
+        )
 
     adapter_session = AsyncSession(engine, expire_on_commit=False)
     adapter: CommerceAdapter = (
@@ -1010,6 +1246,62 @@ async def build_product_application(
         policy_revision=pricing_policy.version,
         policy_config_hash=pricing_policy.config_hash,
     )
+    pricing_gateway = cast(PricingGateway, adapter)
+    inventory_gateway = cast(InventoryGateway, adapter)
+    listing_gateway = cast(ListingGateway, adapter)
+    set_listing_price_handler = _ScopedWriteHandler(
+        session=adapter_session,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        factory=lambda actor: SetListingPriceHandler(
+            actor=actor,
+            session=adapter_session,
+            gateway=pricing_gateway,
+            pricing_policy=pricing_policy,
+        ),
+    )
+    adjust_inventory_handler = _ScopedWriteHandler(
+        session=adapter_session,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        factory=lambda actor: AdjustInventoryQuantityHandler(
+            actor=actor,
+            session=adapter_session,
+            gateway=inventory_gateway,
+            policy_config=InventoryPolicyConfig(policy_version="inventory-policy-v1"),
+        ),
+    )
+    supported_capabilities = getattr(
+        adapter,
+        "supported_capabilities",
+        frozenset({"pricing", "inventory", "listing"}),
+    )
+    listing_policy = ListingPolicyConfig(
+        policy_version="listing-policy-v1",
+        supports_publication="listing" in supported_capabilities,
+    )
+    publish_listing_handler = _ScopedWriteHandler(
+        session=adapter_session,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        factory=lambda actor: PublishListingHandler(
+            actor=actor,
+            session=adapter_session,
+            gateway=listing_gateway,
+            policy_config=listing_policy,
+        ),
+    )
+    unpublish_listing_handler = _ScopedWriteHandler(
+        session=adapter_session,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        factory=lambda actor: UnpublishListingHandler(
+            actor=actor,
+            session=adapter_session,
+            gateway=listing_gateway,
+            policy_config=listing_policy,
+        ),
+    )
 
     def price_policy_factory(context: PreToolProfileContext) -> PricePreToolPolicy:
         """写 Tool 的业务策略工厂:绑定本次请求的 Session/Actor/ToolCall。"""
@@ -1021,8 +1313,8 @@ async def build_product_application(
             policy_revision=pricing_policy.version,
         )
 
-    def registration_for(key: str) -> PreToolProfileRegistration:
-        """每个 Tool 的启动期 Profile 注册描述(策略/资源模式显式声明)。"""
+    def legacy_registration_for(key: str) -> PreToolProfileRegistration:
+        """第一版 Tool 的兼容 PreTool Profile。"""
         if key == STABLE_KEY_UPDATE_PRICE:
             return product_registration(
                 fields=TOOL_ARGUMENT_FIELDS["update_price"],
@@ -1033,14 +1325,14 @@ async def build_product_application(
             )
         if key == LOAD_SKILL_KEY:
             return runtime_control_registration()
-        if key == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
+        if key == LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key:
             return product_registration(
                 fields=TOOL_ARGUMENT_FIELDS["get_product_snapshot"],
                 policy_mode="NONE",
                 resource_mode="RESOURCE",
                 resource_resolver=StoreResourceResolver(),
             )
-        if key == COMPARE_LISTING_PRICES_DEFINITION.stable_key:
+        if key == LEGACY_COMPARE_LISTING_PRICES_DEFINITION.stable_key:
             return product_registration(
                 fields=TOOL_ARGUMENT_FIELDS["compare_listing_prices"],
                 policy_mode="NONE",
@@ -1048,7 +1340,28 @@ async def build_product_application(
                 resource_resolver=StoreIdsResourceResolver(),
             )
         return product_registration(
-            fields=TOOL_ARGUMENT_FIELDS[SEARCH_PRODUCTS_DEFINITION.stable_key],
+            fields=TOOL_ARGUMENT_FIELDS[LEGACY_SEARCH_PRODUCTS_DEFINITION.stable_key],
+            policy_mode="NONE",
+            resource_mode="WORKSPACE",
+        )
+
+    def current_registration_for(key: str) -> PreToolProfileRegistration:
+        """P1 Tool 的 Profile；业务终态校验由对应领域 Handler 再次执行。"""
+        if key == LOAD_SKILL_KEY:
+            return runtime_control_registration()
+        if key in {
+            SET_LISTING_PRICE_DEFINITION.stable_key,
+            ADJUST_INVENTORY_QUANTITY_DEFINITION.stable_key,
+            PUBLISH_LISTING_DEFINITION.stable_key,
+            UNPUBLISH_LISTING_DEFINITION.stable_key,
+        }:
+            return product_registration(
+                fields=p1_fields_for(key),
+                policy_mode="BUSINESS",
+                resource_mode="RESOURCE",
+            )
+        return product_registration(
+            fields=p1_fields_for(key),
             policy_mode="NONE",
             resource_mode="WORKSPACE",
         )
@@ -1061,18 +1374,49 @@ async def build_product_application(
     # 每个 Tool 显式映射到自己的 Handler:不再按 stable_key 在运行时 if/elif
     # 分发,新增读 Tool 只需新增一个 Handler 并在此登记。
     read_session_factory = lambda: AsyncSession(engine, expire_on_commit=False)
-    handlers: dict[str, Any] = {
-        SEARCH_PRODUCTS_DEFINITION.stable_key: SearchProductsHandler(
+    current_handlers: dict[str, Any] = {
+        SEARCH_PRODUCTS_DEFINITION.stable_key: _P1ReadHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            invoke=_search_products_read,
+        ),
+        GET_LISTING_DEFINITION.stable_key: _P1ReadHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            invoke=_get_listing_read,
+        ),
+        COMPARE_LISTING_PRICES_DEFINITION.stable_key: _P1ReadHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            invoke=_compare_listing_prices_read,
+        ),
+        SET_LISTING_PRICE_DEFINITION.stable_key: set_listing_price_handler,
+        GET_INVENTORY_LEVEL_DEFINITION.stable_key: _P1ReadHandler(
+            session_factory=read_session_factory,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            invoke=_get_inventory_level_read,
+        ),
+        ADJUST_INVENTORY_QUANTITY_DEFINITION.stable_key: adjust_inventory_handler,
+        PUBLISH_LISTING_DEFINITION.stable_key: publish_listing_handler,
+        UNPUBLISH_LISTING_DEFINITION.stable_key: unpublish_listing_handler,
+        LOAD_SKILL_KEY: LOAD_SKILL_HANDLER,
+    }
+    legacy_handlers: dict[str, Any] = {
+        LEGACY_SEARCH_PRODUCTS_DEFINITION.stable_key: SearchProductsHandler(
             session_factory=read_session_factory,
             workspace_id=workspace_id,
             actor_id=actor_id,
         ),
-        GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key: GetProductSnapshotHandler(
+        LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key: GetProductSnapshotHandler(
             session_factory=read_session_factory,
             workspace_id=workspace_id,
             actor_id=actor_id,
         ),
-        COMPARE_LISTING_PRICES_DEFINITION.stable_key: CompareListingPricesHandler(
+        LEGACY_COMPARE_LISTING_PRICES_DEFINITION.stable_key: CompareListingPricesHandler(
             session_factory=read_session_factory,
             workspace_id=workspace_id,
             actor_id=actor_id,
@@ -1083,7 +1427,7 @@ async def build_product_application(
 
     tool_registry = ToolRegistry()
     for key, definition in product_tool_definitions():
-        handler = handlers[key]
+        handler = current_handlers[key]
         is_write = definition.effect is ToolEffectKind.WRITE
         record = ToolVersionRecord(
             stable_key=key,
@@ -1105,7 +1449,40 @@ async def build_product_application(
             ToolBinding(
                 definition=definition,
                 handler=handler,
-                pretool_registration=registration_for(key),
+                pretool_registration=current_registration_for(key),
+                execution_profile=write_execution_profile if is_write else None,
+                write_adapter_capabilities=(
+                    _WRITE_ADAPTER_CAPABILITIES if is_write else frozenset()
+                ),
+            ),
+        )
+    for key, definition in legacy_product_tool_definitions():
+        version_ids = capabilities.compatibility_tool_version_ids.get(key, ())
+        if not version_ids:
+            continue
+        version_id = version_ids[0]
+        is_write = definition.effect is ToolEffectKind.WRITE
+        record = ToolVersionRecord(
+            stable_key=key,
+            version_id=version_id,
+            version=definition.version,
+            workspace_id=None,
+            source_kind="LOCAL",
+            effect=definition.effect,
+            input_schema=definition.input_json_schema,
+            output_schema=definition.output_json_schema,
+            schema_hash=compute_schema_hash(
+                definition.input_json_schema, definition.output_json_schema
+            ),
+            required_permissions=definition.required_permissions,
+        )
+        tool_registry.register(record, make_current=False)
+        tool_registry.bind(
+            version_id,
+            ToolBinding(
+                definition=definition,
+                handler=legacy_handlers[key],
+                pretool_registration=legacy_registration_for(key),
                 execution_profile=write_execution_profile if is_write else None,
                 write_adapter_capabilities=(
                     _WRITE_ADAPTER_CAPABILITIES if is_write else frozenset()

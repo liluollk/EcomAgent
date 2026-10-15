@@ -1,69 +1,92 @@
-"""ProductMaintenance Agent 组装记录(计划 03 Task 6;架构文档 §3.1)。
+"""ProductOperations Agent 与第一版 ProductMaintenance 兼容定义。
 
-Agent 是能力组合的声明:所需 Skill/Tool/Source 稳定 Key 与必需 Backend
-能力。``AgentDefinition`` 即 ``AgentVersion.definition_json`` 的组装视图;
-Worker 组合根把它注册进 :class:`~runtime.capabilities.registry.AgentRegistry`,
-Run 创建时再钉住精确版本。
-
-本模块只 import runtime 与本 Agent 自己的模块;Runtime 不 import 本包
-(依赖方向:apps → runtime + agents,agents → runtime)。
+当前版本声明 Catalog、Pricing、Inventory、Listing 四个能力模块的 Tool；旧定义
+只供历史 Run 按精确 AgentVersion/ToolVersion 恢复。Task 11 仍保持 ADR-001 实施前
+的 Skill 模型：Agent 必需 ``product_maintenance``，并显式暴露 ``load_skill``。
 """
 
 from __future__ import annotations
 
 from typing import Final
 
+from agents.product_operations.agent_tool_keys import P1_BUSINESS_TOOL_KEYS
 from agents.product_operations.skill import SKILL_KEY
 from agents.product_operations.tools.definitions import (
-    COMPARE_LISTING_PRICES_DEFINITION,
-    GET_PRODUCT_SNAPSHOT_DEFINITION,
-    SEARCH_PRODUCTS_DEFINITION,
+    COMPARE_LISTING_PRICES_DEFINITION as LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    GET_PRODUCT_SNAPSHOT_DEFINITION as LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    SEARCH_PRODUCTS_DEFINITION as LEGACY_SEARCH_PRODUCTS_DEFINITION,
 )
 from agents.product_operations.tools.update_price import STABLE_KEY_UPDATE_PRICE
 from runtime.capabilities.registry import AgentDefinition
 from runtime.capabilities.skill_activation import LOAD_SKILL_KEY
 
 
-AGENT_KEY: Final = "product-maintenance"
-AGENT_VERSION: Final = 4
+AGENT_KEY: Final = "product-operations"
+AGENT_VERSION: Final = 1
+
+LEGACY_AGENT_KEY: Final = "product-maintenance"
+LEGACY_AGENT_VERSION: Final = 4
+
+P1_TOOL_KEYS: Final = P1_BUSINESS_TOOL_KEYS
+
+P1_LOOP_LIMITS: Final = {
+    "max_model_rounds": 12,
+    "max_tool_calls": 12,
+    "tool_timeout_seconds": 60,
+    "run_deadline_seconds": 3600,
+    "backend_retries": 1,
+    "reconcile_budget": 3,
+    "write_retry_budget": 1,
+}
 
 PRODUCT_AGENT_DEFINITION: Final = AgentDefinition(
+    name="ProductOperationsAgent",
+    system_prompt_version="product-operations-prompt-v1",
+    required_backend_capabilities=frozenset({"streaming", "tool_calling"}),
+    required_skill_keys=frozenset({SKILL_KEY}),
+    required_tool_keys=P1_TOOL_KEYS | {LOAD_SKILL_KEY},
+    required_source_keys=frozenset(),
+    loop_limits=P1_LOOP_LIMITS,
+)
+
+LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION: Final = AgentDefinition(
     name="ProductMaintenanceAgent",
     system_prompt_version="product-agent-prompt-v4",
     required_backend_capabilities=frozenset({"streaming", "tool_calling"}),
     required_skill_keys=frozenset({SKILL_KEY}),
     required_tool_keys=frozenset(
         {
-            SEARCH_PRODUCTS_DEFINITION.stable_key,
-            GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
-            COMPARE_LISTING_PRICES_DEFINITION.stable_key,
+            LEGACY_SEARCH_PRODUCTS_DEFINITION.stable_key,
+            LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
+            LEGACY_COMPARE_LISTING_PRICES_DEFINITION.stable_key,
             STABLE_KEY_UPDATE_PRICE,
             LOAD_SKILL_KEY,
         }
     ),
     required_source_keys=frozenset(),
-    # 参考 Agent 的保守运行上限,随 AgentVersion 一起版本化;
-    # 这不是 Runtime 的全局默认值(RuntimeDefaults 见 RunLimits 的保守基线)。
-    # Runtime 组合根通过 RunLimits.from_definition 消费同一份定义。
     loop_limits={
-        # 单次改价任务最多 8 轮模型调用:读取/比较到写入的闭环足够,
-        # 又能在模型陷入无界重复时尽早失败。
         "max_model_rounds": 8,
-        # 单次 Run 最多 8 次 ToolCall:覆盖查询、比较、加载 Skill 与一次写入。
         "max_tool_calls": 8,
-        # 单个 Tool 超时 60 秒:平台读写回执应在秒级返回。
         "tool_timeout_seconds": 60,
-        # Run 总时限 1 小时:留出人工确认挂起后恢复的时间。
         "run_deadline_seconds": 3600,
-        # 模型调用重试 1 次:改价写路径宁可失败也不无限重试。
         "backend_retries": 1,
-        # Reconciliation 预算 3 次:足以覆盖平台回查与补偿,不含无限重试。
         "reconcile_budget": 3,
-        # 写入重试预算 1 次:同一 Operation 只允许一次 EXECUTE;NOT_APPLIED 后
-        # 不再无限重排,预算耗尽即让 ToolCall 落 FAILED 由模型收尾。
         "write_retry_budget": 1,
     },
 )
 
 
-__all__ = ["AGENT_KEY", "AGENT_VERSION", "PRODUCT_AGENT_DEFINITION"]
+__all__ = [
+    "AGENT_KEY",
+    "AGENT_VERSION",
+    "LEGACY_AGENT_KEY",
+    "LEGACY_AGENT_VERSION",
+    "LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION",
+    "P1_LOOP_LIMITS",
+    "P1_TOOL_KEYS",
+    "PRODUCT_AGENT_DEFINITION",
+]

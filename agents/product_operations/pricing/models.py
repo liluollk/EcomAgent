@@ -63,9 +63,13 @@ class PriceComparisonSummary(_FrozenModel):
 class SetListingPriceInput(_FrozenModel):
     """set_listing_price 输入:店铺引用 + SKU + 目标价。"""
 
-    store_ref: str = Field(description="用户当前消息明确给出的店铺名称或别名。")
+    store_ref: str = Field(
+        description="用户当前消息明确给出的店铺名称或别名；不要填写内部 ID。"
+    )
     sku: str = Field(description="用户当前消息明确给出的 SKU 原值。")
-    target_price: Decimal = Field(description="最终目标售价;服务端校验合法性与业务规则。")
+    target_price: Decimal = Field(
+        description="用户明确给出或根据用户规则计算的最终目标售价；服务端校验业务规则。"
+    )
 
 
 class SetListingPriceResult(_FrozenModel):

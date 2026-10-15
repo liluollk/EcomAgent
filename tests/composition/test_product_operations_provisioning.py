@@ -25,6 +25,7 @@ from composition.provisioning.product_operations import (
     ProductOperationsProvisioner,
     load_published_pricing_policy,
     pricing_policy_config_hash,
+    product_tool_definitions,
 )
 from runtime.backend.protocol import (
     AgentBackendCapabilities,
@@ -130,6 +131,49 @@ async def test_provision_is_idempotent(engine: AsyncEngine) -> None:
     assert await _configuration_counts(engine) == after_first
 
 
+def test_current_tool_catalog_contains_only_p1_tools_and_runtime_control() -> None:
+    """新 Run 的 current 目录不得继续暴露旧业务 Tool。"""
+    assert {key for key, _ in product_tool_definitions()} == {
+        "load_skill",
+        "search_products",
+        "get_listing",
+        "compare_listing_prices",
+        "set_listing_price",
+        "get_inventory_level",
+        "adjust_inventory_quantity",
+        "publish_listing",
+        "unpublish_listing",
+    }
+
+
+async def test_provision_returns_current_and_compatibility_versions(
+    engine: AsyncEngine,
+) -> None:
+    """发布结果同时携带新 Run 快照与旧 Run 恢复所需精确 Version ID。"""
+    workspace_id = await _seed_workspace(engine)
+    capabilities = await _provisioner(engine).provision(
+        workspace_id=workspace_id,
+        model=_MODEL_SPEC,
+        pricing_policy=_PRICE_CONFIG,
+    )
+
+    assert capabilities.compatibility_agent_version_ids
+    assert capabilities.compatibility_skill_version_ids
+    assert set(capabilities.compatibility_tool_version_ids) == {
+        "search_products",
+        "get_product_snapshot",
+        "compare_listing_prices",
+        "update_price",
+    }
+    assert not (
+        set(capabilities.tool_version_ids)
+        & {
+            "get_product_snapshot",
+            "update_price",
+        }
+    )
+
+
 async def test_build_product_application_is_read_only(engine: AsyncEngine) -> None:
     """普通装配只消费已发布快照:不新增任何配置行。"""
     workspace_id = await _seed_workspace(engine)
@@ -150,6 +194,38 @@ async def test_build_product_application_is_read_only(engine: AsyncEngine) -> No
 
     assert after == before
     await application.aclose()
+
+
+async def test_build_registers_all_compatibility_versions_for_recovery(
+    engine: AsyncEngine,
+) -> None:
+    """历史 Run 按精确 Version ID 仍能解析旧 Agent、Skill 与 ToolBinding。"""
+    workspace_id = await _seed_workspace(engine)
+    capabilities = await _provisioner(engine).provision(
+        workspace_id=workspace_id, model=_MODEL_SPEC, pricing_policy=_PRICE_CONFIG
+    )
+    application = await build_product_application(
+        engine,
+        capabilities=capabilities,
+        backend=_StubBackend(),
+        workspace_id=workspace_id,
+        actor_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+    )
+    try:
+        assembly = application.assembly
+        for version_id in capabilities.compatibility_agent_version_ids:
+            assert assembly.agents.find_by_version_id(version_id) is not None
+        for version_id in capabilities.compatibility_skill_version_ids:
+            assert assembly.skills.find_by_version_id(version_id) is not None
+        for key, version_ids in capabilities.compatibility_tool_version_ids.items():
+            for version_id in version_ids:
+                record = assembly.tools.find_by_version_id(version_id)
+                assert record is not None
+                assert record.stable_key == key
+                assert assembly.tools.binding_for_version(version_id) is not None
+    finally:
+        await application.aclose()
 
 
 async def test_unpublished_snapshot_is_rejected(engine: AsyncEngine) -> None:

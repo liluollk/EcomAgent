@@ -17,11 +17,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from agents.product_operations import agent as agent_module
+from agents.product_operations import skill as skill_module
 from agents.product_operations.agent import (
     AGENT_KEY,
     AGENT_VERSION,
     PRODUCT_AGENT_DEFINITION,
 )
+from agents.product_operations.listing.tools import GET_LISTING_DEFINITION
+from agents.product_operations.pricing.tools import SET_LISTING_PRICE_DEFINITION
 from agents.product_operations.prompt import PRODUCT_AGENT_PROMPT
 from agents.product_operations.skill import (
     PRODUCT_MAINTENANCE_SKILL,
@@ -48,13 +52,57 @@ from runtime.interfaces.tools import ToolEffect
 from runtime.orchestration.limits import RunLimits
 
 
-PRODUCT_TOOL_KEYS = (
+LEGACY_PRODUCT_TOOL_KEYS = (
     LOAD_SKILL_KEY,
     SEARCH_PRODUCTS_DEFINITION.stable_key,
     GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
     COMPARE_LISTING_PRICES_DEFINITION.stable_key,
     STABLE_KEY_UPDATE_PRICE,
 )
+
+P1_BUSINESS_TOOL_KEYS = frozenset(
+    {
+        "search_products",
+        "get_listing",
+        "compare_listing_prices",
+        "set_listing_price",
+        "get_inventory_level",
+        "adjust_inventory_quantity",
+        "publish_listing",
+        "unpublish_listing",
+    }
+)
+
+
+def test_product_operations_agent_declares_p1_tool_set() -> None:
+    """新 Agent 使用新 stable key；Runtime 控制 Tool 仍按第一版模型显式声明。"""
+    assert AGENT_KEY == "product-operations"
+    assert AGENT_VERSION == 1
+    assert PRODUCT_AGENT_DEFINITION.name == "ProductOperationsAgent"
+    assert PRODUCT_AGENT_DEFINITION.system_prompt_version == "product-operations-prompt-v1"
+    assert PRODUCT_AGENT_DEFINITION.required_tool_keys == (
+        P1_BUSINESS_TOOL_KEYS | {LOAD_SKILL_KEY}
+    )
+    assert PRODUCT_AGENT_DEFINITION.required_skill_keys == frozenset({SKILL_KEY})
+
+
+def test_legacy_agent_and_skill_definitions_remain_available() -> None:
+    """Task 11 只新增版本：旧 Run 所需定义不能被覆盖或删除。"""
+    legacy_agent = getattr(
+        agent_module, "LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION", None
+    )
+    legacy_skill = getattr(skill_module, "LEGACY_PRODUCT_MAINTENANCE_SKILL", None)
+
+    assert legacy_agent is not None
+    assert legacy_agent.name == "ProductMaintenanceAgent"
+    assert legacy_agent.system_prompt_version == "product-agent-prompt-v4"
+    assert legacy_agent.required_tool_keys == frozenset(LEGACY_PRODUCT_TOOL_KEYS)
+    assert legacy_skill is not None
+    assert skill_module.SKILL_VERSION == 5
+    assert legacy_skill.required_tool_keys == frozenset(LEGACY_PRODUCT_TOOL_KEYS) - {
+        LOAD_SKILL_KEY
+    }
+    assert skill_module.PRODUCT_MAINTENANCE_SKILL.required_tool_keys == P1_BUSINESS_TOOL_KEYS
 
 
 async def test_product_and_runtime_tools_are_registered(
@@ -65,38 +113,48 @@ async def test_product_and_runtime_tools_are_registered(
     assembly.validate()
 
     registered = {record.stable_key: record for record in assembly.tools.records()}
-    assert set(registered) == set(PRODUCT_TOOL_KEYS)
-    for key in PRODUCT_TOOL_KEYS:
+    current_tool_keys = P1_BUSINESS_TOOL_KEYS | {LOAD_SKILL_KEY}
+    assert set(registered) == current_tool_keys
+    for key in current_tool_keys:
         record = registered[key]
-        expected_version = 3 if key == STABLE_KEY_UPDATE_PRICE else 2
-        if key == LOAD_SKILL_KEY:
-            expected_version = 1
-        assert record.version == expected_version
+        assert record.version >= 1
         assert assembly.tools.binding_for_key(key), f"tool {key} 缺少 ToolBinding"
 
-    update_price = registered[STABLE_KEY_UPDATE_PRICE]
-    assert update_price.effect == ToolEffect.WRITE
-    assert update_price.required_permissions == frozenset({"product.price.write"})
+    set_listing_price = registered[SET_LISTING_PRICE_DEFINITION.stable_key]
+    assert set_listing_price.effect == ToolEffect.WRITE
+    assert set_listing_price.required_permissions == frozenset(
+        {"product.price.write"}
+    )
+
+    compatibility = {
+        record.stable_key: record for record in assembly.tools.all_records()
+        if record.stable_key in {"get_product_snapshot", "update_price"}
+    }
+    assert set(compatibility) == {"get_product_snapshot", "update_price"}
+    assert all(
+        assembly.tools.binding_for_version(record.version_id) is not None
+        for record in compatibility.values()
+    )
 
     agent = assembly.agents.find_by_key(AGENT_KEY)
     assert agent is not None
-    assert agent.definition.required_tool_keys == frozenset(PRODUCT_TOOL_KEYS)
+    assert agent.definition.required_tool_keys == current_tool_keys
     assert agent.definition.required_skill_keys == frozenset({SKILL_KEY})
     assert agent.definition.required_backend_capabilities == frozenset(
         PRODUCT_AGENT_DEFINITION.required_backend_capabilities
     )
     assert assembly.skills.find_by_key(SKILL_KEY) is not None
-    assert AGENT_VERSION == 4
-    assert SKILL_VERSION == 4
-    assert PRODUCT_AGENT_DEFINITION.system_prompt_version == "product-agent-prompt-v4"
+    assert AGENT_VERSION == 1
+    assert SKILL_VERSION == 5
+    assert PRODUCT_AGENT_DEFINITION.system_prompt_version == "product-operations-prompt-v1"
     assert UPDATE_PRICE_TOOL_VERSION == 3
 
 
 def test_agent_definition_carries_reference_loop_limits() -> None:
     """版本化定义携带参考 Agent 的保守运行上限(非 Runtime 全局默认)。"""
     assert PRODUCT_AGENT_DEFINITION.loop_limits == {
-        "max_model_rounds": 8,
-        "max_tool_calls": 8,
+        "max_model_rounds": 12,
+        "max_tool_calls": 12,
         "tool_timeout_seconds": 60,
         "run_deadline_seconds": 3600,
         "backend_retries": 1,
@@ -121,21 +179,21 @@ def test_run_limits_follow_agent_definition_not_private_constant(
     )
 
 
-async def test_update_price_model_visible_fields_are_exactly_store_sku_price(
+async def test_set_listing_price_model_visible_fields_are_exactly_store_sku_price(
     product_application,
 ) -> None:
-    """update_price 的 Input Schema 恰暴露 store_id/sku/target_price 三字段。"""
-    input_schema = UPDATE_PRICE_DEFINITION.input_json_schema
+    """set_listing_price 只暴露业务引用、SKU 与目标价。"""
+    input_schema = SET_LISTING_PRICE_DEFINITION.input_json_schema
     properties = input_schema.get("properties")
     assert isinstance(properties, dict)
-    assert set(properties) == {"store_id", "sku", "target_price"}
-    assert set(input_schema.get("required", [])) == {"store_id", "sku", "target_price"}
+    assert set(properties) == {"store_ref", "sku", "target_price"}
+    assert set(input_schema.get("required", [])) == {"store_ref", "sku", "target_price"}
 
     # 服务端补全字段绝不进入模型可见输入;输出回执只携带观测结果。
-    output_properties = UPDATE_PRICE_DEFINITION.output_json_schema.get("properties")
+    output_properties = SET_LISTING_PRICE_DEFINITION.output_json_schema.get("properties")
     assert isinstance(output_properties, dict)
     assert not ({"currency", "operation_id", "expected_version"} & set(properties))
-    assert UPDATE_PRICE_DEFINITION.effect == ToolEffect.WRITE
+    assert SET_LISTING_PRICE_DEFINITION.effect == ToolEffect.WRITE
 
 
 async def test_agent_prompt_and_skill_do_not_leak_policy_numbers(
@@ -179,7 +237,7 @@ def test_write_task_instructions_continue_after_reading() -> None:
     """用户要求写入时，读取和比较只是前置步骤，不是任务终点。"""
     for text in (PRODUCT_AGENT_PROMPT, PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS):
         assert "读取或比较不是任务终点" in text
-        assert "update_price" in text
+        assert "set_listing_price" in text
 
 
 def test_write_task_instructions_preserve_user_business_identifiers() -> None:
@@ -191,16 +249,14 @@ def test_write_task_instructions_preserve_user_business_identifiers() -> None:
 
 
 def test_tool_input_schema_describes_authoritative_argument_sources() -> None:
-    update_properties = UPDATE_PRICE_DEFINITION.input_json_schema["properties"]
-    assert "用户当前消息" in update_properties["store_id"]["description"]
-    assert "内部 ID" in update_properties["store_id"]["description"]
+    update_properties = SET_LISTING_PRICE_DEFINITION.input_json_schema["properties"]
+    assert "用户当前消息" in update_properties["store_ref"]["description"]
+    assert "内部 ID" in update_properties["store_ref"]["description"]
     assert "用户当前消息" in update_properties["sku"]["description"]
     assert "计算" in update_properties["target_price"]["description"]
 
-    snapshot_properties = GET_PRODUCT_SNAPSHOT_DEFINITION.input_json_schema["properties"]
-    assert "用户" in snapshot_properties["store_id"]["description"]
-    compare_properties = COMPARE_LISTING_PRICES_DEFINITION.input_json_schema["properties"]
-    assert "候选店铺" in compare_properties["store_ids"]["description"]
+    listing_properties = GET_LISTING_DEFINITION.input_json_schema["properties"]
+    assert "店铺" in listing_properties["store_ref"]["description"]
 
 
 async def test_product_skill_is_loaded_only_after_model_requests_it(
@@ -255,9 +311,9 @@ async def test_explicit_store_alias_is_normalized_before_read_tool_execution(
             ],
             [
                 ToolCallCompleted(
-                    call_id="snapshot-alias",
-                    name=GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
-                    arguments={"store_id": "淘宝旗舰店", "sku": "SKU-001"},
+                    call_id="listing-alias",
+                    name=GET_LISTING_DEFINITION.stable_key,
+                    arguments={"store_ref": "淘宝旗舰店", "sku": "SKU-001"},
                 ),
                 BackendCompleted(finish_reason="tool_calls"),
             ],
@@ -276,7 +332,7 @@ async def test_explicit_store_alias_is_normalized_before_read_tool_execution(
         message
         for message in backend.requests[2].messages
         if message.role == "tool"
-        and message.name == GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key
+        and message.name == GET_LISTING_DEFINITION.stable_key
     )
-    assert str(product_application.seed_ids.store_id) in read_result.content
+    assert str(product_application.seed_ids.store_id) not in read_result.content
     assert "SKU-001" in read_result.content

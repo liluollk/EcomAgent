@@ -15,7 +15,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -25,7 +25,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from agents.product_operations.agent import (
     AGENT_KEY,
     AGENT_VERSION,
+    LEGACY_AGENT_KEY,
+    LEGACY_AGENT_VERSION,
+    LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION,
     PRODUCT_AGENT_DEFINITION,
+)
+from agents.product_operations.catalog.tools import SEARCH_PRODUCTS_DEFINITION
+from agents.product_operations.inventory.tools import (
+    ADJUST_INVENTORY_QUANTITY_DEFINITION,
+    GET_INVENTORY_LEVEL_DEFINITION,
+)
+from agents.product_operations.listing.tools import (
+    GET_LISTING_DEFINITION,
+    PUBLISH_LISTING_DEFINITION,
+    UNPUBLISH_LISTING_DEFINITION,
 )
 from agents.product_operations.policy.models import PricePolicyConfig
 from agents.product_operations.pricing.configuration import (
@@ -38,15 +51,25 @@ from agents.product_operations.pricing.configuration import (
     parse_pricing_policy_config,
     pricing_policy_config_hash,
 )
+from agents.product_operations.pricing.tools import (
+    COMPARE_LISTING_PRICES_DEFINITION,
+    SET_LISTING_PRICE_DEFINITION,
+)
 from agents.product_operations.skill import (
+    LEGACY_PRODUCT_MAINTENANCE_SKILL,
+    LEGACY_SKILL_VERSION,
     PRODUCT_MAINTENANCE_SKILL,
     SKILL_KEY,
     SKILL_VERSION,
 )
 from agents.product_operations.tools.definitions import (
-    COMPARE_LISTING_PRICES_DEFINITION,
-    GET_PRODUCT_SNAPSHOT_DEFINITION,
-    SEARCH_PRODUCTS_DEFINITION,
+    COMPARE_LISTING_PRICES_DEFINITION as LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    GET_PRODUCT_SNAPSHOT_DEFINITION as LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    SEARCH_PRODUCTS_DEFINITION as LEGACY_SEARCH_PRODUCTS_DEFINITION,
 )
 from agents.product_operations.tools.update_price import UPDATE_PRICE_DEFINITION
 from runtime.capabilities.skill_activation import (
@@ -111,6 +134,11 @@ class ProductOperationsCapabilities:
     model_config_version_id: uuid.UUID
     pricing_policy_version_id: uuid.UUID
     pricing_policy_config_hash: str
+    compatibility_agent_version_ids: tuple[uuid.UUID, ...] = ()
+    compatibility_skill_version_ids: tuple[uuid.UUID, ...] = ()
+    compatibility_tool_version_ids: Mapping[str, tuple[uuid.UUID, ...]] = field(
+        default_factory=dict
+    )
 
     def as_ids(self) -> dict[str, Any]:
         """兼容既有字典式访问(测试断言与清理使用)。"""
@@ -124,18 +152,54 @@ class ProductOperationsCapabilities:
             "model_config_version_id": self.model_config_version_id,
             "pricing_policy_version_id": self.pricing_policy_version_id,
             "pricing_policy_config_hash": self.pricing_policy_config_hash,
+            "compatibility_agent_version_ids": list(
+                self.compatibility_agent_version_ids
+            ),
+            "compatibility_skill_version_ids": list(
+                self.compatibility_skill_version_ids
+            ),
+            "compatibility_tool_version_ids": {
+                key: list(version_ids)
+                for key, version_ids in self.compatibility_tool_version_ids.items()
+            },
         }
 
 
 def product_tool_definitions() -> tuple[tuple[str, Any], ...]:
-    """商品 Tool 与 Runtime 内置 Tool 的确定性注册序列。"""
+    """新 Run 使用的 P1 Tool 与 Runtime 内置 Tool 确定性注册序列。"""
     return (
         (LOAD_SKILL_KEY, LOAD_SKILL_DEFINITION),
         (SEARCH_PRODUCTS_DEFINITION.stable_key, SEARCH_PRODUCTS_DEFINITION),
-        (GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key, GET_PRODUCT_SNAPSHOT_DEFINITION),
+        (GET_LISTING_DEFINITION.stable_key, GET_LISTING_DEFINITION),
         (
             COMPARE_LISTING_PRICES_DEFINITION.stable_key,
             COMPARE_LISTING_PRICES_DEFINITION,
+        ),
+        (SET_LISTING_PRICE_DEFINITION.stable_key, SET_LISTING_PRICE_DEFINITION),
+        (GET_INVENTORY_LEVEL_DEFINITION.stable_key, GET_INVENTORY_LEVEL_DEFINITION),
+        (
+            ADJUST_INVENTORY_QUANTITY_DEFINITION.stable_key,
+            ADJUST_INVENTORY_QUANTITY_DEFINITION,
+        ),
+        (PUBLISH_LISTING_DEFINITION.stable_key, PUBLISH_LISTING_DEFINITION),
+        (UNPUBLISH_LISTING_DEFINITION.stable_key, UNPUBLISH_LISTING_DEFINITION),
+    )
+
+
+def legacy_product_tool_definitions() -> tuple[tuple[str, Any], ...]:
+    """仅供历史 Run 恢复的第一版业务 Tool 版本。"""
+    return (
+        (
+            LEGACY_SEARCH_PRODUCTS_DEFINITION.stable_key,
+            LEGACY_SEARCH_PRODUCTS_DEFINITION,
+        ),
+        (
+            LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
+            LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION,
+        ),
+        (
+            LEGACY_COMPARE_LISTING_PRICES_DEFINITION.stable_key,
+            LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
         ),
         (UPDATE_PRICE_DEFINITION.stable_key, UPDATE_PRICE_DEFINITION),
     )
@@ -173,9 +237,36 @@ class ProductOperationsProvisioner:
         session = self._session_factory()
         try:
             async with session.begin():
-                agent_id, agent_version_id = await self._provision_agent(session)
-                skill_id, skill_version_id = await self._provision_skills(session)
-                tool_definition_ids, tool_version_ids = await self._provision_tools(session)
+                agent_id, agent_version_id = await self._provision_agent(
+                    session,
+                    stable_key=AGENT_KEY,
+                    version=AGENT_VERSION,
+                    name="ProductOperationsAgent",
+                    definition=PRODUCT_AGENT_DEFINITION,
+                )
+                _, legacy_agent_version_id = await self._provision_agent(
+                    session,
+                    stable_key=LEGACY_AGENT_KEY,
+                    version=LEGACY_AGENT_VERSION,
+                    name="ProductMaintenanceAgent",
+                    definition=LEGACY_PRODUCT_MAINTENANCE_AGENT_DEFINITION,
+                )
+                skill_id, skill_version_id = await self._provision_skill(
+                    session,
+                    version=SKILL_VERSION,
+                    definition=PRODUCT_MAINTENANCE_SKILL,
+                )
+                _, legacy_skill_version_id = await self._provision_skill(
+                    session,
+                    version=LEGACY_SKILL_VERSION,
+                    definition=LEGACY_PRODUCT_MAINTENANCE_SKILL,
+                )
+                tool_definition_ids, tool_version_ids = await self._provision_tools(
+                    session, definitions=product_tool_definitions()
+                )
+                _, legacy_tool_version_ids = await self._provision_tools(
+                    session, definitions=legacy_product_tool_definitions()
+                )
                 model_config_version_id = await self._provision_model(
                     session, workspace_id=workspace_id, spec=model
                 )
@@ -192,36 +283,46 @@ class ProductOperationsProvisioner:
                 model_config_version_id=model_config_version_id,
                 pricing_policy_version_id=published_policy.version_id,
                 pricing_policy_config_hash=published_policy.config_hash,
+                compatibility_agent_version_ids=(legacy_agent_version_id,),
+                compatibility_skill_version_ids=(legacy_skill_version_id,),
+                compatibility_tool_version_ids={
+                    key: (version_id,)
+                    for key, version_id in legacy_tool_version_ids.items()
+                },
             )
         finally:
             await session.close()
 
     async def _provision_agent(
-        self, session: AsyncSession
+        self,
+        session: AsyncSession,
+        *,
+        stable_key: str,
+        version: int,
+        name: str,
+        definition: Any,
     ) -> tuple[uuid.UUID, uuid.UUID]:
         agent = (
-            await session.scalars(select(Agent).where(Agent.stable_key == AGENT_KEY))
+            await session.scalars(select(Agent).where(Agent.stable_key == stable_key))
         ).one_or_none()
         if agent is None:
-            agent = Agent(
-                id=uuid.uuid4(), stable_key=AGENT_KEY, name="ProductMaintenanceAgent"
-            )
+            agent = Agent(id=uuid.uuid4(), stable_key=stable_key, name=name)
             session.add(agent)
             await session.flush()
         agent_version = (
             await session.scalars(
                 select(AgentVersion).where(
                     AgentVersion.agent_id == agent.id,
-                    AgentVersion.version == AGENT_VERSION,
+                    AgentVersion.version == version,
                 )
             )
         ).one_or_none()
         if agent_version is None:
-            definition_json = PRODUCT_AGENT_DEFINITION.model_dump(mode="json")
+            definition_json = definition.model_dump(mode="json")
             agent_version = AgentVersion(
                 id=uuid.uuid4(),
                 agent_id=agent.id,
-                version=AGENT_VERSION,
+                version=version,
                 status=ConfigVersionStatus.PUBLISHED,
                 definition_json=definition_json,
                 definition_hash=_json_hash(definition_json),
@@ -236,8 +337,12 @@ class ProductOperationsProvisioner:
             agent_version.published_at = datetime.now(UTC)
         return agent.id, agent_version.id
 
-    async def _provision_skills(
-        self, session: AsyncSession
+    async def _provision_skill(
+        self,
+        session: AsyncSession,
+        *,
+        version: int,
+        definition: Any,
     ) -> tuple[uuid.UUID, uuid.UUID]:
         skill = (
             await session.scalars(select(Skill).where(Skill.stable_key == SKILL_KEY))
@@ -248,7 +353,7 @@ class ProductOperationsProvisioner:
                 scope=ConfigScope.GLOBAL,
                 workspace_id=None,
                 stable_key=SKILL_KEY,
-                name=PRODUCT_MAINTENANCE_SKILL.name or SKILL_KEY,
+                name=definition.name or SKILL_KEY,
             )
             session.add(skill)
             await session.flush()
@@ -256,17 +361,17 @@ class ProductOperationsProvisioner:
             await session.scalars(
                 select(SkillVersion).where(
                     SkillVersion.skill_id == skill.id,
-                    SkillVersion.version == SKILL_VERSION,
+                    SkillVersion.version == version,
                 )
             )
         ).one_or_none()
         if skill_version is None:
-            content_json = PRODUCT_MAINTENANCE_SKILL.model_dump(mode="json")
+            content_json = definition.model_dump(mode="json")
             skill_version = SkillVersion(
                 id=uuid.uuid4(),
                 workspace_id=None,
                 skill_id=skill.id,
-                version=SKILL_VERSION,
+                version=version,
                 content_json=content_json,
                 content_hash=_json_hash(content_json),
             )
@@ -275,11 +380,14 @@ class ProductOperationsProvisioner:
         return skill.id, skill_version.id
 
     async def _provision_tools(
-        self, session: AsyncSession
+        self,
+        session: AsyncSession,
+        *,
+        definitions: tuple[tuple[str, Any], ...],
     ) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID]]:
         tool_definition_ids: dict[str, uuid.UUID] = {}
         tool_version_ids: dict[str, uuid.UUID] = {}
-        for key, definition in product_tool_definitions():
+        for key, definition in definitions:
             definition_row = (
                 await session.scalars(
                     select(ToolDefinitionRow).where(
@@ -547,6 +655,20 @@ async def require_published_capabilities(
                 CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
                 f"AgentVersion {capabilities.agent_version_id} 未发布",
             )
+        for version_id in capabilities.compatibility_agent_version_ids:
+            compatibility_agent = (
+                await session.scalars(
+                    select(AgentVersion).where(AgentVersion.id == version_id)
+                )
+            ).one_or_none()
+            if (
+                compatibility_agent is None
+                or compatibility_agent.status is not ConfigVersionStatus.PUBLISHED
+            ):
+                raise AssemblyError(
+                    CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
+                    f"兼容 AgentVersion {version_id} 未发布",
+                )
         skill_version = (
             await session.scalars(
                 select(SkillVersion).where(
@@ -559,6 +681,17 @@ async def require_published_capabilities(
                 CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
                 f"SkillVersion {capabilities.skill_version_id} 不存在",
             )
+        for version_id in capabilities.compatibility_skill_version_ids:
+            compatibility_skill = (
+                await session.scalars(
+                    select(SkillVersion).where(SkillVersion.id == version_id)
+                )
+            ).one_or_none()
+            if compatibility_skill is None:
+                raise AssemblyError(
+                    CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
+                    f"兼容 SkillVersion {version_id} 不存在",
+                )
         for key, version_id in capabilities.tool_version_ids.items():
             tool_version = (
                 await session.scalars(
@@ -570,6 +703,18 @@ async def require_published_capabilities(
                     CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
                     f"Tool {key} 的版本 {version_id} 不存在",
                 )
+        for key, version_ids in capabilities.compatibility_tool_version_ids.items():
+            for version_id in version_ids:
+                tool_version = (
+                    await session.scalars(
+                        select(ToolVersionRow).where(ToolVersionRow.id == version_id)
+                    )
+                ).one_or_none()
+                if tool_version is None:
+                    raise AssemblyError(
+                        CAPABILITY_SNAPSHOT_NOT_PUBLISHED,
+                        f"兼容 Tool {key} 的版本 {version_id} 不存在",
+                    )
         model_config_version = (
             await session.scalars(
                 select(ModelConfigVersion).where(
@@ -602,6 +747,7 @@ __all__ = [
     "ModelConnectionProvisioningSpec",
     "ProductOperationsCapabilities",
     "ProductOperationsProvisioner",
+    "legacy_product_tool_definitions",
     "load_published_pricing_policy",
     "product_tool_definitions",
     "require_published_capabilities",
