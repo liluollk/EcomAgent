@@ -796,6 +796,8 @@ class AgentLoop:
             expires_at=self._clock() + self._confirmation_ttl,
             operation_id=operation_id,
             tool_schema_version=pin.version,
+            # 策略修订号进确认指纹:规则更新后旧确认不再匹配,必须重新确认。
+            policy_version=spec.policy_version if spec is not None else None,
         )
         await self._mark_tool_call(call, ToolCallStatus.WAITING_CONFIRMATION)
         await self._run_service.transition_run(

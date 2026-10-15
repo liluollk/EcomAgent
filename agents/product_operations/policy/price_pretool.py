@@ -70,7 +70,12 @@ async def resolve_listing(
 
 
 class PricePreToolPolicy:
-    """``update_price`` 的业务策略实现(实现 Runtime ``BusinessPolicy`` 协议)。"""
+    """``update_price`` 的业务策略实现(实现 Runtime ``BusinessPolicy`` 协议)。
+
+    ``policy_revision`` 是本次装配读到的**已发布策略修订号**。它随允许决策交给
+    Runtime,写进 ``ConfirmationSpec.policy_version``,于是确认指纹绑定到具体规则
+    版本:策略更新后旧确认不再匹配,必须重新确认。
+    """
 
     def __init__(
         self,
@@ -79,11 +84,13 @@ class PricePreToolPolicy:
         config: PricePolicyConfig,
         actor: ActorContext,
         tool_call_id: uuid.UUID,
+        policy_revision: int | None = None,
     ) -> None:
         self._session = session
         self._config = config
         self._actor = actor
         self._tool_call_id = tool_call_id
+        self._policy_revision = policy_revision
 
     async def evaluate(
         self,
@@ -132,7 +139,8 @@ class PricePreToolPolicy:
             update={
                 "resource_versions": {
                     listing_resource_key(listing.id): listing.version
-                }
+                },
+                "policy_revision": self._policy_revision,
             }
         )
 
@@ -209,6 +217,7 @@ class PricePreToolPolicy:
             policy_version=self._config.policy_version,
             listing_version=None,
             expected_new_price=expected_new_price,
+            policy_revision=self._policy_revision,
         )
 
 

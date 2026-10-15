@@ -315,7 +315,11 @@ class IsolatedEnvironment:
         # 幂等发布能力版本(全局按 stable_key 复用);装配只消费已发布快照。
         capabilities = await ProductOperationsProvisioner(
             lambda: AsyncSession(engine, expire_on_commit=False)
-        ).provision(workspace_id=workspace_id, model=EVAL_MODEL_SPEC)
+        ).provision(
+            workspace_id=workspace_id,
+            model=EVAL_MODEL_SPEC,
+            pricing_policy=EVAL_PRICE_CONFIG,
+        )
         application = await build_product_application(
             engine,
             capabilities=capabilities,
@@ -323,7 +327,6 @@ class IsolatedEnvironment:
             workspace_id=workspace_id,
             actor_id=actor_id,
             membership_id=membership_id,
-            price_config=EVAL_PRICE_CONFIG,
             worker_id=f"eval-worker-{uuid.uuid4().hex[:8]}",
         )
         if not isinstance(application.adapter, MockCommerceAdapter):

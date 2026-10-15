@@ -2251,7 +2251,7 @@ Expected: PASS，提交成功。
 - Modify: `tests/runtime/execution/test_pretool_pipeline.py`
 - Modify: `tests/runtime/orchestration/test_agent_loop.py`
 
-- [ ] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
+- [x] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
 
 ```python
 async def test_build_rejects_missing_published_pricing_policy(
@@ -2268,7 +2268,7 @@ async def test_build_rejects_missing_published_pricing_policy(
         )
 ```
 
-- [ ] **Step 2: 实现价格策略发布和加载**
+- [x] **Step 2: 实现价格策略发布和加载**
 
 stable key 固定为 `product-pricing`。Provisioner 接收显式 `PricePolicyConfig`，把
 Decimal 规范化成字符串后发布到已有 `BusinessPolicy` / `BusinessPolicyVersion`；相同
@@ -2289,7 +2289,7 @@ class PublishedPricingPolicy:
 `PUBLISHED` 状态、`config_hash` 与 Pydantic 配置形状；任一不一致都以
 `PRICING_POLICY_NOT_PUBLISHED` / `PRICING_POLICY_CONFIG_INVALID` fail closed。
 
-- [ ] **Step 3: Run 固定 PolicySnapshot**
+- [x] **Step 3: Run 固定 PolicySnapshot**
 
 补齐当前存在但尚未接线的 `RunPolicySnapshot` 持久化能力：
 
@@ -2306,7 +2306,7 @@ class PublishedPricingPolicy:
 `business_policy_versions` 已存在；如果实现者发现模型与数据库不一致，应先验证现有
 Alembic 历史，禁止再建同义表。
 
-- [ ] **Step 4: 把策略修订绑定到确认与写前状态**
+- [x] **Step 4: 把策略修订绑定到确认与写前状态**
 
 `RunPolicySnapshot` 只解决审计，不会自动进入确认指纹。为避免“策略更新后仍接受旧确认”：
 
@@ -2319,7 +2319,7 @@ Alembic 历史，禁止再建同义表。
   `policy_config_hash`，使 Operation 能解释写前究竟校验了哪份规则；
 - Runtime 只搬运 revision，不理解价格字段或 `product-pricing` stable key。
 
-- [ ] **Step 5: 删除正式装配路径中的 `price_config` 常量注入**
+- [x] **Step 5: 删除正式装配路径中的 `price_config` 常量注入**
 
 测试/Eval/E2E 通过显式 Provisioner 参数创建策略版本；所有现有调用点
 （`tests/agents/product_operations/conftest.py`、`eval/fixtures.py`、
@@ -2330,7 +2330,7 @@ Alembic 历史，禁止再建同义表。
 `PublishedPricingPolicy` 注入 PreTool 与 Handler。不得从 Prompt、环境变量或模块常量
 回退配置。
 
-- [ ] **Step 6: 运行配置与 Runtime 快照测试并提交**
+- [x] **Step 6: 运行配置与 Runtime 快照测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/composition/test_product_operations_provisioning.py tests/runtime/capabilities/test_assembly.py tests/runtime/execution/test_pretool_pipeline.py tests/runtime/orchestration/test_agent_loop.py tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py -q
@@ -2340,6 +2340,50 @@ git commit -m "feat: publish workspace pricing policy configuration"
 
 Expected: PASS；装配缺少/错 Workspace/非发布/坏 hash 的策略均失败闭合；Run 的
 PolicySnapshot 可查询；旧确认在策略 revision 变化后不可复用；提交成功。
+
+**实际实现**（与计划的差异均已记录）：
+
+1. **发布载荷修复了一个真实缺陷**：`PricePolicyConfig` 不做 Decimal 尺度归一，
+   `Decimal("50.00") == Decimal("50.000")` 为真但 `str()` 不同——直接落库会让
+   "数值相同的配置"算出不同 hash，幂等发布失效。`canonical_pricing_policy_payload`
+   经 `_canonical_decimal_text`（`normalize()` + 定点格式）渲染成尺度无关文本。
+   RED 证据：把归一化临时退回 `str(value)`，`test_configuration.py` 的尺度无关
+   断言变红；恢复后通过。
+2. **policy revision 进确认指纹**：`ConfirmationService.verify()` 把调用方传入的
+   **当前** revision 与存储指纹重算比对（`_Unset` 哨兵区分"未提供"与"显式 None"），
+   revision 变化即 `CONFIRMATION_STALE`；`AcceptedConfirmationLookup` 协议与组合根
+   实现同步扩展 `policy_version` 参数；`PreToolContext` 保留允许决策的 revision 供
+   确认阶段复用。RED 证据：临时让 verify 忽略当前 revision，新增漂移测试变红。
+3. **测试改动**：`tests/runtime/orchestration/test_agent_loop.py`、
+   `agents/product_operations/pricing/policy.py`、`policy/models.py` 无需改动
+   （revision 经既有 `ConfirmationSpec` 透传，`PricePolicyConfig` 本身不动）；
+   新增 `tests/agents/product_operations/pricing/test_configuration.py`、
+   `test_assembly.py` 的 `test_run_pins_published_policy_versions`、组合层 6 个
+   策略发布/加载用例，以及管线层 revision 透传用例。
+4. **修复合并运行的跨套件污染**：组合层 provisioning 会提交全局能力目录行
+   （`agents.stable_key` 全局唯一）且不回收，capabilities 套件随后种子同名行即撞
+   `uq_agents_stable_key`。`tests/runtime/capabilities/conftest.py` 的
+   `capability_catalog` 改为插入前先删同名残留（agent/skill/tool 及其版本行），
+   删除在本 Session 事务内、随 rollback 还原。RED 证据：修复前三测试在合并运行
+   ERROR（`UniqueViolationError`），修复后同组合全绿。
+5. `.gitignore` 补 `.workbuddy/`、`docs/审计/`、`reports/`（协议规定永不入库，
+   此前未 ignore 导致 ruff 扫到备份目录）。
+
+**实际结果**：Task 10 门禁
+`tests/agents/product_operations + tests/composition/test_product_operations_provisioning.py
++ tests/runtime/capabilities/test_assembly.py + tests/runtime/execution/test_pretool_pipeline.py
++ tests/runtime/orchestration/test_agent_loop.py + tests/runtime/interaction
++ tests/apps/api/test_e2e_product_flow.py + tests/apps/worker/test_worker_lifecycle.py`
+→ **423 passed**；`ruff check .` 通过；`mypy runtime agents adapters apps eval
+composition` → **249 source files 零错误**。
+
+> 执行中断说明：Task 10 门禁通过前本机 `.git` 曾因误删进入回收站而损坏
+> （packfile + refs 丢失）。已从回收站恢复全部对象（SHA1 逐一校验），两条中断的
+> 提交链用 `git replace --graft` 重新接通（`62aa521`→`f1e3427`、`b491561`→`564b458`，
+> 完全可逆）；3 个 tip 期被改文件的 blob 中 2 个按编辑记录逐字节重建并通过 SHA
+> 校验，`tests/agents/product_operations/conftest.py` 的 tip 版 blob 无法唯一复原
+> （不影响任何后续提交与新树，reflog 已归档至 `.workbuddy/backup-20261014/`）。
+> 另：门禁期间 Postgres 容器未随会话恢复，已重启并等待 healthy 后重跑。
 
 ---
 
