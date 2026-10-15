@@ -170,7 +170,10 @@ def test_scripted_model_endpoint_is_confined_to_e2e_entrypoints() -> None:
     offenders: list[str] = []
     for path in Path(".").rglob("*.py"):
         parts = path.parts
-        if any(part in {"tests", "eval", ".venv", "node_modules"} for part in parts):
+        if any(
+            part in {"tests", "eval", ".venv", ".workbuddy", "node_modules"}
+            for part in parts
+        ):
             continue
         if path.as_posix() in _SCRIPTED_ENDPOINT_ALLOWLIST:
             continue
@@ -186,3 +189,12 @@ def test_provisioner_stays_out_of_the_execution_kernel() -> None:
     )
     assert "runtime.orchestration" not in text
     assert "tool_executor" not in text
+
+
+def test_product_composition_has_no_domain_dispatch_or_reconcile_command() -> None:
+    """主组合根只连接应用服务，不保留按能力分支或具体平台回查命令。"""
+    text = Path("composition/product_operations.py").read_text(encoding="utf-8")
+    assert "if key == STABLE_KEY" not in text
+    assert "ReconciliationCommand(" not in text
+    assert "class _CommerceGateway" not in text
+    assert "runtime.persistence.models.configuration" not in text

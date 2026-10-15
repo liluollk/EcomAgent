@@ -82,7 +82,7 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 把 store-kappa 的 SKU-8111 售价改成 119.90 元。}]
   expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8111, price: '119.90', currency: CNY, status: PUBLISHED}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8111}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8111}]
 
 - id: core-write-002
   category: direct_write
@@ -92,7 +92,7 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 将 store-lambda 的 SKU-8121 更新为 68 元，币种和上架状态保持原样。}]
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8121, price: '68.00', currency: CNY, status: PUBLISHED}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8121}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8121}]
 
 - id: core-write-003
   category: direct_write
@@ -109,7 +109,7 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8131, price: '199.99'}
     - {store_id: store-mu, sku: SKU-8132, price: '188.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8131}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8131}]
 
 - id: core-write-004
   category: direct_write
@@ -126,7 +126,7 @@ scenarios:
     - {store_id: store-nu, sku: SKU-8141, price: '99.00'}
     - {store_id: store-xi, sku: SKU-8141, price: '101.50'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8141}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8141}]
 
 - id: core-write-005
   category: direct_write
@@ -136,7 +136,7 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: store-omicron 里 SKU-8151 的新售价是 52.35 元，请执行。}]
   expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8151, price: '52.35'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8151}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8151}]
 
 - id: core-write-006
   category: direct_write
@@ -153,7 +153,7 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8161, price: '289.00'}
     - {store_id: store-lambda, sku: SKU-8162, price: '320.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8161}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8161}]
 
 - id: core-relative-001
   category: relative_change
@@ -163,8 +163,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 查询 store-kappa 的 SKU-8211 现价，在现价基础上增加 10 元并执行。}]
   expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8211, price: '130.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8211}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8211}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-relative-002
   category: relative_change
@@ -174,8 +174,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 把 store-lambda 的 SKU-8221 按当前价下调 12.50 元。}]
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8221, price: '74.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8221}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8221}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-relative-003
   category: relative_change
@@ -185,8 +185,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 先查 store-mu/SKU-8231 的售价，然后按现价上浮 10% 改价。}]
   expected_final_state: {listings: [{store_id: store-mu, sku: SKU-8231, price: '140.80'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8231}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8231}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-relative-004
   category: relative_change
@@ -196,8 +196,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: store-nu 的 SKU-8241 以当前售价为基准降价 20%。}]
   expected_final_state: {listings: [{store_id: store-nu, sku: SKU-8241, price: '172.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-nu/SKU-8241}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-nu/SKU-8241}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-relative-005
   category: relative_change
@@ -207,8 +207,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 读取 store-xi/SKU-8251 当前价，乘以 1.05 后作为新价格，精确到分。}]
   expected_final_state: {listings: [{store_id: store-xi, sku: SKU-8251, price: '83.90'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8251}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8251}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-relative-006
   category: relative_change
@@ -218,8 +218,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: store-omicron 的 SKU-8261 在现价基础上降一成并执行。}]
   expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8261, price: '135.00'}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8261}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8261}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-multistore-001
   category: multi_store_decision
@@ -236,8 +236,8 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8311, price: '75.00'}
     - {store_id: store-lambda, sku: SKU-8311, price: '75.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8311}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8311}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-multistore-002
   category: multi_store_decision
@@ -254,8 +254,8 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8321, price: '72.00'}
     - {store_id: store-nu, sku: SKU-8321, price: '75.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8321}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8321}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-multistore-003
   category: multi_store_decision
@@ -272,8 +272,8 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8331, price: '105.00'}
     - {store_id: store-omicron, sku: SKU-8331, price: '103.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8331}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8331}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-multistore-004
   category: multi_store_decision
@@ -290,8 +290,8 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8341, price: '180.00'}
     - {store_id: store-lambda, sku: SKU-8341, price: '180.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8341}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8341}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-multistore-005
   category: multi_store_decision
@@ -308,7 +308,7 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8351, price: '72.00'}
     - {store_id: store-nu, sku: SKU-8352, price: '76.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8351}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8351}]
 
 - id: core-multistore-006
   category: multi_store_decision
@@ -325,8 +325,8 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8361, price: '94.00'}
     - {store_id: store-omicron, sku: SKU-8361, price: '95.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8361}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8361}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-composite-001
   category: composite_task
@@ -343,8 +343,8 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8411, price: '122.00'}
     - {store_id: store-kappa, sku: SKU-8412, price: '129.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8412}]
-  tool_order_constraints: [{before: search_products, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8412}]
+  tool_order_constraints: [{before: search_products, after: set_listing_price}]
 
 - id: core-composite-002
   category: composite_task
@@ -354,8 +354,8 @@ scenarios:
   actor: *owner
   messages: [{role: user, content: 读取 store-lambda/SKU-8421 的状态；如果仍在售，就把价格改为 109.00 元。}]
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8421, price: '109.00', status: PUBLISHED}], max_logical_writes: 1}
-  allowed_side_effects: [{tool: update_price, target: store-lambda/SKU-8421}]
-  tool_order_constraints: [{before: get_product_snapshot, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8421}]
+  tool_order_constraints: [{before: get_listing, after: set_listing_price}]
 
 - id: core-composite-003
   category: composite_task
@@ -372,8 +372,8 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8431, price: '80.00'}
     - {store_id: store-nu, sku: SKU-8431, price: '82.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-mu/SKU-8431}]
-  tool_order_constraints: [{before: compare_listing_prices, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8431}]
+  tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
 
 - id: core-composite-004
   category: composite_task
@@ -390,8 +390,8 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8441, price: '59.00'}
     - {store_id: store-omicron, sku: SKU-8441, price: '61.50'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8441}]
-  tool_order_constraints: [{before: search_products, after: update_price}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8441}]
+  tool_order_constraints: [{before: search_products, after: set_listing_price}]
 
 - id: core-multiturn-001
   category: multi_turn
@@ -410,7 +410,7 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8511, price: '118.00'}
     - {store_id: store-lambda, sku: SKU-8512, price: '210.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-kappa/SKU-8511}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8511}]
 
 - id: core-multiturn-002
   category: multi_turn
@@ -429,7 +429,7 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8521, price: '96.00'}
     - {store_id: store-nu, sku: SKU-8521, price: '101.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-nu/SKU-8521}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-nu/SKU-8521}]
 
 - id: core-multiturn-003
   category: multi_turn
@@ -448,7 +448,7 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8531, price: '68.00'}
     - {store_id: store-xi, sku: SKU-8532, price: '72.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-xi/SKU-8532}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8532}]
 
 - id: core-multiturn-004
   category: multi_turn
@@ -467,4 +467,42 @@ scenarios:
     - {store_id: store-omicron, sku: SKU-8541, price: '149.50'}
     - {store_id: store-kappa, sku: SKU-8542, price: '166.00'}
     max_logical_writes: 1
-  allowed_side_effects: [{tool: update_price, target: store-omicron/SKU-8541}]
+  allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8541}]
+
+- id: core-inventory-001
+  category: inventory_adjustment
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-inventory, sku: SKU-8601, price: '88.00', currency: CNY, status: PUBLISHED}
+    inventory_levels:
+    - {store_id: store-inventory, sku: SKU-8601, location_ref: main-warehouse, available_quantity: 20}
+  workspace: *workspace
+  actor: {role: owner, permissions: [product.read, product.inventory.write], store_scope_mode: ALL}
+  messages:
+  - {role: user, content: store-inventory 的 main-warehouse 收货 5 件 SKU-8601，请按 RECEIPT 原因增加库存。}
+  expected_final_state:
+    listings:
+    - {store_id: store-inventory, sku: SKU-8601, price: '88.00', status: PUBLISHED}
+    inventory_levels:
+    - {store_id: store-inventory, sku: SKU-8601, location_ref: main-warehouse, available_quantity: 25}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: adjust_inventory_quantity, target: store-inventory/SKU-8601}]
+  tool_order_constraints: [{before: get_inventory_level, after: adjust_inventory_quantity}]
+
+- id: core-listing-001
+  category: listing_publication
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-listing, sku: SKU-8701, price: '109.00', currency: CNY, status: UNPUBLISHED}
+  workspace: *workspace
+  actor: {role: owner, permissions: [product.read, product.listing.write], store_scope_mode: ALL}
+  messages:
+  - {role: user, content: 请读取 store-listing 的 SKU-8701，确认后将这个 Listing 发布。}
+  expected_final_state:
+    listings:
+    - {store_id: store-listing, sku: SKU-8701, price: '109.00', status: PUBLISHED}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: publish_listing, target: store-listing/SKU-8701}]
+  tool_order_constraints: [{before: get_listing, after: publish_listing}]

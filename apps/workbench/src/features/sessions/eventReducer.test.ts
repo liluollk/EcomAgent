@@ -173,14 +173,14 @@ describe("eventReducer 事件驱动投影(按后端实际 event_kind)", () => {
     const proposed = reduceAgentEvent(
       baseline,
       event(5, "TOOL_CALL_PROPOSED", {
-        payload: { call_id: "call-1", tool_name: "update_price", ordinal: 1 },
+        payload: { call_id: "call-1", tool_name: "set_listing_price", ordinal: 1 },
       }),
     );
     expect(proposed.runs["run-1"].status).toBe("RUNNING");
     expect(proposed.toolCalls["run-1:1"]).toMatchObject({
       runId: "run-1",
       ordinal: 1,
-      toolName: "update_price",
+      toolName: "set_listing_price",
       status: "PROPOSED",
     });
 
@@ -226,7 +226,7 @@ describe("eventReducer 事件驱动投影(按后端实际 event_kind)", () => {
     const proposed = reduceAgentEvent(
       baseline,
       event(5, "TOOL_CALL_PROPOSED", {
-        payload: { call_id: "call-9", tool_name: "update_price", ordinal: 2 },
+        payload: { call_id: "call-9", tool_name: "set_listing_price", ordinal: 2 },
       }),
     );
     expect(proposed.toolCalls["run-1:2"]).toMatchObject({ callId: "call-9", ordinal: 2 });

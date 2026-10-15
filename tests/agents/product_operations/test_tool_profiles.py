@@ -2,7 +2,7 @@
 
 覆盖两条线:
 
-- 参数线:每个 Tool 只归一化自己的字段集合,只读 Tool 的 query/store_ids
+- 参数线:每个 Tool 只归一化自己的字段集合,只读 Tool 的 query/store_refs
   不会被写字段白名单吞掉;
 - 策略/资源线:每个 ToolBinding 声明独立的业务策略与资源解析器,写 Tool
   漏配策略在启动期确定性失败。
@@ -19,19 +19,19 @@ from agents.product_operations.tools.definitions import (
 from runtime.backend.protocol import BackendCompleted, TextDelta, ToolCallCompleted
 
 
-async def test_compare_listing_prices_normalization_preserves_sku_and_store_ids(
+async def test_compare_listing_prices_normalization_preserves_sku_and_store_refs(
     product_application,
 ) -> None:
-    """经真实 Runtime 路径:compare_listing_prices 的 sku/store_ids 不丢失。"""
+    """经真实 Runtime 路径:compare_listing_prices 的 sku/store_refs 不丢失。"""
     backend = product_application.scripted_backend
-    store_id = str(product_application.seed_ids.store_id)
+    store_ref = "淘宝旗舰店"
     backend.set_rounds(
         [
             [
                 ToolCallCompleted(
                     call_id="compare-1",
                     name=COMPARE_LISTING_PRICES_DEFINITION.stable_key,
-                    arguments={"sku": "SKU-001", "store_ids": [store_id]},
+                    arguments={"sku": "SKU-001", "store_refs": [store_ref]},
                 ),
                 BackendCompleted(finish_reason="tool_calls"),
             ],
@@ -48,5 +48,5 @@ async def test_compare_listing_prices_normalization_preserves_sku_and_store_ids(
     assert snapshot is not None
     assert snapshot.normalized_arguments == {
         "sku": "SKU-001",
-        "store_ids": [store_id],
+        "store_refs": [store_ref],
     }

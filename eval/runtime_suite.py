@@ -965,14 +965,14 @@ async def _case_tool_delta_never_executes(engine: AsyncEngine) -> None:
 
 
 class _PriceScriptBackend:
-    """确定性脚本模型:首轮发低于价格下限的 update_price,结果回填后收尾。
+    """确定性脚本模型:首轮发低于价格下限的 set_listing_price,结果回填后收尾。
 
-    与 apps 层 E2E 脚本同形(eval 不 import apps):``update_price`` 携带
+    与 apps 层 E2E 脚本同形(eval 不 import apps):``set_listing_price`` 携带
     ``sku``/``target_price``,缺店铺由 PreToolUse 管线转成 Input Request。
     """
 
     def __init__(
-        self, *, sku: str, target_price: str, tool_key: str = "update_price"
+        self, *, sku: str, target_price: str, tool_key: str = "set_listing_price"
     ) -> None:
         self._sku = sku
         self._target_price = target_price
@@ -1031,7 +1031,7 @@ def _price_scenario(case_id: str) -> Scenario:
                 "max_logical_writes": 0,
             },
             "forbidden_side_effects": [
-                {"tool": "update_price", "target": "store-1/SKU-001"},
+                {"tool": "set_listing_price", "target": "store-1/SKU-001"},
             ],
         }
     )
@@ -1050,16 +1050,15 @@ async def _case_input_resume_revalidates(engine: AsyncEngine) -> None:
             raise CaseFailure(
                 f"missing store must produce WAITING_INPUT, got {view.status.value}"
             )
-        store_id = environment.single_store_id
-        if store_id is None:
+        if environment.single_store_id is None:
             raise CaseFailure("seeded store vanished before answering the input request")
         resumed = await environment.application.answer(
-            view.pending_input_id, {"store_id": str(store_id)}
+            view.pending_input_id, {"store_ref": "store-1"}
         )
         tool_call = await _single_tool_call(engine, environment.workspace_id, view.run_id)
         merged = dict(tool_call.normalized_arguments or {})
-        if merged.get("store_id") != str(store_id):
-            raise CaseFailure("answered store_id was not merged onto the pending arguments")
+        if merged.get("store_ref") != "store-1":
+            raise CaseFailure("answered store_ref was not merged onto the pending arguments")
         if "target_price" not in merged:
             raise CaseFailure("pending arguments were not preserved across the resume")
         if resumed.status is not RunStatus.COMPLETED:
@@ -1515,7 +1514,7 @@ async def _case_context_summary_preserves_protected_facts(engine: AsyncEngine) -
         ),
         pending_confirmation=PendingConfirmationView(
             fingerprint=_PROTECTED_FINGERPRINT,
-            tool_name="update_price",
+            tool_name="set_listing_price",
             argument_summary="update price for SKU A-1",
         ),
         current_user_message=ConversationMessage(

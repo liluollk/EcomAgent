@@ -2147,11 +2147,29 @@ git commit -m "test: lock idempotency capability namespaces"
 - Modify: `adapters/commerce/rest_adapter.py`
 - Modify: `adapters/commerce/__init__.py`
 
-- [ ] **Step 1: 提取共享契约测试**
+- [x] **Step 1: 提取共享契约测试**
 
 `contracts.py` 提供三个可复用协程：`assert_price_gateway_contract`、`assert_inventory_gateway_contract`、`assert_listing_gateway_contract`。每个协程接收 Gateway 和对应 Fixture，并顺序执行成功写入、旧版本冲突、同 `operation_id` 重复提交、写后丢响应、按该 `operation_id` 回查五个断言；每一步都断言最终资源状态和逻辑写次数。
 
-- [ ] **Step 2: Mock Adapter 跑三套契约**
+**实际实现**：契约参数化为 `PriceContractEnv` / `InventoryContractEnv` /
+`ListingContractEnv`（frozen dataclass）。它们把"命令怎么构造、权威状态怎么读、
+逻辑写怎么数、响应怎么丢"全部留给测试侧，因此契约本身不 import 任何具体 Adapter。
+三个协程共用同一套五步顺序，每步同时断言**回执**、**平台权威状态**与**逻辑写次数**。
+
+两处与原始描述不同的实现决定（均为让契约本身站得住）：
+
+1. **写前基线改为显式读取**：版本（以及库存的 `quantity_before`）不再由 Fixture 硬编码，
+   而由协程开头的一次 `read_state()` 确定，再据以推导后续版本断言。硬编码版本会让
+   "上一套契约推进了版本"悄悄污染下一套的基线。
+2. **重复提交必须是同一条已冻结命令**：库存的业务意图指纹包含
+   `expected_quantity_after`（由写前 `quantity_before` 推导），所以"重读后再提交"会
+   改变意图、被判 `IDEMPOTENCY_KEY_REUSED`。协程改为重放**同一条**命令，与两阶段
+   协议"重试 `execute_prepared`"的真实链路一致。
+3. 刊登契约的两个方向**交替**使用（初始状态 → 另一侧 → 回到初始状态）：同目标写入是
+   幂等 no-op 且不推进版本，只有真正的状态迁移才能被"版本 +1 / 零逻辑写"观察到。
+   步骤 2 的冲突方向必须回到初始状态，否则会先撞上"同目标 no-op"而不是 CAS。
+
+- [x] **Step 2: Mock Adapter 跑三套契约**
 
 ```python
 async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixture) -> None:
@@ -2160,11 +2178,37 @@ async def test_mock_adapter_satisfies_all_supported_contracts(mock_adapter, fixt
     await assert_listing_gateway_contract(mock_adapter, fixture.listing)
 ```
 
-- [ ] **Step 3: REST Adapter 明确能力范围**
+**实际实现**：`test_mock_adapter_satisfies_all_supported_contracts` 用一个 Adapter
+实例依次跑完三套契约，但**每个能力使用独立种子**（`product_seeder.seed()` 各调一次），
+避免上一套契约推进的版本污染下一套的写前基线。
+
+**RED 证据（证明契约有证明力）**：把 `_reconcile_price` 中"记录不存在或未提交"的
+分支临时改成返回 `APPLIED`，契约在第 5 步 `contracts.py:191` 失败
+（`never-seen operation_id` 必须 `NOT_APPLIED`）；恢复实现后通过。
+
+- [x] **Step 3: REST Adapter 明确能力范围**
 
 P1 的 REST Adapter 只声明 `pricing` 能力。库存和 Listing 方法若被误调用，返回结构化 `CAPABILITY_UNSUPPORTED`，不构造猜测性 URL。不要为了契约测试虚构第三方库存或刊登端点。
 
-- [ ] **Step 4: 运行 Adapter 测试并提交**
+**实际实现**：`adapters/commerce/rest_adapter.py` 新增
+`CAPABILITIES = frozenset({"pricing"})` 与 `CapabilityUnsupportedError`
+（`LookupError` 家族，`reason_code` 固定为 `CAPABILITY_UNSUPPORTED`），类上声明
+`supported_capabilities`。两类失败通道按 Port 语义分开：
+
+- **读**抛 `CapabilityUnsupportedError`——与 `InventoryUnavailable` /
+  `ListingUnavailable` 同属 `LookupError`，读失败通道不变；
+- **写**返回 `FAILED` + `CAPABILITY_UNSUPPORTED` 回执（零观测）——写路径的确定失败
+  本就以回执承载，且天然"绝不重试"；
+- **回查**返回 `NOT_APPLIED`（能力不支持的写不可能生效），不发起任何请求。
+
+`TYPE_CHECKING` 块追加三个 Port 的结构一致性断言：声明"能力范围"不等于"接口形状
+可以不合"。`adapters/commerce/__init__.py` 导出 `CAPABILITIES` /
+`CapabilityUnsupportedError` / `RestCommerceAdapter`。
+
+测试 `test_unsupported_capabilities_fail_closed_without_network` 用
+`AssertionError` 型 handler 保证九个方法**一次请求都没发出**。
+
+- [x] **Step 4: 运行 Adapter 测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/adapters/commerce -q
@@ -2173,6 +2217,12 @@ git commit -m "test: add commerce gateway contract suites"
 ```
 
 Expected: PASS，提交成功。
+
+**实际结果**：PASS。`tests/adapters/commerce` → `42 passed in 3.58s`
+（旧 41 + 新增 1）；`ruff check .` 通过；`mypy runtime agents adapters apps eval`
+244 files 通过。`mypy tests/adapters/commerce` 仅剩 **2 条既有的** `no-untyped-def`
+（`test_rest_adapter.py:59` 的 `make_adapter(handler, **kwargs)`、
+`test_pricing_gateway.py:152`），均在本任务的改动区域之外，未纳入。
 
 ---
 
@@ -2201,7 +2251,7 @@ Expected: PASS，提交成功。
 - Modify: `tests/runtime/execution/test_pretool_pipeline.py`
 - Modify: `tests/runtime/orchestration/test_agent_loop.py`
 
-- [ ] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
+- [x] **Step 1: 写“缺少已发布价格策略即装配失败”测试**
 
 ```python
 async def test_build_rejects_missing_published_pricing_policy(
@@ -2218,7 +2268,7 @@ async def test_build_rejects_missing_published_pricing_policy(
         )
 ```
 
-- [ ] **Step 2: 实现价格策略发布和加载**
+- [x] **Step 2: 实现价格策略发布和加载**
 
 stable key 固定为 `product-pricing`。Provisioner 接收显式 `PricePolicyConfig`，把
 Decimal 规范化成字符串后发布到已有 `BusinessPolicy` / `BusinessPolicyVersion`；相同
@@ -2239,7 +2289,7 @@ class PublishedPricingPolicy:
 `PUBLISHED` 状态、`config_hash` 与 Pydantic 配置形状；任一不一致都以
 `PRICING_POLICY_NOT_PUBLISHED` / `PRICING_POLICY_CONFIG_INVALID` fail closed。
 
-- [ ] **Step 3: Run 固定 PolicySnapshot**
+- [x] **Step 3: Run 固定 PolicySnapshot**
 
 补齐当前存在但尚未接线的 `RunPolicySnapshot` 持久化能力：
 
@@ -2256,7 +2306,7 @@ class PublishedPricingPolicy:
 `business_policy_versions` 已存在；如果实现者发现模型与数据库不一致，应先验证现有
 Alembic 历史，禁止再建同义表。
 
-- [ ] **Step 4: 把策略修订绑定到确认与写前状态**
+- [x] **Step 4: 把策略修订绑定到确认与写前状态**
 
 `RunPolicySnapshot` 只解决审计，不会自动进入确认指纹。为避免“策略更新后仍接受旧确认”：
 
@@ -2269,7 +2319,7 @@ Alembic 历史，禁止再建同义表。
   `policy_config_hash`，使 Operation 能解释写前究竟校验了哪份规则；
 - Runtime 只搬运 revision，不理解价格字段或 `product-pricing` stable key。
 
-- [ ] **Step 5: 删除正式装配路径中的 `price_config` 常量注入**
+- [x] **Step 5: 删除正式装配路径中的 `price_config` 常量注入**
 
 测试/Eval/E2E 通过显式 Provisioner 参数创建策略版本；所有现有调用点
 （`tests/agents/product_operations/conftest.py`、`eval/fixtures.py`、
@@ -2280,7 +2330,7 @@ Alembic 历史，禁止再建同义表。
 `PublishedPricingPolicy` 注入 PreTool 与 Handler。不得从 Prompt、环境变量或模块常量
 回退配置。
 
-- [ ] **Step 6: 运行配置与 Runtime 快照测试并提交**
+- [x] **Step 6: 运行配置与 Runtime 快照测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/composition/test_product_operations_provisioning.py tests/runtime/capabilities/test_assembly.py tests/runtime/execution/test_pretool_pipeline.py tests/runtime/orchestration/test_agent_loop.py tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py -q
@@ -2290,6 +2340,50 @@ git commit -m "feat: publish workspace pricing policy configuration"
 
 Expected: PASS；装配缺少/错 Workspace/非发布/坏 hash 的策略均失败闭合；Run 的
 PolicySnapshot 可查询；旧确认在策略 revision 变化后不可复用；提交成功。
+
+**实际实现**（与计划的差异均已记录）：
+
+1. **发布载荷修复了一个真实缺陷**：`PricePolicyConfig` 不做 Decimal 尺度归一，
+   `Decimal("50.00") == Decimal("50.000")` 为真但 `str()` 不同——直接落库会让
+   "数值相同的配置"算出不同 hash，幂等发布失效。`canonical_pricing_policy_payload`
+   经 `_canonical_decimal_text`（`normalize()` + 定点格式）渲染成尺度无关文本。
+   RED 证据：把归一化临时退回 `str(value)`，`test_configuration.py` 的尺度无关
+   断言变红；恢复后通过。
+2. **policy revision 进确认指纹**：`ConfirmationService.verify()` 把调用方传入的
+   **当前** revision 与存储指纹重算比对（`_Unset` 哨兵区分"未提供"与"显式 None"），
+   revision 变化即 `CONFIRMATION_STALE`；`AcceptedConfirmationLookup` 协议与组合根
+   实现同步扩展 `policy_version` 参数；`PreToolContext` 保留允许决策的 revision 供
+   确认阶段复用。RED 证据：临时让 verify 忽略当前 revision，新增漂移测试变红。
+3. **测试改动**：`tests/runtime/orchestration/test_agent_loop.py`、
+   `agents/product_operations/pricing/policy.py`、`policy/models.py` 无需改动
+   （revision 经既有 `ConfirmationSpec` 透传，`PricePolicyConfig` 本身不动）；
+   新增 `tests/agents/product_operations/pricing/test_configuration.py`、
+   `test_assembly.py` 的 `test_run_pins_published_policy_versions`、组合层 6 个
+   策略发布/加载用例，以及管线层 revision 透传用例。
+4. **修复合并运行的跨套件污染**：组合层 provisioning 会提交全局能力目录行
+   （`agents.stable_key` 全局唯一）且不回收，capabilities 套件随后种子同名行即撞
+   `uq_agents_stable_key`。`tests/runtime/capabilities/conftest.py` 的
+   `capability_catalog` 改为插入前先删同名残留（agent/skill/tool 及其版本行），
+   删除在本 Session 事务内、随 rollback 还原。RED 证据：修复前三测试在合并运行
+   ERROR（`UniqueViolationError`），修复后同组合全绿。
+5. `.gitignore` 补 `.workbuddy/`、`docs/审计/`、`reports/`（协议规定永不入库，
+   此前未 ignore 导致 ruff 扫到备份目录）。
+
+**实际结果**：Task 10 门禁
+`tests/agents/product_operations + tests/composition/test_product_operations_provisioning.py
++ tests/runtime/capabilities/test_assembly.py + tests/runtime/execution/test_pretool_pipeline.py
++ tests/runtime/orchestration/test_agent_loop.py + tests/runtime/interaction
++ tests/apps/api/test_e2e_product_flow.py + tests/apps/worker/test_worker_lifecycle.py`
+→ **423 passed**；`ruff check .` 通过；`mypy runtime agents adapters apps eval
+composition` → **249 source files 零错误**。
+
+> 执行中断说明：Task 10 门禁通过前本机 `.git` 曾因误删进入回收站而损坏
+> （packfile + refs 丢失）。已从回收站恢复全部对象（SHA1 逐一校验），两条中断的
+> 提交链用 `git replace --graft` 重新接通（`62aa521`→`f1e3427`、`b491561`→`564b458`，
+> 完全可逆）；3 个 tip 期被改文件的 blob 中 2 个按编辑记录逐字节重建并通过 SHA
+> 校验，`tests/agents/product_operations/conftest.py` 的 tip 版 blob 无法唯一复原
+> （不影响任何后续提交与新树，reflog 已归档至 `.workbuddy/backup-20261014/`）。
+> 另：门禁期间 Postgres 容器未随会话恢复，已重启并等待 healthy 后重跑。
 
 ---
 
@@ -2420,7 +2514,7 @@ Expected: PASS，提交成功。
 - Create: `tests/composition/test_product_operations_bindings.py`
 - Create: `tests/composition/test_product_operations_recovery.py`
 
-- [ ] **Step 1: 写组合根边界失败测试**
+- [x] **Step 1: 写组合根边界失败测试**
 
 ```python
 def test_composition_has_no_domain_dispatch_or_policy_classes() -> None:
@@ -2430,7 +2524,7 @@ def test_composition_has_no_domain_dispatch_or_policy_classes() -> None:
     assert "ReconciliationCommand(" not in source
 ```
 
-- [ ] **Step 2: 建立声明式 Binding 工厂**
+- [x] **Step 2: 建立声明式 Binding 工厂**
 
 `product_operations_bindings.py` 暴露：
 
@@ -2449,15 +2543,15 @@ def build_product_tool_bindings(deps: ProductOperationsDependencies) -> tuple[Ve
 
 返回前展平并校验 version_id 唯一；不得按 stable key 运行时分支。
 
-- [ ] **Step 3: 建立恢复应用服务**
+- [x] **Step 3: 建立恢复应用服务**
 
 `product_operations_recovery.py` 从 Operation 读取 `expected_state.operation_type`，经 `OperationReconcilerRegistry` 查找 Reconciler，再把结果交给 `Runtime ReconciliationService.apply_result()`。
 
-- [ ] **Step 4: 收缩 `composition/product_operations.py`**
+- [x] **Step 4: 收缩 `composition/product_operations.py`**
 
 最终只保留：读取已发布快照、创建 Adapter/Service/Registry/Runtime、连接依赖、返回 `ProductOperationsApplication`。删除价格命令转换、读 Tool 分发和领域回查判断。
 
-- [ ] **Step 5: 运行组合与架构测试并提交**
+- [x] **Step 5: 运行组合与架构测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/composition tests/architecture/test_dependency_boundaries.py -q
@@ -2466,6 +2560,10 @@ git commit -m "refactor: reduce product operations composition root"
 ```
 
 Expected: PASS，提交成功。
+
+实际验收：商品域、组合层与架构边界测试共 **340 passed**；同时把仍通过新
+Agent 发起旧 Tool 的 Runtime 路径测试迁移到 `store_ref` / `store_refs` 与
+`set_listing_price` / `get_listing`，未把 compatibility Tool 重新暴露给新 Run。
 
 ---
 
@@ -2502,7 +2600,7 @@ async def test_eval_manifest_is_frozen_before_cases_run(eval_fixture) -> None:
 再加一条反例：隔离环境实际发布的 Tool/Policy hash 与 manifest 不一致时，必须在模型
 调用前返回 `CAPABILITY_MANIFEST_MISMATCH`；不得静默改用“当前最新版”。
 
-- [ ] **Step 2: 定义 EvalCapabilityManifest**
+- [x] **Step 2: 定义 EvalCapabilityManifest**（实际结果：`eval/capability_manifest.py`，stable key/version/hash 逻辑身份，fingerprint 为 canonical JSON SHA-256）
 
 Eval 每个 case/repetition 都创建独立 Workspace，Workspace 级 Model/Policy Version ID
 天然不同；因此 Manifest 冻结的是**逻辑能力身份**（stable key + version + 内容 hash），
@@ -2535,7 +2633,7 @@ class EvalCapabilityManifest(BaseModel):
 内容 hash，对 Policy 使用 `config_hash`。`dataset_hashes` 固定五个分区；
 `capability_fingerprint` 是除自身外全部字段的 canonical JSON SHA-256。
 
-- [ ] **Step 3: 删除 Eval 中复制的能力版本常量**
+- [x] **Step 3: 删除 Eval 中复制的能力版本常量**（实际结果：`_FIXED_*` 四组常量全部删除，schema fingerprint 只从 Manifest 派生）
 
 删除 `_FIXED_AGENT_VERSION`、`_FIXED_PROMPT_VERSION`、`_FIXED_SKILL_VERSIONS`、
 `_FIXED_TOOL_VERSIONS`。`EvalConfig` 只保留 Provider、采样参数、repetitions 与
@@ -2543,7 +2641,7 @@ scorer version；`eval/schema.py` 的 system/protocol fingerprint 显式接收 M
 不得继续从 `EvalConfig` 读取一份重复的能力版本。Provider 配置仍只负责模型连接和固定
 采样参数；Manifest 由 Provisioner 返回的已发布行与数据集文件派生。
 
-- [ ] **Step 4: 让隔离环境验证 Manifest，而不是重新选择最新版**
+- [x] **Step 4: 让隔离环境验证 Manifest，而不是重新选择最新版**（实际结果：`EvalRunner` 整轮接收单一不可变 Manifest，`IsolatedEnvironment.create()` 按 stable key/version/hash 校验，期间发布新版本不影响进行中的轮次）
 
 `EvalRunner` 在整轮开始前只接收一个不可变 Manifest，并传给每个
 `IsolatedEnvironment.create()`。每个隔离 Workspace 仍独立发布自己的 Model/Policy
@@ -2578,7 +2676,7 @@ Manifest 文件不含 API Key、数据库 URL、内部 Actor/Workspace ID 或临
 
 JSON 和 Markdown 报告必须记录完整 manifest 与协议指纹，确保两次成绩可以追溯到同一能力快照。
 
-- [ ] **Step 8: 运行 Eval 单元测试并提交**
+- [x] **Step 8: 运行 Eval 单元测试并提交**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/eval -q
@@ -2587,6 +2685,8 @@ git commit -m "refactor: freeze eval capability manifest"
 ```
 
 Expected: PASS，提交成功。
+
+实际结果：tests/eval 144 passed（含 `test_capability_manifest.py` 7 项）；ruff 通过；mypy 253 源文件零错误。
 
 ---
 
@@ -2599,7 +2699,7 @@ Expected: PASS，提交成功。
 - Modify: `docs/架构/ADR-002-商品运营模块化单体与平台适配边界.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: 增加四条端到端主路径**
+- [x] **Step 1: 增加四条端到端主路径**（实际结果：`tests/apps/api/test_e2e_product_flow.py` 六条用例——价格主路径 CONFIRM 模式（含缺店铺 Input + 确认参数断言）、价格全路径 AUTO 模式（搜索→比价→改价→回查）、库存路径 CONFIRM/AUTO、发布路径 CONFIRM、下架路径 AUTO；脚本后端 `E2EScriptedBackend` 扩展为任务表驱动的多步引擎；种子补充库存/位置/三类写权限
 
 覆盖：
 
@@ -2612,11 +2712,11 @@ Expected: PASS，提交成功。
 
 每条写路径同时验证 `AUTO_EXECUTE` 与 `REQUIRE_CONFIRMATION`，确认后必须重新校验权限、Policy 和资源版本。
 
-- [ ] **Step 2: 增加安全矩阵**
+- [x] **Step 2: 增加安全矩阵**（实际结果：`tests/agents/product_operations/test_p1_safety_matrix.py` 27 项——4 写工具 × 6 场景（无写权限/跨店铺/空资源范围/确认后版本变化/响应丢失/重复 operation_id）+ REST Adapter 能力边界 3 项；确认后版本变化统一为 DENIED + LISTING_VERSION_CONFLICT（通用资源版本守卫语义，已记入 ADR-002）
 
 对四个写 Tool 参数化验证：无写权限、跨店铺、缺少关键范围、确认后版本变化、响应丢失、重复 operation_id、Adapter 不支持能力。
 
-- [ ] **Step 3: 运行针对性测试**
+- [x] **Step 3: 运行针对性测试**（实际结果：416 passed）
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/agents/product_operations tests/adapters/commerce tests/composition tests/apps/api/test_e2e_product_flow.py tests/apps/worker/test_worker_lifecycle.py tests/runtime/integration/test_crash_recovery.py -q
@@ -2624,7 +2724,7 @@ Expected: PASS，提交成功。
 
 Expected: PASS。
 
-- [ ] **Step 4: 运行全量质量门禁**
+- [x] **Step 4: 运行全量质量门禁**（实际结果：pytest 全量 1157 passed；ruff 通过；mypy 253 源文件 0 错误）
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -2640,7 +2740,7 @@ ruff: All checks passed!
 mypy: Success: no issues found
 ```
 
-- [ ] **Step 5: 检查旧命名残留**
+- [x] **Step 5: 检查旧命名残留**（实际结果：命中仅在 legacy 常量（`LEGACY_AGENT_KEY`）、兼容版本发布（`legacy_product_tool_definitions`）、旧工具模块本体与架构/设计文档的 legacy/历史段；workbench 前端测试的普通工具名已改 `set_listing_price`，`TOOL_UNKNOWN` 用例保留旧名（语义即旧工具被拒）；前端 Vitest 30 passed
 
 ```powershell
 rg -n "ProductMaintenanceAgent|product-maintenance|get_product_snapshot|update_price" agents composition apps eval README.md docs/架构
@@ -2648,11 +2748,11 @@ rg -n "ProductMaintenanceAgent|product-maintenance|get_product_snapshot|update_p
 
 Expected: 命中只允许出现在明确标注的 legacy compatibility、历史迁移说明和 ADR 当前事实段；新 Agent、Prompt、Eval 数据集和普通装配路径不得命中。
 
-- [ ] **Step 6: 更新架构事实**
+- [x] **Step 6: 更新架构事实**（实际结果：ADR-002 状态改为"P0/P1 已实施，P2 待实施"并补 P1 实施记录（提交序列 + 门禁结果 + 实施差异）；README 更新为四能力模块事实描述与最新验证数字）
 
 只有全部门禁通过后，才将 ADR-002 状态改为“P0/P1 已实施，P2 待实施”，记录实际提交号、最终测试数量和验证命令。README 只描述已实现能力，不宣称接入真实第三方平台。
 
-- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**
+- [ ] **Step 7: 基于冻结 Manifest 运行真实模型复测**（待办：缺少 `EVAL_API_KEY` 等环境变量，按协议暂停等待凭据）
 
 先检查三个环境变量，只允许从当前进程环境读取 Secret，不把 Key 写入仓库、命令历史、
 报告或日志：

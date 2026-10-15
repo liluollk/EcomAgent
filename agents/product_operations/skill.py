@@ -1,70 +1,88 @@
-"""``product_maintenance`` Skill 数据化内容(计划 03 Task 6;架构文档 §8)。
+"""``product_maintenance`` Skill 的当前版本与第一版兼容版本。
 
-首版只有一个发布的改价流程技能:说明任务方法、可用 Tool 与风险边界。
-它不重复存储商品事实、价格规则或 SOP 正文——当前商品与价格通过 Tool
-读取,硬性业务规则通过服务端 Policy 读取,本 Skill 只描述"怎么做"。
-
-按架构文档 §5/§6,指令文本不包含任何具体阈值数字(最低允许价、单次
-变动上限、示例现价等);数字事实一律由服务端在写前校验。
+当前 v5 扩展到 Catalog、Pricing、Inventory、Listing 四个能力模块；v4 仅供历史
+Run 按精确 SkillVersion/ToolVersion 恢复。这里发布兼容版本，不实施 ADR-001 中
+尚未落地的目标加载模型。
 """
-
-from __future__ import annotations
 
 from typing import Final
 
+from agents.product_operations.agent_tool_keys import P1_BUSINESS_TOOL_KEYS
 from agents.product_operations.tools.definitions import (
-    COMPARE_LISTING_PRICES_DEFINITION,
-    GET_PRODUCT_SNAPSHOT_DEFINITION,
-    SEARCH_PRODUCTS_DEFINITION,
+    COMPARE_LISTING_PRICES_DEFINITION as LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    GET_PRODUCT_SNAPSHOT_DEFINITION as LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION,
+)
+from agents.product_operations.tools.definitions import (
+    SEARCH_PRODUCTS_DEFINITION as LEGACY_SEARCH_PRODUCTS_DEFINITION,
 )
 from agents.product_operations.tools.update_price import STABLE_KEY_UPDATE_PRICE
 from runtime.capabilities.registry import SkillDefinition
 
 
 SKILL_KEY: Final = "product_maintenance"
-SKILL_VERSION: Final = 4
+SKILL_VERSION: Final = 5
+LEGACY_SKILL_VERSION: Final = 4
 
 PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
-你是商品改价维护技能。按以下任务方法完成改价请求:
+你是商品运营技能，覆盖商品检索、刊登查询、跨店价格对比、受控改价、库存调整和\
+发布状态维护。按以下方法完成任务:
 
-1. 查询:用 search_products 定位用户所说的商品,用 get_product_snapshot \
-读取目标店铺与 SKU 的当前价格、币种与状态,必要时用 compare_listing_prices \
-对比各店铺价格后再给出建议;
-2. 对比:把用户给出的目标价与当前价格、币种、店铺范围核对清楚;缺失或\
-有歧义的信息(店铺、SKU、目标价)主动向用户追问,不得猜测店铺或编造数据;
-3. 计划:明确"哪个店铺、哪个 SKU、改成什么价格"的计划;改价的合规性\
-(价格下限、活动锁价、单次变动限制等)由服务端策略在校验阶段强制执行,\
-不要在对话中替平台承诺或解释具体规则数值。用户要求改价时,读取或比较不是任务终点;\
-事实齐备后继续调用 update_price,不要只返回建议;
-4. 参数来源:后续写调用使用用户当前消息中的店铺名称或别名及 SKU。ToolResult\
-中的 UUID、product_id、listing_id 等内部 ID 只用于观察,不得替代用户明确给出的\
-写入范围;
-5. 执行与回查:是否需要用户确认由 Runtime 根据当前 Workspace 的\
-ExecutionMode 决定;AUTO_EXECUTE 只跳过人工确认,不跳过权限、Business Policy、\
-参数和资源版本校验。以平台返回的最终状态(写入前后价格、\
-版本与回查结论)为准汇报结果,不要凭模型文本宣称已完成。
+1. 查询:用 search_products 定位商品；用 get_listing、get_inventory_level 读取目标\
+店铺、SKU、库存位置与当前状态；需要决策时用 compare_listing_prices 比较店铺价格；
+2. 澄清:写操作缺少店铺、SKU、库存位置、目标价格、调整数量、原因或发布方向时，\
+向用户追问，不得从历史对话、候选列表或 ToolResult 内部 ID 推断写入范围；
+3. 计划:明确本次要修改的业务对象和目标终态。价格、库存、发布规则由服务端 Policy\
+在校验阶段强制执行，不在对话中承诺具体阈值；
+4. 执行:改价调用 set_listing_price，库存调整调用 adjust_inventory_quantity，发布或\
+取消发布分别调用 publish_listing、unpublish_listing。用户要求写入时，读取或比较不是任务终点；
+5. 参数来源:写 Tool 复用用户当前消息中的店铺名称或别名及原始 SKU、库存位置。\
+ToolResult 中 UUID、product_id、listing_id、location_id 等内部 ID 只用于观察；
+6. 回查与汇报:是否确认由 Runtime 的 ExecutionMode 决定；AUTO_EXECUTE 只跳过人工\
+确认，不跳过权限、Business Policy、参数、资源版本与幂等校验。以平台回执和回查终态\
+汇报；UNKNOWN 时等待恢复，不得重复写入或宣称成功。
 
-风险边界:绝不越出用户被授权的店铺范围;写操作结果不确定(超时或响应丢失)\
-时等待系统回查结论,不要重复发起写操作。
+风险边界:不得越出用户被授权的店铺范围；不得绕过服务端拒绝或将模型判断当成授权事实。
 """
 
+LEGACY_PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS: Final = """\
+你是商品改价维护技能。用 search_products 定位商品，用 get_product_snapshot 读取当前\
+价格与状态，必要时用 compare_listing_prices 比较店铺价格。缺少店铺、SKU 或目标价时\
+追问，不得猜测。用户要求改价时，读取或比较不是任务终点；事实齐备后调用\
+update_price。写调用沿用用户当前消息中的店铺名称或别名和 SKU；ToolResult 的内部 ID\
+只用于观察。是否确认由 Runtime 的 ExecutionMode 决定，AUTO_EXECUTE 不跳过权限、\
+Business Policy、参数和版本校验。结果以平台回执与回查终态为准。
+"""
 
 PRODUCT_MAINTENANCE_SKILL: Final = SkillDefinition(
+    name="商品运营技能",
+    description="检索商品并在受控流程中执行价格、库存与发布状态维护。",
+    required_tool_keys=P1_BUSINESS_TOOL_KEYS,
+    prompt_fragments={"instructions": PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS},
+)
+
+LEGACY_PRODUCT_MAINTENANCE_SKILL: Final = SkillDefinition(
     name="商品维护改价技能",
     description="查询商品现状、对比店铺价格并在受控流程中执行改价。",
     required_tool_keys=frozenset(
         {
-            SEARCH_PRODUCTS_DEFINITION.stable_key,
-            GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
-            COMPARE_LISTING_PRICES_DEFINITION.stable_key,
+            LEGACY_SEARCH_PRODUCTS_DEFINITION.stable_key,
+            LEGACY_GET_PRODUCT_SNAPSHOT_DEFINITION.stable_key,
+            LEGACY_COMPARE_LISTING_PRICES_DEFINITION.stable_key,
             STABLE_KEY_UPDATE_PRICE,
         }
     ),
-    prompt_fragments={"instructions": PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS},
+    prompt_fragments={
+        "instructions": LEGACY_PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS
+    },
 )
 
 
 __all__ = [
+    "LEGACY_PRODUCT_MAINTENANCE_SKILL",
+    "LEGACY_PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS",
+    "LEGACY_SKILL_VERSION",
     "PRODUCT_MAINTENANCE_SKILL",
     "PRODUCT_MAINTENANCE_SKILL_INSTRUCTIONS",
     "SKILL_KEY",

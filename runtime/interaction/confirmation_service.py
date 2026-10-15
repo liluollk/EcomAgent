@@ -59,6 +59,13 @@ CONFIRMATION_CANCELLED: Final = "CONFIRMATION_CANCELLED"
 CONFIRMATION_EXPIRED: Final = "CONFIRMATION_EXPIRED"
 CONFIRMATION_DECISION_REJECTED: Final = "CONFIRMATION_DECISION_REJECTED"
 
+
+class _Unset:
+    """哨兵:区分"调用方未提供当前策略修订"与"当前确实没有绑定策略(None)"。"""
+
+
+_UNSET: Final = _Unset()
+
 TARGET_TYPE_CONFIRMATION_REQUEST: Final = "confirmation_request"
 
 
@@ -222,15 +229,20 @@ class ConfirmationService:
         *,
         current_resource_versions: Mapping[str, Any],
         tool_schema_hash: str | None = None,
+        policy_version: int | None | _Unset = _UNSET,
         now: datetime | None = None,
     ) -> VerifyResult:
         """校验已接受的确认是否仍然有效(只读,不迁移状态)。
 
-        用当前资源版本与当前 Tool Schema hash 重算指纹并与存储指纹比对:
-        资源版本、参数、Schema、Policy、Execution Mode 任一变化都会改变指纹,
-        旧确认即失效(``CONFIRMATION_STALE``)。``tool_schema_hash`` 缺省 None
-        与 create 缺省 None 一致;create 绑定了 hash 而 verify 未提供当前 hash
-        时按失败闭合处理(视为已漂移)。
+        用当前资源版本(与可选的当前 Tool Schema hash、当前业务策略修订)重算指纹
+        并与存储指纹比对:资源版本、参数、Schema、Policy、Execution Mode 任一变化
+        都会改变指纹,旧确认即失效(``CONFIRMATION_STALE``)。``tool_schema_hash``
+        缺省 None 与 create 缺省 None 一致;create 绑定了 hash 而 verify 未提供当前
+        hash 时按失败闭合处理(视为已漂移)。
+
+        ``policy_version`` 是**当前**业务策略修订号:调用方读得到当前规则时必须传入,
+        否则"策略更新后仍接受旧确认"无法被发现;未传入(哨兵)时退回存储值,保持
+        create/verify 对称的旧行为。传入 ``None`` 表示当前确实没有绑定策略。
         """
         moment = datetime.now(UTC) if now is None else now
         request = await self._requests.get_confirmation_request(
@@ -244,6 +256,9 @@ class ConfirmationService:
             return VerifyResult(valid=False, reason_code=CONFIRMATION_NOT_ACCEPTED)
         if request.expires_at <= moment:
             return VerifyResult(valid=False, reason_code=REQUEST_EXPIRED)
+        current_policy_version = (
+            request.policy_version if isinstance(policy_version, _Unset) else policy_version
+        )
         expected = fingerprint_from_parts(
             actor_id=request.actor_id,
             workspace_id=request.workspace_id,
@@ -252,7 +267,7 @@ class ConfirmationService:
             normalized_arguments_hash=request.normalized_arguments_hash,
             resource_versions=dict(current_resource_versions),
             tool_schema_hash=tool_schema_hash,
-            policy_version=request.policy_version,
+            policy_version=current_policy_version,
             execution_mode_version=request.execution_mode_version,
         )
         if expected != request.fingerprint:

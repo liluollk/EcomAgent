@@ -37,7 +37,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from adapters.commerce.mock_adapter import MockCommerceAdapter
 from agents.product_operations.domain.models import ListingStatus, StorePlatform
-from agents.product_operations.persistence.models import Listing, Product, Store
+from agents.product_operations.persistence.models import (
+    FulfillmentLocation,
+    InventoryLevel,
+    Listing,
+    Product,
+    Store,
+)
 from agents.product_operations.policy.models import PricePolicyConfig
 from composition.product_operations import (
     ProductApplication,
@@ -45,10 +51,12 @@ from composition.product_operations import (
 )
 from composition.provisioning.product_operations import (
     ModelConnectionProvisioningSpec,
+    ProductOperationsCapabilities,
     ProductOperationsProvisioner,
 )
+from eval.capability_manifest import EvalCapabilityManifest, require_manifest_match
 from eval.results import FinalState
-from eval.schema import ListingState, Scenario
+from eval.schema import InventoryState, ListingState, Scenario
 from runtime.backend.protocol import AgentBackend
 from runtime.persistence.base import (
     AccountStatus,
@@ -125,6 +133,8 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM membership_permissions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_resource_scopes WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM membership_resource_scope_modes WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM business_policy_versions WHERE workspace_id = :ws", "ws"),
+    ("DELETE FROM business_policies WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM model_config_versions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM model_connections WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM workspace_memberships WHERE workspace_id = :ws", "ws"),
@@ -199,6 +209,16 @@ class SeededListing:
 
 
 @dataclass(frozen=True)
+class SeededInventory:
+    """库存场景符号与持久化资源的对应关系。"""
+
+    store_symbol: str
+    sku: str
+    location_ref: str
+    inventory_level_id: uuid.UUID
+
+
+@dataclass(frozen=True)
 class IsolatedEnvironment:
     """单个 case/repetition 的独立权威环境(身份 + 业务状态 + 执行环境)。"""
 
@@ -208,8 +228,11 @@ class IsolatedEnvironment:
     actor_id: uuid.UUID
     membership_id: uuid.UUID
     listings: tuple[SeededListing, ...]
+    inventory_levels: tuple[SeededInventory, ...]
     application: ProductApplication
     commerce_write_observer: MockCommerceAdapter
+    capabilities: ProductOperationsCapabilities
+    capability_fingerprint: str | None = None
 
     @classmethod
     async def create(
@@ -218,6 +241,7 @@ class IsolatedEnvironment:
         scenario: Scenario,
         *,
         backend: AgentBackend,
+        manifest: EvalCapabilityManifest | None = None,
         execution_mode: ExecutionMode = ExecutionMode.CONFIRM_WRITES,
     ) -> IsolatedEnvironment:
         """种子身份与业务状态(独立短事务提交)并组装注入 Backend 的商品应用。"""
@@ -225,6 +249,7 @@ class IsolatedEnvironment:
         actor_id = uuid.uuid4()
         membership_id = uuid.uuid4()
         seeded: list[SeededListing] = []
+        seeded_inventory: list[SeededInventory] = []
         products_by_sku: dict[str, Product] = {}
 
         session = AsyncSession(engine, expire_on_commit=False)
@@ -268,6 +293,48 @@ class IsolatedEnvironment:
                             currency=spec.currency,
                             status=spec.status,
                             products_by_sku=products_by_sku,
+                        )
+                    )
+                for inventory_spec in scenario.initial_state.inventory_levels:
+                    listing = next(
+                        (
+                            item
+                            for item in seeded
+                            if item.symbol == inventory_spec.store_id
+                            and item.sku == inventory_spec.sku
+                        ),
+                        None,
+                    )
+                    product = products_by_sku.get(inventory_spec.sku)
+                    if listing is None or product is None:
+                        raise ValueError(
+                            "inventory seed requires a matching listing for "
+                            f"{inventory_spec.store_id}/{inventory_spec.sku}"
+                        )
+                    location = FulfillmentLocation(
+                        id=uuid.uuid4(),
+                        workspace_id=workspace_id,
+                        store_id=listing.store_id,
+                        external_location_ref=inventory_spec.location_ref,
+                        name=inventory_spec.location_ref,
+                        aliases=[inventory_spec.location_ref],
+                    )
+                    session.add(location)
+                    await session.flush()
+                    level = InventoryLevel(
+                        id=uuid.uuid4(),
+                        workspace_id=workspace_id,
+                        location_id=location.id,
+                        product_id=product.id,
+                        available_quantity=inventory_spec.available_quantity,
+                    )
+                    session.add(level)
+                    seeded_inventory.append(
+                        SeededInventory(
+                            store_symbol=inventory_spec.store_id,
+                            sku=inventory_spec.sku,
+                            location_ref=inventory_spec.location_ref,
+                            inventory_level_id=level.id,
                         )
                     )
                 session.add_all(
@@ -315,7 +382,17 @@ class IsolatedEnvironment:
         # 幂等发布能力版本(全局按 stable_key 复用);装配只消费已发布快照。
         capabilities = await ProductOperationsProvisioner(
             lambda: AsyncSession(engine, expire_on_commit=False)
-        ).provision(workspace_id=workspace_id, model=EVAL_MODEL_SPEC)
+        ).provision(
+            workspace_id=workspace_id,
+            model=EVAL_MODEL_SPEC,
+            pricing_policy=EVAL_PRICE_CONFIG,
+        )
+        if manifest is not None:
+            await require_manifest_match(
+                lambda: AsyncSession(engine, expire_on_commit=False),
+                capabilities,
+                manifest,
+            )
         application = await build_product_application(
             engine,
             capabilities=capabilities,
@@ -323,11 +400,12 @@ class IsolatedEnvironment:
             workspace_id=workspace_id,
             actor_id=actor_id,
             membership_id=membership_id,
-            price_config=EVAL_PRICE_CONFIG,
             worker_id=f"eval-worker-{uuid.uuid4().hex[:8]}",
         )
         if not isinstance(application.adapter, MockCommerceAdapter):
             raise TypeError("Eval fixtures require the deterministic MockCommerceAdapter")
+        for fault in scenario.faults:
+            application.adapter.faults.inject(fault)
         return cls(
             engine=engine,
             scenario=scenario,
@@ -335,8 +413,13 @@ class IsolatedEnvironment:
             actor_id=actor_id,
             membership_id=membership_id,
             listings=tuple(seeded),
+            inventory_levels=tuple(seeded_inventory),
             application=application,
             commerce_write_observer=application.adapter,
+            capabilities=capabilities,
+            capability_fingerprint=(
+                manifest.capability_fingerprint if manifest is not None else None
+            ),
         )
 
     def store_id_for_sku(self, sku: str) -> uuid.UUID | None:
@@ -397,7 +480,26 @@ class IsolatedEnvironment:
                         status=row.status.value,
                     )
                 )
-            return FinalState(listings=tuple(states), logical_writes=logical_writes)
+            inventory_states: list[InventoryState] = []
+            for seeded_level in self.inventory_levels:
+                level = await session.get(
+                    InventoryLevel, seeded_level.inventory_level_id
+                )
+                if level is None:
+                    continue
+                inventory_states.append(
+                    InventoryState(
+                        store_id=seeded_level.store_symbol,
+                        sku=seeded_level.sku,
+                        location_ref=seeded_level.location_ref,
+                        available_quantity=level.available_quantity,
+                    )
+                )
+            return FinalState(
+                listings=tuple(states),
+                inventory_levels=tuple(inventory_states),
+                logical_writes=logical_writes,
+            )
         finally:
             await session.close()
 
@@ -453,5 +555,6 @@ __all__ = [
     "EVAL_MODEL_SPEC",
     "EVAL_PRICE_CONFIG",
     "IsolatedEnvironment",
+    "SeededInventory",
     "SeededListing",
 ]

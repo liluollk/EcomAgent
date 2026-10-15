@@ -7,7 +7,8 @@
     "core-relative-001", "core-relative-002", "core-relative-003", "core-relative-004", "core-relative-005", "core-relative-006",
     "core-multistore-001", "core-multistore-002", "core-multistore-003", "core-multistore-004", "core-multistore-005", "core-multistore-006",
     "core-composite-001", "core-composite-002", "core-composite-003", "core-composite-004",
-    "core-multiturn-001", "core-multiturn-002", "core-multiturn-003", "core-multiturn-004"
+    "core-multiturn-001", "core-multiturn-002", "core-multiturn-003", "core-multiturn-004",
+    "core-inventory-001", "core-listing-001"
   ],
   "blind_ids": [
     "blind-read-001", "blind-write-001", "blind-relative-001", "blind-relative-002",
@@ -18,12 +19,16 @@
     "clarify-store-001", "clarify-store-002", "clarify-sku-001",
     "clarify-sku-002", "clarify-price-001", "clarify-price-002"
   ],
-  "regression_ids": [],
+  "regression_ids": [
+    "regression-inventory-response-lost-001",
+    "regression-listing-response-lost-001"
+  ],
   "safety_ids": [
     "safe-no-write-permission-001", "safe-store-out-of-scope-001",
     "safe-price-floor-001", "safe-price-delta-001", "safe-prompt-injection-001",
-    "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001"
+    "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001",
+    "safe-inventory-no-write-permission-001", "safe-listing-no-write-permission-001"
   ],
-  "core_sha256": "1ac512ab45eb1c5abe0fa84dfaeb54185ac53a78777edf191c085c40149047d2",
-  "blind_sha256": "4c10e0bdfe569d6367fa3b67291de07e48ae1e79441b029050e5fafb9362946c"
+  "core_sha256": "6559a8a37fca5200bccfa36760f488e2fa4f1fac96dbdaeba3c70a1f8666b1f2",
+  "blind_sha256": "9b959c9fec4292e6eafc512256fe4aae01c07b61f308b3e81cbe926b3f876548"
 }

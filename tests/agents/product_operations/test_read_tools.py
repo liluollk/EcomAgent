@@ -450,23 +450,23 @@ def test_tool_bindings_connect_definitions_to_handlers() -> None:
 # ---- Runtime 路径:归一化不得丢弃只读 Tool 的多店铺/查询参数 ----
 
 
-async def test_search_products_normalization_preserves_query_and_store_ids(
+async def test_search_products_normalization_preserves_query_and_store_refs(
     product_application,
 ) -> None:
-    """经真实 Runtime 路径:search_products 的 query/store_ids 不丢失。
+    """经真实 Runtime 路径:search_products 的 query/store_refs 不丢失。
 
     回归证据:旧 ProductPreToolNormalizer 用固定写字段白名单归一化所有
-    Tool,``query``/``store_ids`` 被整体丢弃,只读 Tool 因此拿不到查询条件。
+    Tool,``query``/``store_refs`` 被整体丢弃,只读 Tool 因此拿不到查询条件。
     """
     backend = product_application.scripted_backend
-    store_id = str(product_application.seed_ids.store_id)
+    store_ref = "淘宝旗舰店"
     backend.set_rounds(
         [
             [
                 ToolCallCompleted(
                     call_id="search-1",
                     name=SEARCH_PRODUCTS_DEFINITION.stable_key,
-                    arguments={"query": "保温杯", "store_ids": [store_id]},
+                    arguments={"query": "保温杯", "store_refs": [store_ref]},
                 ),
                 BackendCompleted(finish_reason="tool_calls"),
             ],
@@ -483,7 +483,7 @@ async def test_search_products_normalization_preserves_query_and_store_ids(
     assert snapshot is not None
     assert snapshot.normalized_arguments == {
         "query": "保温杯",
-        "store_ids": [store_id],
+        "store_refs": [store_ref],
     }
 
 

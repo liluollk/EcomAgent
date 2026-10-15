@@ -224,11 +224,17 @@ class UpdatePriceToolHandler:
         session: AsyncSession,
         gateway: UpdatePriceGateway,
         policy_version: str,
+        policy_version_id: uuid.UUID | None = None,
+        policy_revision: int | None = None,
+        policy_config_hash: str | None = None,
     ) -> None:
         self._workspace_id = workspace_id
         self._session = session
         self._gateway = gateway
         self._policy_version = policy_version
+        self._policy_version_id = policy_version_id
+        self._policy_revision = policy_revision
+        self._policy_config_hash = policy_config_hash
 
     async def prepare(self, *, normalized_arguments: Mapping[str, Any]) -> PreparedToolWrite:
         """服务端补全 → 可信命令 + ``expected_state``;不产生外部副作用。
@@ -272,6 +278,12 @@ class UpdatePriceToolHandler:
             "expected_version": prepared_command.expected_version,
             "policy_version": self._policy_version,
         }
+        if self._policy_version_id is not None:
+            expected_state["policy_version_id"] = str(self._policy_version_id)
+        if self._policy_revision is not None:
+            expected_state["policy_revision"] = self._policy_revision
+        if self._policy_config_hash is not None:
+            expected_state["policy_config_hash"] = self._policy_config_hash
         return PreparedToolWrite(
             command=prepared_command,
             expected_state=expected_state,

@@ -1,2 +1,41 @@
 schema_version: 2
-scenarios: []
+scenarios:
+- id: regression-inventory-response-lost-001
+  category: recovery
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-inventory-recovery, sku: SKU-9801, price: '78.00', currency: CNY, status: PUBLISHED}
+    inventory_levels:
+    - {store_id: store-inventory-recovery, sku: SKU-9801, location_ref: recovery-warehouse, available_quantity: 30}
+  workspace: {name: eval-workspace}
+  actor: {role: owner, permissions: [product.read, product.inventory.write], store_scope_mode: ALL}
+  messages:
+  - {role: user, content: store-inventory-recovery 的 recovery-warehouse 盘盈 2 件 SKU-9801，按 MANUAL_CORRECTION 调整。}
+  faults: [response_lost_after_commit]
+  expected_final_state:
+    listings:
+    - {store_id: store-inventory-recovery, sku: SKU-9801, price: '78.00', status: PUBLISHED}
+    inventory_levels:
+    - {store_id: store-inventory-recovery, sku: SKU-9801, location_ref: recovery-warehouse, available_quantity: 32}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: adjust_inventory_quantity, target: store-inventory-recovery/SKU-9801}]
+  allowed_paths: [{name: reconcile, steps: [UNKNOWN, APPLIED]}]
+
+- id: regression-listing-response-lost-001
+  category: recovery
+  risk_level: high
+  initial_state:
+    listings:
+    - {store_id: store-listing-recovery, sku: SKU-9901, price: '118.00', currency: CNY, status: UNPUBLISHED}
+  workspace: {name: eval-workspace}
+  actor: {role: owner, permissions: [product.read, product.listing.write], store_scope_mode: ALL}
+  messages:
+  - {role: user, content: 发布 store-listing-recovery 的 SKU-9901。}
+  faults: [response_lost_after_commit]
+  expected_final_state:
+    listings:
+    - {store_id: store-listing-recovery, sku: SKU-9901, price: '118.00', status: PUBLISHED}
+    max_logical_writes: 1
+  allowed_side_effects: [{tool: publish_listing, target: store-listing-recovery/SKU-9901}]
+  allowed_paths: [{name: reconcile, steps: [UNKNOWN, APPLIED]}]

@@ -20,6 +20,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import EvalConfig
 
 
@@ -51,12 +52,24 @@ class ListingState(BaseModel):
     status: str | None = None
 
 
+class InventoryState(BaseModel):
+    """位置维度库存状态；符号引用跨隔离 Workspace 保持稳定。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    store_id: str = Field(min_length=1)
+    sku: str = Field(min_length=1)
+    location_ref: str = Field(min_length=1)
+    available_quantity: int = Field(ge=0)
+
+
 class InitialState(BaseModel):
     """场景开始前的权威业务初始状态(Mock 平台种子)。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     listings: tuple[ListingState, ...] = ()
+    inventory_levels: tuple[InventoryState, ...] = ()
 
 
 class ExpectedFinalState(BaseModel):
@@ -70,6 +83,7 @@ class ExpectedFinalState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     listings: tuple[ListingState, ...] = ()
+    inventory_levels: tuple[InventoryState, ...] = ()
     max_logical_writes: int = Field(default=1, ge=0)
 
 
@@ -221,16 +235,6 @@ def _benchmark_config_projection(config: EvalConfig) -> dict[str, object]:
     }
 
 
-def _system_config_projection(config: EvalConfig) -> dict[str, object]:
-    """被测系统版本:只记录允许在优化前后发生变化的能力版本。"""
-    return {
-        "agent_version": config.agent_version,
-        "prompt_version": config.prompt_version,
-        "skill_versions": config.skill_versions,
-        "tool_versions": config.tool_versions,
-    }
-
-
 def benchmark_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
     """同一题目、模型、采样和 Scorer 的可比性指纹。"""
     return _sha256(
@@ -242,25 +246,24 @@ def benchmark_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
     )
 
 
-def system_fingerprint(config: EvalConfig) -> str:
-    """Agent/Prompt/Skill/Tool 版本的被测系统指纹。"""
-    return _sha256(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "system_config": _system_config_projection(config),
-        }
-    )
+def system_fingerprint(manifest: EvalCapabilityManifest) -> str:
+    """被测系统指纹直接使用已冻结 Manifest 的能力指纹。"""
+    return manifest.capability_fingerprint
 
 
-def protocol_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
+def protocol_fingerprint(
+    scenario: Scenario,
+    config: EvalConfig,
+    manifest: EvalCapabilityManifest,
+) -> str:
     """计算协议指纹:canonical JSON(排序键)+ SHA-256 十六进制摘要。
 
-    覆盖 ``SCHEMA_VERSION``、场景结构投影(见 ``_scenario_projection``)与
-    ``EvalConfig`` 全部字段;同一指纹即可比,指纹不同即协议漂移。
+    覆盖 ``SCHEMA_VERSION``、场景、Provider/采样配置与冻结能力 Manifest。
     """
     payload = {
         "schema_version": SCHEMA_VERSION,
         "scenario": _scenario_projection(scenario),
         "config": config.model_dump(mode="json"),
+        "capability_manifest": manifest.model_dump(mode="json"),
     }
     return _sha256(payload)

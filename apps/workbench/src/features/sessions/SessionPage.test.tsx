@@ -446,7 +446,7 @@ describe("SessionPage WebSocket 集成", () => {
         id: "e-5",
         sequence_no: 5,
         event_kind: "TOOL_CALL_PROPOSED",
-        payload: { call_id: "call-1", tool_name: "update_price", ordinal: 2 },
+        payload: { call_id: "call-1", tool_name: "set_listing_price", ordinal: 2 },
         created_at: "2026-10-03T00:00:00Z",
       });
       socket.emit({
@@ -459,7 +459,7 @@ describe("SessionPage WebSocket 集成", () => {
     });
 
     expect(await screen.findByText("已完成")).toBeInTheDocument();
-    expect(screen.getByText("update_price")).toBeInTheDocument();
+    expect(screen.getByText("set_listing_price")).toBeInTheDocument();
     expect(screen.getByText("待执行")).toBeInTheDocument();
   });
 

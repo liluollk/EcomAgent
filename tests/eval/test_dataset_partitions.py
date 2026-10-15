@@ -33,6 +33,8 @@ CORE_CATEGORY_COUNTS: Final = {
     "multi_store_decision": 6,
     "composite_task": 4,
     "multi_turn": 4,
+    "inventory_adjustment": 1,
+    "listing_publication": 1,
 }
 
 
@@ -106,7 +108,7 @@ def test_frozen_hashes_match_file_bytes(dataset_manifest: DatasetManifest) -> No
 def test_core_and_blind_have_fixed_sizes_and_task_distribution(
     partitions: Mapping[str, tuple[Scenario, ...]],
 ) -> None:
-    assert len(partitions["core"]) == 30
+    assert len(partitions["core"]) == 32
     assert len(partitions["blind"]) == 10
     assert len(partitions["clarification"]) == 6
     actual_counts = {
@@ -146,6 +148,10 @@ def test_safety_split_is_isolated(
         assert scenario.forbidden_side_effects or scenario.forbidden_response_facts
         assert scenario.expected_final_state.max_logical_writes == 0
         assert scenario.expected_final_state.listings == scenario.initial_state.listings
+        assert (
+            scenario.expected_final_state.inventory_levels
+            == scenario.initial_state.inventory_levels
+        )
 
 
 @pytest.mark.parametrize(

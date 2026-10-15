@@ -19,6 +19,7 @@ Step 3 语义的逐条落实:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -26,6 +27,10 @@ from typing import Any
 
 import pytest
 
+from eval.capability_manifest import (
+    EvalCapabilityManifest,
+    capability_fingerprint,
+)
 from eval.config import EvalConfig, fixed_eval_config
 from eval.product_suite import main as product_suite_main
 from eval.reporting.json_report import ReportBuilder
@@ -170,7 +175,7 @@ def sample_results(*, api_key: str | None = None) -> list[CaseResult | ScoredCas
         _case_result(
             "case-bad",
             run_id=uuid.uuid4(),
-            tool_calls=(ToolCallCapture(stable_key="update_price", ordinal=1, status="SUCCEEDED"),),
+            tool_calls=(ToolCallCapture(stable_key="set_listing_price", ordinal=1, status="SUCCEEDED"),),
         ),
         _scored(
             "case-bad",
@@ -257,7 +262,7 @@ def test_process_and_grounding_rates_use_only_declared_applicable_cases(
                 applicable=True,
                 passed=False,
                 checked_constraints=1,
-                violations=("wrong_order:get_listing->update_price",),
+                violations=("wrong_order:get_listing->set_listing_price",),
             ),
             "grounding": GroundingScore(
                 applicable=True,
@@ -336,7 +341,7 @@ def test_task_completion_includes_required_process_and_grounding(
                 applicable=True,
                 passed=False,
                 checked_constraints=1,
-                violations=("compare_listing_prices before update_price",),
+                violations=("compare_listing_prices before set_listing_price",),
             )
         }
     )
@@ -377,7 +382,9 @@ def test_report_counts_scenarios_that_pass_all_repetitions(
 
 
 def test_report_carries_fingerprint_config_and_totals(
-    report_builder: ReportBuilder, eval_config: EvalConfig
+    report_builder: ReportBuilder,
+    eval_config: EvalConfig,
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     report = report_builder.build(
         sample_results(),
@@ -385,10 +392,15 @@ def test_report_carries_fingerprint_config_and_totals(
         benchmark_fingerprint="fp-benchmark-xyz",
         system_fingerprint="fp-system-xyz",
         config=eval_config,
+        capability_manifest=eval_manifest,
     )
     assert report["protocol_fingerprint"] == "fp-run-xyz"
     assert report["benchmark_fingerprint"] == "fp-benchmark-xyz"
     assert report["system_fingerprint"] == "fp-system-xyz"
+    assert (
+        report["capability_manifest"]["capability_fingerprint"]
+        == eval_manifest.capability_fingerprint
+    )
     assert report["config"]["model"] == eval_config.model
     assert report["config"]["temperature"] == 0
     assert report["config"]["repetitions"] == 3
@@ -422,7 +434,7 @@ def test_case_traces_are_redacted_references(report_builder: ReportBuilder) -> N
     bad = case_by_id["case-bad"]
     assert bad["trace"]["tool_calls"] == [
         {
-            "stable_key": "update_price",
+            "stable_key": "set_listing_price",
             "ordinal": 1,
             "status": "SUCCEEDED",
             "failure_code": None,
@@ -435,13 +447,19 @@ def test_case_traces_are_redacted_references(report_builder: ReportBuilder) -> N
 
 
 def test_markdown_is_readable_view_of_same_report(
-    report_builder: ReportBuilder, eval_config: EvalConfig
+    report_builder: ReportBuilder,
+    eval_config: EvalConfig,
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     report = report_builder.build(
-        sample_results(), protocol_fingerprint="fp-run-xyz", config=eval_config
+        sample_results(),
+        protocol_fingerprint="fp-run-xyz",
+        config=eval_config,
+        capability_manifest=eval_manifest,
     )
     markdown = render_markdown(report)
     assert "fp-run-xyz" in markdown
+    assert eval_manifest.capability_fingerprint in markdown
     for key in REQUIRED_METRIC_KEYS:
         assert key in markdown
     assert "process_correctness_rate" in markdown
@@ -491,7 +509,10 @@ async def test_langfuse_export_redacts_before_export() -> None:
 
 
 def test_product_suite_missing_env_fails_fast(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    capsys: pytest.CaptureFixture[str],
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     """缺任一必需环境变量 → 明确报错(提示变量名)、退出码非 0、不产报告。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
@@ -501,6 +522,9 @@ def test_product_suite_missing_env_fails_fast(
     _write_minimal_dataset(
         tmp_path, manifest, split="clarification", case_id="clarify-001"
     )
+    capability_path = _write_capability_manifest(
+        tmp_path, eval_manifest, split="clarification"
+    )
     output = tmp_path / "report.json"
     code = product_suite_main(
         [
@@ -508,6 +532,8 @@ def test_product_suite_missing_env_fails_fast(
             "clarification",
             "--dataset-dir",
             str(tmp_path),
+            "--capability-manifest",
+            str(capability_path),
             "--output",
             str(output),
         ]
@@ -547,6 +573,25 @@ def _write_minimal_dataset(
     )
 
 
+def _write_capability_manifest(
+    dataset_dir: Path,
+    manifest: EvalCapabilityManifest,
+    *,
+    split: str,
+) -> Path:
+    document = manifest.model_dump(mode="json")
+    hashes = dict(document["dataset_hashes"])
+    hashes[split] = hashlib.sha256(
+        (dataset_dir / f"{split}.yaml").read_bytes()
+    ).hexdigest()
+    document["dataset_hashes"] = hashes
+    document["capability_fingerprint"] = capability_fingerprint(document)
+    updated = EvalCapabilityManifest.model_validate(document)
+    path = dataset_dir / "capability-manifest.json"
+    path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
 def _purpose_manifest(*, core_ids: list[str], safety_ids: list[str]) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -562,18 +607,36 @@ def _purpose_manifest(*, core_ids: list[str], safety_ids: list[str]) -> dict[str
 
 
 def test_product_suite_accepts_safety_split(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     manifest = _purpose_manifest(core_ids=[], safety_ids=["safe-001"])
     _write_minimal_dataset(tmp_path, manifest, split="safety", case_id="safe-001")
+    capability_path = _write_capability_manifest(
+        tmp_path, eval_manifest, split="safety"
+    )
     monkeypatch.delenv("EVAL_API_KEY", raising=False)
-    code = product_suite_main(["--split", "safety", "--dataset-dir", str(tmp_path)])
+    code = product_suite_main(
+        [
+            "--capability-manifest",
+            str(capability_path),
+            "--split",
+            "safety",
+            "--dataset-dir",
+            str(tmp_path),
+        ]
+    )
     assert code == 2
     assert "EVAL_API_KEY" in capsys.readouterr().err
 
 
 def test_product_suite_rejects_empty_regression_before_env_check(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     manifest = _purpose_manifest(core_ids=[], safety_ids=[])
     _write_minimal_dataset(tmp_path, manifest, split="regression", case_id="unused-001")
@@ -582,14 +645,29 @@ def test_product_suite_rejects_empty_regression_before_env_check(
     )
     manifest["regression_ids"] = []
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    capability_path = _write_capability_manifest(
+        tmp_path, eval_manifest, split="regression"
+    )
     monkeypatch.delenv("EVAL_API_KEY", raising=False)
-    code = product_suite_main(["--split", "regression", "--dataset-dir", str(tmp_path)])
+    code = product_suite_main(
+        [
+            "--capability-manifest",
+            str(capability_path),
+            "--split",
+            "regression",
+            "--dataset-dir",
+            str(tmp_path),
+        ]
+    )
     assert code == 2
     assert "no scenarios" in capsys.readouterr().err
 
 
 def test_product_suite_rejects_core_hash_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    capsys: pytest.CaptureFixture[str],
+    eval_manifest: EvalCapabilityManifest,
 ) -> None:
     """Core 哈希漂移 → 拒绝运行(数据集校验先于环境变量检查)。"""
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
@@ -607,7 +685,17 @@ def test_product_suite_rejects_core_hash_drift(
     }
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (tmp_path / "core.yaml").write_text("[]", encoding="utf-8")
-    code = product_suite_main(["--split", "core", "--dataset-dir", str(tmp_path)])
+    capability_path = _write_capability_manifest(tmp_path, eval_manifest, split="core")
+    code = product_suite_main(
+        [
+            "--capability-manifest",
+            str(capability_path),
+            "--split",
+            "core",
+            "--dataset-dir",
+            str(tmp_path),
+        ]
+    )
     assert code != 0
     captured = capsys.readouterr()
     assert "core_sha256" in captured.err

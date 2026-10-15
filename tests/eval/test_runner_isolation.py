@@ -62,7 +62,9 @@ async def test_provider_401_is_infrastructure_failure(
     result = await eval_runner.run_one(valid_case, backend=provider_401)
     assert result.status == "INFRASTRUCTURE_ERROR"
     assert result.included_in_quality_score is False
-    assert result.fingerprint == protocol_fingerprint(valid_case, eval_runner.config)
+    assert result.fingerprint == protocol_fingerprint(
+        valid_case, eval_runner.config, eval_runner.manifest
+    )
 
 
 async def test_provider_invalid_request_is_not_scored_as_agent_failure(
@@ -105,7 +107,9 @@ async def test_completed_case_captures_full_trace(
     assert result.included_in_quality_score is True
     assert result.case_id == "price-001"
     assert result.repetition == 0
-    assert result.fingerprint == protocol_fingerprint(valid_case, eval_config)
+    assert result.fingerprint == protocol_fingerprint(
+        valid_case, eval_config, eval_runner.manifest
+    )
     assert result.run_id is not None
 
     # 事件流:ToolCall 提案 → 等输入 → 恢复 → 写结果 →
@@ -120,12 +124,12 @@ async def test_completed_case_captures_full_trace(
         event.sequence_no for event in result.events
     )
 
-    # ToolCall:update_price SUCCEEDED;Operation:平台写入记录存在。
+    # ToolCall:set_listing_price SUCCEEDED;Operation:平台写入记录存在。
     assert [(call.stable_key, call.status) for call in result.tool_calls] == [
-        ("update_price", "SUCCEEDED")
+        ("set_listing_price", "SUCCEEDED")
     ]
     assert result.tool_calls[0].normalized_arguments == {
-        "store_id": "store-1",
+        "store_ref": "store-1",
         "sku": "SKU-001",
         "target_price": "99.00",
     }
@@ -145,6 +149,7 @@ async def test_product_eval_uses_auto_execute(
     engine: AsyncEngine,
     eval_config: EvalConfig,
     valid_case: Scenario,
+    eval_manifest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Runner 将 AUTO_EXECUTE 写入评测 Workspace,且测试后清理隔离环境。"""
@@ -156,10 +161,15 @@ async def test_product_eval_uses_auto_execute(
         scenario: Scenario,
         *,
         backend: Any,
+        manifest=None,
         execution_mode: ExecutionMode = ExecutionMode.CONFIRM_WRITES,
     ) -> IsolatedEnvironment:
         environment = await original_create(
-            engine, scenario, backend=backend, execution_mode=execution_mode
+            engine,
+            scenario,
+            backend=backend,
+            manifest=manifest,
+            execution_mode=execution_mode,
         )
         environments.append(environment)
         return environment
@@ -168,6 +178,7 @@ async def test_product_eval_uses_auto_execute(
     runner = EvalRunner(
         engine,
         config=eval_config,
+        manifest=eval_manifest,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=1,
         cleanup_environments=False,
@@ -197,6 +208,7 @@ async def test_read_only_execution_mode_denies_writes_without_confirmation(
     runner = EvalRunner(
         engine,
         config=eval_runner.config,
+        manifest=eval_runner.manifest,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=1,
         execution_mode=ExecutionMode.READ_ONLY,
@@ -206,10 +218,10 @@ async def test_read_only_execution_mode_denies_writes_without_confirmation(
     assert result.final_state is not None
     assert result.final_state.logical_writes == 0
     assert [(call.stable_key, call.status) for call in result.tool_calls] == [
-        ("update_price", "DENIED")
+        ("set_listing_price", "DENIED")
     ]
     assert result.tool_calls[0].normalized_arguments == {
-        "store_id": "store-1",
+        "store_ref": "store-1",
         "sku": "SKU-001",
         "target_price": "99.00",
     }
@@ -234,9 +246,9 @@ async def test_policy_denial_preserves_normalized_arguments_for_audit(
                 return
             yield ToolCallCompleted(
                 call_id="explicit-store-denied",
-                name="update_price",
+                name="set_listing_price",
                 arguments={
-                    "store_id": "store-1",
+                    "store_ref": "store-1",
                     "sku": "SKU-001",
                     "target_price": "30.00",
                 },
@@ -276,7 +288,7 @@ async def test_policy_denial_preserves_normalized_arguments_for_audit(
                 "max_logical_writes": 0,
             },
             "forbidden_side_effects": [
-                {"tool": "update_price", "target": "store-1/SKU-001"}
+                {"tool": "set_listing_price", "target": "store-1/SKU-001"}
             ],
         }
     )
@@ -284,11 +296,13 @@ async def test_policy_denial_preserves_normalized_arguments_for_audit(
     result = await eval_runner.run_one(case, backend=ExplicitStoreBackend())
 
     assert result.status == "COMPLETED"
-    denied = next(call for call in result.tool_calls if call.stable_key == "update_price")
+    denied = next(
+        call for call in result.tool_calls if call.stable_key == "set_listing_price"
+    )
     assert denied.status == "DENIED"
     assert denied.failure_code == "PRICE_BELOW_FLOOR"
     assert denied.normalized_arguments == {
-        "store_id": "store-1",
+        "store_ref": "store-1",
         "sku": "SKU-001",
         "target_price": "30.00",
     }
@@ -316,7 +330,7 @@ async def test_runner_rejects_a_future_interaction_used_too_early(
         update={
             "interactions": (
                 UserInteraction(
-                    kind="input", message_index=4, values={"store_id": "store-1"}
+                    kind="input", message_index=4, values={"store_ref": "store-1"}
                 ),
             ),
             "messages": (
@@ -425,12 +439,13 @@ async def test_cases_run_in_isolated_workspaces(
 
 
 async def test_repetitions_are_isolated(
-    engine: AsyncEngine, eval_config: EvalConfig, valid_case: Scenario
+    engine: AsyncEngine, eval_config: EvalConfig, eval_manifest, valid_case: Scenario
 ) -> None:
     """同一 case 的多次重复彼此独立(各自全新 Workspace 与业务状态)。"""
     runner = EvalRunner(
         engine,
         config=eval_config,
+        manifest=eval_manifest,
         backend_factory=lambda scenario: E2EScriptedBackend(),
         repetitions=2,
     )

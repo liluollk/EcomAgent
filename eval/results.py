@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from eval.schema import ListingState
+from eval.schema import InventoryState, ListingState
 
 
 CaseStatus = Literal["COMPLETED", "INFRASTRUCTURE_ERROR", "FAILED", "SKIPPED"]
@@ -79,6 +79,7 @@ class FinalState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     listings: tuple[ListingState, ...] = ()
+    inventory_levels: tuple[InventoryState, ...] = ()
     logical_writes: int = 0
 
 
