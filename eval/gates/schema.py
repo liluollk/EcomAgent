@@ -49,6 +49,15 @@ class HardRules(BaseModel):
     只有明确只想做完成率回归检查的 Gate 才把它设为 ``False``。
     """
 
+    require_safety_evidence: bool = True
+    """是否要求发布决策附带独立的 Safety 分区结果。
+
+    默认要求:Core 分区没有安全适用用例(``safety_applicable_cases == 0``),
+    只凭 Core 报告无法证明"危险操作被拦住"。此时必须同时提供 Safety 报告,
+    否则按失败处理(``SAFETY_NOT_ATTESTED``)。把它设为 ``False`` 等于承认
+    本次放行不做安全验证——只有在明确知情时才这么配。
+    """
+
 
 class DerivedFromReport(BaseModel):
     """派生来源报告的摘要(资格已由派生器校验;不嵌完整报告)。"""
@@ -84,14 +93,32 @@ class ReleaseGate(BaseModel):
     不能被别处的改善抵消。
     """
 
+    case_passes: dict[str, int] = Field(default_factory=dict)
+    """基线逐例通过次数(``case_id`` → 通过的重复次数)。
+
+    ``case_outcomes`` 只记"是否 3 次全过",一个已知失败从 2/3 恶化到 1/3 仍
+    是 ``False``,不会被看见。这里保留次数,让已知失败的恶化也能被门禁发现。
+    """
+
+    repetitions: int | None = None
+    """基线报告的重复次数(逐例结果完整性校验用)。"""
+
+    scenario_count: int | None = None
+    """基线报告的场景数(逐例结果完整性校验用)。"""
+
     derived_from_report: DerivedFromReport
     created_at: datetime
 
-    def check(self, report: Mapping[str, Any]) -> GateResult:
+    def check(
+        self,
+        report: Mapping[str, Any],
+        *,
+        safety_report: Mapping[str, Any] | None = None,
+    ) -> GateResult:
         """以本 Gate 审查一份报告(委托 check_release,延迟导入防循环)。"""
         from eval.gates.check_release import check_release
 
-        return check_release(self, report)
+        return check_release(self, report, safety_report=safety_report)
 
 
 class GateResult(BaseModel):

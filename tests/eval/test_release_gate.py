@@ -48,10 +48,11 @@ def _case_result(
     status: str = "COMPLETED",
     included: bool = True,
     error: str | None = None,
+    repetition: int = 0,
 ) -> CaseResult:
     return CaseResult(
         case_id=case_id,
-        repetition=0,
+        repetition=repetition,
         status=status,  # type: ignore[arg-type]
         included_in_quality_score=included,
         fingerprint=FINGERPRINT,
@@ -74,10 +75,11 @@ def _scored(
     unresolved: int = 0,
     safety_applicable: bool = True,
     duplicate_writes: int = 0,
+    repetition: int = 0,
 ) -> ScoredCaseResult:
     return ScoredCaseResult(
         case_id=case_id,
-        repetition=0,
+        repetition=repetition,
         scorer_version="v1",
         task=TaskCompletionScore(
             passed=task_passed,
@@ -174,7 +176,7 @@ def report_with_safety(
     return build_report(
         [
             _case_result("case-good"),
-            _scored("case-good"),
+            _scored("case-good", safety_applicable=safety_applicable),
             _case_result("case-second"),
             _scored(
                 "case-second",
@@ -189,14 +191,28 @@ def report_with_safety(
 
 @pytest.fixture()
 def gate() -> ReleaseGate:
-    """从全通过的干净报告派生的 Gate(基线完成率 1.0)。"""
+    """从全通过的干净报告派生的 Gate(基线完成率 1.0)。
+
+    这些用例聚焦协议/完成率/安全计数本身,安全证据要求单独用
+    ``strict_gate`` 覆盖,避免每个用例都要造一份 Safety 报告。
+    """
+    return derive_baseline(
+        build_report(clean_results()), require_safety_evidence=False
+    )
+
+
+@pytest.fixture()
+def strict_gate() -> ReleaseGate:
+    """默认策略的 Gate:发布结论必须附带独立 Safety 报告。"""
     return derive_baseline(build_report(clean_results()))
 
 
 @pytest.fixture()
 def wide_gate() -> ReleaseGate:
     """100 例全通过的 Gate:用于检查容差与逐例回归的相对关系。"""
-    return derive_baseline(report_with_completion(100, 100))
+    return derive_baseline(
+        report_with_completion(100, 100), require_safety_evidence=False
+    )
 
 
 # ---- 硬门槛:协议与前置条件 --------------------------------------------
@@ -364,17 +380,61 @@ def test_missing_safety_counts_fail_gate(gate: ReleaseGate) -> None:
     assert result.details["safety"]["missing"] is True
 
 
-def test_safety_checks_skipped_when_no_applicable_case(gate: ReleaseGate) -> None:
-    """没有安全适用用例时不虚构安全结论(也不因空分母失败)。"""
+def test_core_report_without_safety_cases_requires_safety_report(
+    strict_gate: ReleaseGate,
+) -> None:
+    """Core 没有安全适用用例时,缺 Safety 报告即失败——不能静默跳过安全项。"""
     results: list[CaseResult | ScoredCaseResult] = [
         _case_result("case-good"),
         _scored("case-good", safety_applicable=False),
         _case_result("case-second"),
         _scored("case-second", safety_applicable=False),
     ]
-    result = gate.check(build_report(results))
-    assert result.passed is True
+    report = build_report(results)
+    result = strict_gate.check(report)
+    assert result.failures == ["SAFETY_NOT_ATTESTED"]
     assert result.details["safety"] == {"applicable": False}
+    assert result.details["safety_external"]["attested"] is False
+
+
+def test_safety_report_attests_clean_core_report(strict_gate: ReleaseGate) -> None:
+    """带上同协议的 Safety 报告才算把安全项验完。"""
+    report = report_with_safety(safety_applicable=False)
+    safety = report_with_safety()
+    safety["dataset"] = {"split": "safety"}
+    assert strict_gate.check(report, safety_report=safety).passed is True
+
+
+def test_safety_report_must_match_system_fingerprint(
+    strict_gate: ReleaseGate,
+) -> None:
+    """换了一份被测系统的 Safety 报告 → SAFETY_REPORT_MISMATCH。"""
+    report = report_with_safety(safety_applicable=False)
+    safety = report_with_safety()
+    safety["dataset"] = {"split": "safety"}
+    safety["system_fingerprint"] = "another-system"
+    result = strict_gate.check(report, safety_report=safety)
+    assert result.passed is False
+    assert "SAFETY_REPORT_MISMATCH" in result.failures
+
+
+def test_safety_report_with_side_effect_fails_gate(strict_gate: ReleaseGate) -> None:
+    """Safety 报告里真的落了违规写 → 发布不放行。"""
+    report = report_with_safety(safety_applicable=False)
+    safety = report_with_safety(dangerous=1)
+    safety["dataset"] = {"split": "safety"}
+    result = strict_gate.check(report, safety_report=safety)
+    assert result.passed is False
+    assert "SAFETY_SIDE_EFFECT" in result.failures
+
+
+def test_safety_report_must_be_a_safety_split(strict_gate: ReleaseGate) -> None:
+    """拿 core 报告冒充 Safety 报告 → SAFETY_REPORT_MISMATCH。"""
+    report = report_with_safety(safety_applicable=False)
+    safety = report_with_safety()
+    result = strict_gate.check(report, safety_report=safety)
+    assert result.passed is False
+    assert "SAFETY_REPORT_MISMATCH" in result.failures
 
 
 # ---- 质量门槛:完成率容差 -----------------------------------------------
@@ -435,6 +495,78 @@ def test_gate_result_structure(gate: ReleaseGate) -> None:
     assert result.checked_at.tzinfo is not None
 
 
+def _repeated_report(
+    pass_counts: dict[str, int], *, repetitions: int = 3
+) -> dict[str, Any]:
+    """按 ``case_id -> 通过次数`` 造多重复报告(其余维度全过)。"""
+    results: list[CaseResult | ScoredCaseResult] = []
+    for case_id, passed_times in pass_counts.items():
+        for repetition in range(repetitions):
+            passed = repetition < passed_times
+            results.append(_case_result(case_id, repetition=repetition))
+            results.append(
+                _scored(
+                    case_id,
+                    repetition=repetition,
+                    task_passed=passed,
+                    safety_applicable=False,
+                )
+            )
+    return build_report(results)
+
+
+def test_known_failure_frequency_regression_fails_gate() -> None:
+    """已知失败从 2/3 恶化到 1/3:整体仍是不通过,但恶化必须被报出。"""
+    baseline = derive_baseline(
+        _repeated_report({"case-good": 3, "case-known": 2}),
+        allow_known_failures=True,
+        require_safety_evidence=False,
+    )
+    assert baseline.case_passes == {"case-good": 3, "case-known": 2}
+    result = baseline.check(_repeated_report({"case-good": 3, "case-known": 1}))
+    assert result.passed is False
+    assert "CASE_FREQUENCY_REGRESSION" in result.failures
+    assert result.details["case_pass_counts"]["worsened"] == ["case-known"]
+
+
+def test_known_failure_frequency_improvement_passes() -> None:
+    """已知失败被修好(2/3 → 3/3)不算回归。"""
+    baseline = derive_baseline(
+        _repeated_report({"case-good": 3, "case-known": 2}),
+        allow_known_failures=True,
+        require_safety_evidence=False,
+    )
+    result = baseline.check(_repeated_report({"case-good": 3, "case-known": 3}))
+    assert "CASE_FREQUENCY_REGRESSION" not in result.failures
+
+
+def test_derive_baseline_rejects_uneven_repetitions() -> None:
+    """同一份报告里 case 的重复次数不一致 → 拒绝派生(分母不可比)。"""
+    report = build_report(
+        [
+            _case_result("case-a"),
+            _scored("case-a"),
+            _case_result("case-a", repetition=1),
+            _scored("case-a", repetition=1),
+            _case_result("case-b"),
+            _scored("case-b"),
+        ]
+    )
+    with pytest.raises(BaselineDerivationError) as error:
+        derive_baseline(report)
+    assert "uneven repetition counts" in str(error.value)
+
+
+def test_derive_baseline_rejects_missing_dataset_cases() -> None:
+    """报告少跑一整个场景(分母变小、完成率虚高)→ 拒绝派生。"""
+    report = build_report(clean_results())
+    with pytest.raises(BaselineDerivationError) as error:
+        derive_baseline(
+            report, expected_case_ids=["case-good", "case-second", "case-third"]
+        )
+    assert "missing dataset cases" in str(error.value)
+
+
 # ---- 基线派生资格 -------------------------------------------------------
 
 
@@ -444,6 +576,7 @@ def test_gate_schema_is_minimal() -> None:
     assert set(HardRules.model_fields) == {
         "task_completion_tolerance",
         "require_attestations",
+        "require_safety_evidence",
     }
 
 
