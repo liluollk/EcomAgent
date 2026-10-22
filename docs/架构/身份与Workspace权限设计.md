@@ -6,7 +6,7 @@
 
 ## 1. 目标与边界
 
-本文定义首版的身份来源、Workspace 成员角色、店铺数据范围、动作权限、Actor 在 API 与 Worker 之间的传递、凭证管理和模型端点安全。
+本文定义首版的身份来源、Workspace 成员角色、店铺数据范围、动作权限、Actor 在 API 与执行器之间的传递、凭证管理和模型端点安全。
 
 首版不接入 Keycloak、企业 SSO、组织目录和跨企业多租户计费。未接入企业身份系统不代表省略身份边界；所有状态变化和写 Tool 仍必须关联可审计的 Actor。
 
@@ -107,7 +107,7 @@ Execution Mode 不授予动作权限：拥有 `product.price.write` 但 Workspac
 
 ## 5. Workspace 隔离
 
-所有 Workspace 资源表必须包含 `workspace_id`，包括 Session、Message、Run、RunAttempt、RunJob、ToolCall、Input Request、Confirmation Request、AgentEvent、Skill 配置、Source 配置、模型配置、Secret 引用和审计记录。
+所有 Workspace 资源表必须包含 `workspace_id`，包括 Session、Message、Run、RunAttempt、ToolCall、Input Request、Confirmation Request、AgentEvent、Skill 配置、Source 配置、模型配置、Secret 引用和审计记录。
 
 Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Workspace 与资源 ID。禁止先按全局资源 ID 查询后再在业务层补权限判断。
 
@@ -117,7 +117,7 @@ Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Wo
 
 首版使用应用层隔离和自动化测试，不要求 PostgreSQL RLS；未来若增加真正多租户部署，再评估数据库 RLS。
 
-## 6. Actor 传递与 Worker 授权
+## 6. Actor 传递与执行器授权
 
 创建 Run 时持久化：
 
@@ -126,7 +126,7 @@ Repository 方法必须显式接收 `workspace_id`，查询条件同时包含 Wo
 - 创建时的资源范围和动作权限摘要，用于审计；
 - 当前 Execution Mode 和相关配置版本。
 
-Worker 不能使用“系统管理员”身份绕过原操作者权限。每次写操作前，Worker 根据 `created_by_actor_id` 重新读取当前 Membership、资源范围和动作权限：
+执行器不能使用“系统管理员”身份绕过原操作者权限。每次写操作前，执行器根据 `created_by_actor_id` 重新读取当前 Membership、资源范围和动作权限：
 
 - Membership 已删除或禁用：拒绝执行；
 - 目标资源已移出范围：拒绝执行；
@@ -134,7 +134,7 @@ Worker 不能使用“系统管理员”身份绕过原操作者权限。每次�
 - Execution Mode 或 Business Policy 变化：按当前规则重新决策；
 - Actor 快照只用于审计，不能覆盖当前权限事实。
 
-系统 Actor 仅用于租约回收、Trace 补偿、Memory 同步和 Reconciliation 调度等维护任务。系统 Actor 可以推进状态机，但不能代替用户通过写权限或写前确认。
+系统 Actor 仅用于 Trace 补偿、Memory 同步和 Reconciliation 调度等维护任务。系统 Actor 可以推进状态机，但不能代替用户通过写权限或写前确认。
 
 ## 7. Request 处理权限
 
@@ -147,7 +147,7 @@ Input Request 的回答者必须：
 
 Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不能替另一个 Operator 完成首版的自确认；如未来需要他人审批，应单独设计 Approval Request，不能复用 Confirmation Request。
 
-处理 Request 时使用条件更新保证单次消费。重复提交返回已经保存的结果，不创建第二个 RunJob。
+处理 Request 时使用条件更新保证单次消费。重复提交返回已经保存的结果，不产生第二次推进。
 
 ## 8. Secret 管理
 
@@ -158,7 +158,7 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 - 加密记录保存 key version、nonce、ciphertext 和认证标签；
 - API 创建或更新后不再返回明文，只显示固定掩码和更新时间；
 - 只有 WorkspaceOwner 可以创建、替换或删除 Workspace Secret；
-- Worker 按最小需要解密，明文只存在于调用期间；
+- 执行器按最小需要解密，明文只存在于调用期间；
 - 日志、异常、AgentEvent、ToolResult、Langfuse Trace 和 Eval 报告统一脱敏；
 - 主密钥轮换通过 key version 支持逐条重加密。
 
@@ -189,7 +189,7 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 - Input Request 回答；
 - Confirmation Request 接受、拒绝、过期和取消；
 - 写 Tool 被允许、拒绝、执行、回查或进入 `UNKNOWN`；
-- Worker 以原 Actor 身份重新校验权限的结果。
+- 执行器以原 Actor 身份重新校验权限的结果。
 
 审计记录至少包含 `audit_id`、`workspace_id`、`actor_id`、动作、目标类型与 ID、结果、原因码、时间和关联的 `request_id/run_id/tool_call_id`。审计 payload 必须脱敏且只追加，不允许普通业务 API 修改。
 
@@ -204,7 +204,7 @@ Confirmation Request 只能由绑定的 `actor_id` 处理。WorkspaceOwner 不�
 5. `READ_ONLY` 下任何成员都不能执行写 Tool；
 6. `AUTO_EXECUTE` 不会绕过缺失的 `product.price.write`；
 7. Actor 在确认后被撤销写权限，恢复时写操作被拒绝；
-8. Worker 不能使用系统 Actor 绕过原 Actor 权限；
+8. 执行器不能使用系统 Actor 绕过原 Actor 权限；
 9. 使用另一个 Workspace 的资源 ID 无法读取或修改数据；
 10. API Key 创建后不回显，且不会出现在日志、AgentEvent 或 Trace；
 11. 未在 allowlist 的模型或 MCP URL、云元数据地址和跨主机重定向被拒绝；

@@ -1,16 +1,16 @@
 # PostgreSQL 数据模型与事务设计
 
-> 版本：v0.2
-> 日期：2026-10-02
-> 状态：已确认
+> 版本：v0.3
+> 日期：2026-10-19
+> 状态：已确认（执行模型经 ADR-003 修订：删除 run_jobs，Run 由进程内执行器按 CAS 推进）
 
 ## 1. 目标与选型
 
 本文把需求和 Runtime 状态机映射为 PostgreSQL 表、约束、索引和事务边界，是 SQLAlchemy Model、Repository、Alembic Migration 和持久化测试的依据。
 
-首版使用 PostgreSQL 作为 Runtime、身份、业务配置和审计的权威存储，不使用 SQLite 兼容模式，也不引入 Redis。原因是实现依赖 JSONB、部分唯一索引、`FOR UPDATE SKIP LOCKED`、事务锁和 pgvector；使用 SQLite 测试无法验证这些关键语义。
+首版使用 PostgreSQL 作为 Runtime、身份、业务配置和审计的权威存储，不使用 SQLite 兼容模式，也不引入 Redis。原因是实现依赖 JSONB、部分唯一索引、`FOR UPDATE`、advisory lock、事务锁和 pgvector；使用 SQLite 测试无法验证这些关键语义。
 
-默认事务隔离级别使用 `READ COMMITTED`，在需要串行化的 Session、Request 和 Job 行上使用条件更新或行锁，不把整个 Agent Loop 放入数据库事务。
+默认事务隔离级别使用 `READ COMMITTED`，在需要串行化的 Session、Request 和 Run 行上使用条件更新或行锁，不把整个 Agent Loop 放入数据库事务。
 
 ## 2. 数据库与 Schema 边界
 
@@ -276,47 +276,26 @@ RETURNING *;
 
 返回零行表示已处理、已过期、越权或不存在；应用服务必须进一步区分并返回稳定错误码。
 
-## 9. RunJob 与租约
+## 9. Run 队列与执行器（无 Job 表）
 
-```text
-run_jobs
-  id, workspace_id, run_id, kind,
-  status, available_at, attempt_count, max_attempts,
-  lease_owner, lease_token, lease_expires_at,
-  last_error_code, created_at, updated_at
-```
+首版不建 `run_jobs` 表。数据库里的 `runs.status = 'QUEUED'` 就是待办队列，由进程内 `RunExecutor` 领取（ADR-003）：
 
-`kind` 只允许：
+1. 短事务内 `SELECT ... FOR UPDATE` 读取 Run，要求 `status = 'QUEUED'`；
+2. 以 `state_version` CAS 把 Run 改为 `RUNNING`（零行即领取失败，放弃本次）；
+3. 以 `max(attempt_no) + 1` 创建 `RunAttempt(status='RUNNING', executor_id=?)`；
+4. 提交事务后才开始模型或 Tool 外部调用。
 
-- `ADVANCE_RUN`：推进 Agent Loop、处理 ToolCall 或交互恢复；
-- `RECONCILE_OPERATION`：回查 `UNKNOWN` Operation。
+`RunAttempt` 的 `executor_id` 只用于事后归因（哪个进程跑的），不参与互斥。并发互斥只有两层：每次推进的 `state_version` CAS，以及进程启动时的一次 advisory lock 单写者断言。
 
-Trace 和 Memory 同步不使用 RunJob，进入 Integration Outbox。
+启动恢复扫描（`RunExecutor.recover`）替代原租约回收器：
 
-部分唯一索引保证同一 Run 最多一个活动 Job：
+- 扫描 `QUEUED / RUNNING / WAITING_RECONCILIATION`；
+- 把遗留的 `RUNNING` Attempt 标为 `ABANDONED`（`failure_code='EXECUTOR_RESTART'`）；
+- 存在 `EXECUTING/UNKNOWN` Operation 的 Run 先回查，必要时 CAS 到 `WAITING_RECONCILIATION`；
+- 其余 `RUNNING` 视为上次中断，CAS 回 `QUEUED` 后继续推进；
+- 连续 `max_attempts` 次推进失败后 Run 落 `FAILED`。
 
-```sql
-UNIQUE (run_id)
-WHERE status IN ('PENDING', 'LEASED')
-```
-
-领取过程在短事务中执行：
-
-1. 使用 `FOR UPDATE SKIP LOCKED` 选择到期的 `PENDING` Job；
-2. 写入新 `lease_token`、Worker ID 和过期时间；
-3. 将 Job 改为 `LEASED`；
-4. 创建新 RunAttempt 并递增 `attempt_no`；
-5. `ADVANCE_RUN` 将 Run 从 `QUEUED` CAS 为 `RUNNING`；`RECONCILE_OPERATION` 要求 Run 已是 `WAITING_RECONCILIATION`，领取期间保持该状态；
-6. 提交事务后才开始模型或 Tool 外部调用。
-
-租约回收器处理过期 Job：
-
-- 锁定 Job 和 Run；
-- 把旧 Attempt 标记 `ABANDONED`；
-- 清除旧 token 并生成新的可领取周期；
-- 未超过预算时 Job 回到 `PENDING`；`ADVANCE_RUN` 的 Run 回到 `QUEUED`，`RECONCILE_OPERATION` 的 Run 保持 `WAITING_RECONCILIATION`；
-- 超过预算时 Job 进入 `DEAD`、Run 进入 `FAILED`；
-- 写 Operation 已处于 `EXECUTING/UNKNOWN` 时，下一 Job 必须为 `RECONCILE_OPERATION`，不能直接再次执行。
+Trace 和 Memory 同步仍走 Integration Outbox，其租约语义与 Run 执行无关（§11）。
 
 ## 10. AgentEvent 与审计
 
@@ -376,7 +355,7 @@ Memory Record 生命周期状态为 `ACTIVE / SUPERSEDED / EXPIRED / DELETED`，
 
 Outbox Worker 成功后标记 `DONE`；失败按预算重试，最终 `DEAD` 并保留诊断。外部集成失败不能回滚已经完成的 Runtime 状态。
 
-Outbox 使用与 RunJob 相同的短租约原则，但其租约和失败不会改变 Run 状态。
+Outbox 使用独立的短租约；其租约与失败不会改变 Run 状态。
 
 ## 12. 核心事务
 
@@ -389,19 +368,18 @@ Outbox 使用与 RunJob 相同的短租约原则，但其租约和失败不会�
 3. 验证不存在活动 Run；
 4. 插入 User Message、Run 和版本关联；
 5. 更新 `sessions.active_run_id`；
-6. 插入 `ADVANCE_RUN` Job；
-7. 写 `RUN_CREATED` AgentEvent 和审计事件；
-8. 提交。
+6. 写 `RUN_CREATED` AgentEvent 和审计事件；
+7. 提交（提交后路由唤醒执行器；数据库里 `QUEUED` 的 Run 本身就是待办）。
 
 ### 12.2 推进到等待状态
 
 一个事务内：
 
-1. 验证 Job lease token 和 Run `state_version`；
+1. 验证 Run `state_version` 与"Run 仍为 `RUNNING`"；
 2. 更新 ToolCall；
 3. 创建 Input 或 Confirmation Request；
 4. Run 改为对应等待状态；
-5. 当前 Job 改为 `DONE`，Attempt 改为 `SUCCEEDED`；
+5. 当前 Attempt 改为 `SUCCEEDED`（由执行器在推进返回后提交）；
 6. 写 AgentEvent；
 7. 提交。
 
@@ -413,9 +391,8 @@ Outbox 使用与 RunJob 相同的短租约原则，但其租约和失败不会�
 2. 校验 Workspace、Actor、状态和过期时间；
 3. 条件更新 Request；
 4. Run 改为 `QUEUED`；
-5. 创建唯一 `ADVANCE_RUN` Job；
-6. 写 AgentEvent 和审计事件；
-7. 提交。
+5. 写 AgentEvent 和审计事件；
+6. 提交（提交后路由唤醒执行器，数据库中的 `QUEUED` 即待办）。
 
 ### 12.4 外部写操作
 
@@ -431,13 +408,15 @@ Outbox 使用与 RunJob 相同的短租约原则，但其租约和失败不会�
 
 阶段二事务：
 
-1. 验证 lease token、Run state version 和 Operation 当前状态；
+1. 校验 ToolCall 仍为 `EXECUTING`，避免同一写被记两次结果；
 2. 保存脱敏 ExecutionReceipt；
 3. 确定结果则更新 ToolCall/Operation；不确定则进入 `UNKNOWN` 与 `WAITING_RECONCILIATION`；
 4. 写 AgentEvent；
 5. 提交。
 
-如果 Worker 在两个事务之间退出，租约回收后的 Job 根据 Operation 状态进入回查，不重新生成 Operation。
+结果事务不校验 Run 是否仍 `RUNNING`：外部调用可能已经发生，回执是权威事实，必须落库。Run 状态的竞争由 `transition_run` 的 `state_version` CAS 裁决——例如 Run 在写期间被用户取消，`APPLIED` 回照常记账，但 Run 保持 `CANCELLED`，不会被回执复活。
+
+如果进程在两个事务之间退出，重启后的恢复扫描会依据 Operation 的 `EXECUTING/UNKNOWN` 状态进入回查，不重新生成 Operation。
 
 ### 12.5 完成 Run
 
@@ -446,23 +425,23 @@ Outbox 使用与 RunJob 相同的短租约原则，但其租约和失败不会�
 1. 验证没有未完成 ToolCall、Request 或 Operation；
 2. Run 改为终态；
 3. Session 清除 `active_run_id`；
-4. Job 和 Attempt 结束；
+4. 当前 Attempt 结束；
 5. Assistant 最终 Message 与 AgentEvent 持久化；
 6. 生成 Memory/Trace Outbox；
 7. 提交。
 
 ### 12.6 回查 Operation
 
-回查前在短事务内验证 `RECONCILE_OPERATION` Job 的 lease token、Run 状态和 Operation 当前状态，插入状态为 `RUNNING` 的 `RECONCILE` OperationAttempt，然后提交。回查网络调用在事务外执行。
+回查由进程内执行器驱动，没有 Job 与租约。回查前在短事务内校验 Run 状态与 Operation 当前状态，插入状态为 `RUNNING` 的 `RECONCILE` OperationAttempt，然后提交；回查网络调用在事务外执行。
 
 保存结果时在一个事务内：
 
-1. 再次验证 lease token、Run 状态和 Operation 当前状态；
+1. 再次以 `state_version` CAS 校验 Run 状态与 Operation 当前状态；不满足即整笔回滚并抛 `InvalidTransition`（版本守卫在任何写入之前）；
 2. 完成 OperationAttempt 并保存脱敏结果；
 3. 结果为 `APPLIED`：Operation 与 ToolCall 成功，Run 改为 `QUEUED`；
 4. 结果为 `NOT_APPLIED`：仅当 Adapter 策略允许安全重试时，Operation 回到 `PREPARED`、ToolCall 回到 `VALIDATING`、Run 改为 `QUEUED`；恢复后必须重新执行完整 PreToolUse，不得直接重试写入；否则 Run 失败；
-5. 结果仍为 `UNKNOWN`：未超过预算则创建下一次延迟 `RECONCILE_OPERATION` Job，并保持 `WAITING_RECONCILIATION`；超过预算则 Run 失败且 ToolCall 保留 `UNKNOWN`；
-6. 当前 Job 与 Attempt 结束；需要继续 Agent Loop 时创建唯一 `ADVANCE_RUN` Job；
+5. 结果仍为 `UNKNOWN`：保持 `WAITING_RECONCILIATION`，由执行器在回查预算内重试；超过预算则 Run 失败且 ToolCall 保留 `UNKNOWN`；
+6. 消除不确定性后 Run 停在 `QUEUED`，执行器在同一请求或下一次扫描中继续推进同一 Run；
 7. 写 AgentEvent 并提交。
 
 ### 12.7 Request 过期
@@ -489,9 +468,9 @@ Repository 只执行带 Workspace 条件的持久化操作，不自行提交事�
 - ToolHandler 直接取得数据库 Session 并修改 Runtime 表；
 - API Handler 手工拼接跨 Workspace 查询；
 - 在外部网络调用期间持有行锁；
-- 使用内存队列保存唯一一份待执行 Job。
+- 使用内存队列作为待执行 Run 的唯一来源（内存列表只是唤醒提示，数据库才是队列）。
 
-允许只读查询使用独立短事务。所有写 Repository 方法必须接收 `workspace_id`，关键状态更新还必须接收 `expected_state_version` 或 lease token。
+允许只读查询使用独立短事务。所有写 Repository 方法必须接收 `workspace_id`，关键状态更新还必须接收 `expected_state_version`。
 
 ## 14. 索引与保留策略
 
@@ -499,7 +478,7 @@ Repository 只执行带 Workspace 条件的持久化操作，不自行提交事�
 
 - Session：`(workspace_id, updated_at desc)`；
 - Run：`(workspace_id, session_id, created_at)`、活动状态部分索引；
-- Job：`(status, available_at)`、租约过期索引；
+- Run：`(status, created_at)`（执行器兜底扫描）；
 - ToolCall：`(run_id, ordinal)`；
 - Event：`(run_id, sequence_no)`；
 - Audit：`(workspace_id, created_at desc)`、`(run_id, created_at)`；
@@ -517,7 +496,7 @@ Alembic Migration 按可回滚的小步提交：
 2. 版本化配置；
 3. Session、Message、Run 与 Attempt；
 4. ToolCall、Operation 与 Request；
-5. Job、Event、Audit 与 Outbox；
+5. Event、Audit 与 Outbox；(0006 删除 run_jobs、重命名 `run_attempts.executor_id`)
 6. pgvector 与 Memory 表。
 
 每次 Migration 在空数据库和上一版本数据库上验证 upgrade；破坏性 downgrade 不作为首版承诺，但 Migration 必须显式说明不可逆原因。
@@ -525,13 +504,13 @@ Alembic Migration 按可回滚的小步提交：
 持久化验收至少覆盖：
 
 1. 部分唯一索引阻止同 Session 多活动 Run；
-2. 部分唯一索引阻止同 Run 多活动 Job；
+2. 部分唯一索引阻止同 Session 多活动 Run（Run 不再有 Job 行）；
 3. 复合外键阻止跨 Workspace 引用；
 4. CAS 阻止旧 state version 提交；
-5. fencing token 阻止失租 Worker 提交；
+5. `state_version` CAS 阻止第二个推进者提交；
 6. Request 并发回答只成功一次；
 7. Event sequence 在并发提交时保持唯一递增；
-8. Worker 退出后 Job 回收产生新 Attempt；
+8. 进程退出后恢复扫描产生新 Attempt 并收尾旧 Attempt；
 9. 外部写入前后崩溃均进入正确 Operation/回查状态；
 10. Outbox 失败不回滚 Runtime 权威事务；
 11. Secret 明文不出现在普通查询、日志和事件；

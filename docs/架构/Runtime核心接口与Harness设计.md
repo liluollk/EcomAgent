@@ -21,7 +21,8 @@
 
 ```text
 apps/api ───────────────┐
-apps/worker ────────────┼──→ Runtime public interfaces
+apps/api/executor_host ──┼──→ Runtime public interfaces
+apps/scripted_e2e ───────┤
 agents/product_operations ─┤
 adapters/* ─────────────┘
                               ↓
@@ -34,7 +35,7 @@ runtime internal services / repositories / harness
 2. `runtime/` 不导入 `agents/`、`adapters/`、`apps/` 和 `eval/`；
 3. `agents/` 依赖 Runtime 公共接口，定义 Agent、Skill、Tool 元数据和业务扩展；
 4. `adapters/` 实现 Runtime Protocol 或业务 Agent 定义的领域端口；
-5. `composition/` 是商品运营产品组合根，负责把 Agent 定义、Handler、Repository、Backend 和外部集成组装成 Runtime；`apps/worker/` 负责 Worker 生命周期与任务调度；
+5. `composition/` 是商品运营产品组合根，负责把 Agent 定义、Handler、Repository、Backend 和外部集成组装成 Runtime；`apps/api/executor_host.py` 负责进程内 Run 执行器的生命周期（ADR-003）；
 6. `apps/api/` 只通过应用服务提交命令和读取状态，不直接调用 AgentBackend 或 ToolHandler。
 
 架构测试必须扫描 import，阻止 Runtime 对上层模块形成反向依赖。
@@ -42,7 +43,7 @@ runtime internal services / repositories / harness
 Agent Runtime 包含两组职责：
 
 - 运行配置与治理：Workspace、Actor、权限、版本、Secret 和运行配置；
-- 执行内核：Session、Run、Job、工具调用、交互、恢复和事件。
+- 执行内核：Session、Run、工具调用、交互、恢复和事件。
 
 这只是同一模块化单体中的逻辑职责划分，不对应独立进程、微服务或代码目录。Agent Harness 属于执行内核中面向模型的编排部分。
 
@@ -90,7 +91,7 @@ Local Tool 是代码随附的全局定义；MCP Tool 由 Source 同步产生，�
 
 ### 3.3 ToolBinding
 
-`ToolBinding` 只存在于 Worker 进程，连接数据定义与可执行实现：
+`ToolBinding` 只存在于装配进程内，连接数据定义与可执行实现：
 
 ```text
 definition
@@ -132,7 +133,7 @@ SourceDefinition 不保存明文凭证。业务平台客户端不是动态 REST 
 
 ## 4. 启动时组装与注册
 
-Worker 组合根显式构造 `RuntimeAssembly`：
+装配组合根显式构造 `RuntimeAssembly`：
 
 ```text
 RuntimeAssembly
@@ -252,7 +253,7 @@ ContextAssembler 不读取 Secret 明文，不把权限快照当成当前授权�
 
 ## 8. Agent Loop
 
-一次 Worker 推进 Run 的主循环：
+一次执行器推进 Run 的主循环：
 
 ```text
 加载 Run 与固定版本
@@ -351,7 +352,7 @@ deadline
 trace_context
 ```
 
-Runtime 写操作按两阶段事务执行：先提交 `Operation(EXECUTING)`、Attempt 与授权审计，再在无 Runtime 数据库事务期间调用平台 Adapter；回执经过 PostToolUse 后，在新的短事务中提交 Operation/ToolCall/Run 状态与事件。读 Tool 请求和平台回查同样在 Runtime 事务外等待网络。长调用由 `WorkerHost` 心跳续租；每个 Runtime 提交检查点仍校验 lease token，失租执行不得继续持久化。
+Runtime 写操作按两阶段事务执行：先提交 `Operation(EXECUTING)`、Attempt 与授权审计，再在无 Runtime 数据库事务期间调用平台 Adapter；回执经过 PostToolUse 后，在新的短事务中提交 Operation/ToolCall/Run 状态与事件。读 Tool 请求和平台回查同样在 Runtime 事务外等待网络。首版没有租约与心跳：每个 Runtime 提交检查点校验 `state_version` CAS 与"Run 仍为 `RUNNING`"，进程退出后由启动恢复扫描接管（ADR-003）。
 
 ToolHandler 返回标准化 ToolResult：
 
