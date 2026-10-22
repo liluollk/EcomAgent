@@ -169,7 +169,6 @@ class RuntimeWriteFixture:
     actor_id: uuid.UUID
     run_id: uuid.UUID
     tool_call_id: uuid.UUID
-    lease_token: uuid.UUID
     state_version: int
 
     async def execute(self, *, handler: Any) -> ExecutedToolCall:
@@ -183,7 +182,6 @@ class RuntimeWriteFixture:
             workspace_id=self.workspace_id,
             actor_id=self.actor_id,
             run_id=self.run_id,
-            lease_token=self.lease_token,
             expected_state_version=self.state_version,
             handler=handler,
             processor=ToolResultProcessor(output_schema=TEST_OUTPUT_SCHEMA),
@@ -207,7 +205,7 @@ async def runtime_write_fixture(
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
+    running_run,
 ) -> RuntimeWriteFixture:
     """提交种子与租约后,给出可在真实短事务中执行的写夹具。"""
     tool_version = await db_session.get(ToolVersion, seeded_write_tool_call.tool_version_id)
@@ -235,8 +233,7 @@ async def runtime_write_fixture(
         actor_id=seeded_workspace.user.id,
         run_id=seeded_run.id,
         tool_call_id=seeded_write_tool_call.id,
-        lease_token=leased_run.lease_token,
-        state_version=leased_run.state_version,
+        state_version=running_run.state_version,
     )
     try:
         yield fixture
@@ -404,7 +401,6 @@ async def _cleanup_committed_seed(engine: AsyncEngine, ids: dict[str, Any]) -> N
         await session.execute(sa.text("DELETE FROM operation_attempts WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(sa.text("DELETE FROM agent_events WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(sa.text("DELETE FROM audit_events WHERE workspace_id = :ws"), {"ws": ws})
-        await session.execute(sa.text("DELETE FROM run_jobs WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(sa.text("DELETE FROM run_attempts WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(
             sa.text("UPDATE tool_calls SET operation_id = NULL WHERE workspace_id = :ws"),

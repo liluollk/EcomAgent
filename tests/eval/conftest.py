@@ -1,7 +1,7 @@
 """Eval Runner 测试夹具(计划 05 Task 2)。
 
 - ``eval_runner``:最小组装的 EvalRunner——backend 由夹具注入(每 case 一个
-  ``E2EScriptedBackend``,复用 apps/worker/e2e.py 的确定性脚本模型;tests
+  ``E2EScriptedBackend``,复用 apps/scripted_e2e.py 的确定性脚本模型;tests
   层不受"eval 不 import apps"约束,eval 包本身保持不依赖 apps);
 - ``valid_case`` / ``second_case``:合法定价场景(权威期望必填,与
   tests/eval/test_schema.py 的种子风格一致);
@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from apps.worker.e2e import E2EScriptedBackend
+from apps.scripted_e2e import E2EScriptedBackend
 from eval.capability_manifest import (
     EvalCapabilityManifest,
     build_eval_capability_manifest,

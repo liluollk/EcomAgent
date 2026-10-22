@@ -2,7 +2,7 @@
 
 计划原文测试:
 - ``test_unknown_write_schedules_reconciliation``:UNKNOWN 结果只能进入
-  WAITING_RECONCILIATION,且下一步 Job 是 RECONCILE_OPERATION。
+  WAITING_RECONCILIATION,且下一步是回查指令（``next_step=RECONCILE``）。
 """
 
 import uuid
@@ -30,7 +30,7 @@ from runtime.execution.tool_executor import (
 from runtime.execution.tool_result_processor import ToolExecutionReceipt, ToolResultProcessor
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
 )
 from runtime.persistence.base import (
@@ -101,7 +101,7 @@ async def test_unknown_write_schedules_reconciliation(
     seeded_write_tool_call: ToolCall,
     seeded_run: Run,
 ) -> None:
-    """计划原文:UNKNOWN → Run WAITING_RECONCILIATION + RECONCILE_OPERATION Job。"""
+    """计划原文:UNKNOWN → Run WAITING_RECONCILIATION + 回查指令。"""
     begun = await operation_service.begin(
         seeded_write_tool_call.id,
         adapter_key="test-adapter",
@@ -109,7 +109,7 @@ async def test_unknown_write_schedules_reconciliation(
     )
     result = await operation_service.record_result(tool_result_unknown(begun.tool_call_id))
     assert result.run_status == RunStatus.WAITING_RECONCILIATION
-    assert result.next_job_kind == RunJobKind.RECONCILE_OPERATION
+    assert result.next_step == RunNextStep.RECONCILE
     run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
     assert run.status == PersistenceRunStatus.WAITING_RECONCILIATION
 
@@ -120,7 +120,7 @@ async def test_begin_is_idempotent_and_visible_after_short_transaction(
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
+    running_run,
     operation_service: OperationService,
 ) -> None:
     """begin 幂等:稳定 operation_id 不重新生成;短事务提交后独立连接可见。"""
@@ -224,7 +224,7 @@ async def test_record_result_applied_completes_tool_call_and_keeps_run_running(
     assert result.operation_outcome == OperationOutcome.APPLIED
     assert result.tool_call_status == ToolCallStatus.SUCCEEDED
     assert result.run_status == RunStatus.RUNNING
-    assert result.next_job_kind is None
+    assert result.next_step is None
 
     tool_call = await fresh_tool_call(
         db_session, seeded_run.workspace_id, seeded_write_tool_call.id
@@ -304,31 +304,29 @@ async def test_record_result_not_applied_without_retry_is_terminal(
     assert run.status == PersistenceRunStatus.RUNNING
 
 
-async def test_stale_lease_token_rejected(
+async def test_write_rejected_on_non_running_run(
     db_session: AsyncSession,
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
 ) -> None:
-    """租约失效(伪造 token)→ 明确错误,状态不变(fencing)。"""
+    """Run 不在 RUNNING 时不得发起新的外部写(取代旧 fencing 保护)。"""
     service = OperationService(
         db_session,
         workspace_id=seeded_workspace.workspace.id,
         actor_id=seeded_workspace.user.id,
         run_id=seeded_run.id,
-        lease_token=uuid.uuid4(),
-        expected_state_version=leased_run.state_version,
+        expected_state_version=seeded_run.state_version,
     )
-    with pytest.raises(Exception, match="FENCING"):
+    with pytest.raises(OperationConflictError, match="requires RUNNING"):
         await service.begin(
             seeded_write_tool_call.id,
             adapter_key="test-adapter",
             expected_state=TEST_EXPECTED_STATE,
         )
     run = await fresh_run(db_session, seeded_run.workspace_id, seeded_run.id)
-    assert run.status == PersistenceRunStatus.RUNNING
-    assert run.state_version == leased_run.state_version
+    assert run.status == PersistenceRunStatus.QUEUED
+    assert run.state_version == seeded_run.state_version
 
 
 async def test_stale_state_version_rejected(
@@ -336,7 +334,7 @@ async def test_stale_state_version_rejected(
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
+    running_run,
     operation_service: OperationService,
 ) -> None:
     """state_version CAS 失败 → InvalidTransition,Run 不迁移。"""
@@ -353,8 +351,7 @@ async def test_stale_state_version_rejected(
         workspace_id=seeded_workspace.workspace.id,
         actor_id=seeded_workspace.user.id,
         run_id=seeded_run.id,
-        lease_token=leased_run.lease_token,
-        expected_state_version=leased_run.state_version + 100,
+        expected_state_version=running_run.state_version + 100,
     )
     with pytest.raises(InvalidTransition):
         await stale_service.record_result(tool_result_unknown(begun.tool_call_id))
@@ -415,7 +412,6 @@ async def _cleanup_committed_seed(engine: AsyncEngine, ids: dict) -> None:
         await session.execute(sa.delete(OperationAttempt).where(OperationAttempt.workspace_id == ws))
         await session.execute(sa.text("DELETE FROM agent_events WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(sa.text("DELETE FROM audit_events WHERE workspace_id = :ws"), {"ws": ws})
-        await session.execute(sa.text("DELETE FROM run_jobs WHERE workspace_id = :ws"), {"ws": ws})
         await session.execute(sa.text("DELETE FROM run_attempts WHERE workspace_id = :ws"), {"ws": ws})
         # tool_calls 与 operations 相互外键引用:先解除 tool_calls.operation_id
         # 引用,再删 operations,最后删 tool_calls。
@@ -508,15 +504,14 @@ class _FakeHandler:
 
 
 def _executor(
-    db_session: AsyncSession, seeded_workspace, leased_run, handler: _FakeHandler
+    db_session: AsyncSession, seeded_workspace, running_run, handler: _FakeHandler
 ) -> ToolExecutor:
     return ToolExecutor(
         db_session,
         workspace_id=seeded_workspace.workspace.id,
         actor_id=seeded_workspace.user.id,
-        run_id=leased_run.run.id,
-        lease_token=leased_run.lease_token,
-        expected_state_version=leased_run.state_version,
+        run_id=running_run.run.id,
+        expected_state_version=running_run.state_version,
         handler=handler,
         processor=ToolResultProcessor(
             output_schema={
@@ -534,11 +529,11 @@ async def test_executor_applied_happy_path(
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
+    running_run,
 ) -> None:
     """两阶段执行:begin → handler → record_result,APPLIED 全链路落库。"""
     handler = _FakeHandler(status="APPLIED", payload={"result": "ok"})
-    executor = _executor(db_session, seeded_workspace, leased_run, handler)
+    executor = _executor(db_session, seeded_workspace, running_run, handler)
     executed = await executor.execute(
         tool_call_id=seeded_write_tool_call.id, normalized_arguments={"listing_id": "L1"}
     )
@@ -557,11 +552,11 @@ async def test_executor_lost_response_yields_unknown_without_retry(
     seeded_workspace,
     seeded_run: Run,
     seeded_write_tool_call: ToolCall,
-    leased_run,
+    running_run,
 ) -> None:
     """handler 抛异常(响应丢失)→ UNKNOWN:Run WAITING_RECONCILIATION,禁止重试。"""
     handler = _FakeHandler(raise_error=True)
-    executor = _executor(db_session, seeded_workspace, leased_run, handler)
+    executor = _executor(db_session, seeded_workspace, running_run, handler)
     executed = await executor.execute(
         tool_call_id=seeded_write_tool_call.id, normalized_arguments={"listing_id": "L1"}
     )
@@ -569,7 +564,7 @@ async def test_executor_lost_response_yields_unknown_without_retry(
     assert executed.processed.tool_call_error == "RESPONSE_LOST"
     assert executed.processed.retry_allowed is False
     assert executed.recorded.run_status == RunStatus.WAITING_RECONCILIATION
-    assert executed.recorded.next_job_kind == RunJobKind.RECONCILE_OPERATION
+    assert executed.recorded.next_step == RunNextStep.RECONCILE
     tool_call = await fresh_tool_call(
         db_session, seeded_run.workspace_id, seeded_write_tool_call.id
     )

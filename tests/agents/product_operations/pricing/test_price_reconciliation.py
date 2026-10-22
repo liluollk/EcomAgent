@@ -41,7 +41,6 @@ from runtime.execution.reconciliation import (
 )
 from runtime.execution.run_service import RunService
 from runtime.interfaces.state import RunStatus
-from runtime.jobs.lease_service import LeaseService
 from runtime.persistence.base import (
     ConfigScope,
     MembershipRole,
@@ -50,7 +49,7 @@ from runtime.persistence.base import (
     ModelBackendType,
     OperationAttemptKind,
     OperationAttemptStatus,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
     ToolEffect,
 )
@@ -65,7 +64,6 @@ from runtime.persistence.models.configuration import (
 from runtime.persistence.models.execution import Operation, OperationAttempt, Run, ToolCall
 from runtime.persistence.models.identity import User, Workspace, WorkspaceMembership
 from runtime.persistence.models.interaction import Message
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -181,14 +179,13 @@ class _Uncertain:
     run: Run
     tool_call: ToolCall
     operation: Operation
-    lease_token: uuid.UUID
     state_version: int
 
 
 async def _seed_uncertain_price_write(
     db_session: AsyncSession, *, execute_attempts: int
 ) -> _Uncertain:
-    """UNKNOWN 改价 Operation + 已领取 RECONCILE_OPERATION 租约的完整回查上下文。"""
+    """UNKNOWN 改价 Operation 的完整回查上下文(首版无租约)。"""
     workspace = Workspace(id=uuid.uuid4(), name=f"ws-{uuid.uuid4()}")
     user = User(id=uuid.uuid4(), login=f"user-{uuid.uuid4()}", password_hash="t")
     membership = WorkspaceMembership(
@@ -306,14 +303,32 @@ async def _seed_uncertain_price_write(
         )
     await db_session.flush()
 
-    advance_job = await JobRepository(db_session).create(
-        workspace_id=workspace.id, run_id=run.id, kind=RunJobKind.ADVANCE_RUN
-    )
-    advance_lease = await LeaseService(db_session).claim(worker_id="w")
-    assert advance_lease is not None
-    await db_session.refresh(run)
-    running = (await db_session.scalars(select(Run).where(Run.id == run.id))).one()
+    # 执行器领取等价操作:QUEUED→RUNNING(首版没有租约,只有状态机)。
     run_service = RunService(session=db_session, workspace_id=workspace.id)
+    await db_session.refresh(run)
+    started = (
+        await db_session.scalars(
+            select(Run)
+            .where(Run.id == run.id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    await run_service.transition_run(
+        run_id=run.id,
+        target_status=RunStatus.RUNNING,
+        event_kind="RUN_STARTED",
+        event_payload={"reason": "TEST_SEED"},
+        expected_status=RunStatus.QUEUED,
+        expected_version=started.state_version,
+    )
+    await db_session.refresh(run)
+    running = (
+        await db_session.scalars(
+            select(Run)
+            .where(Run.id == run.id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
     await run_service.transition_run(
         run_id=run.id,
         target_status=RunStatus.WAITING_RECONCILIATION,
@@ -322,21 +337,12 @@ async def _seed_uncertain_price_write(
         expected_status=RunStatus.RUNNING,
         expected_version=running.state_version,
     )
-    assert await LeaseService(db_session).complete(advance_job.id, advance_lease.lease_token)
-    await db_session.refresh(run)
-
-    await JobRepository(db_session).create(
-        workspace_id=workspace.id, run_id=run.id, kind=RunJobKind.RECONCILE_OPERATION
-    )
-    lease = await LeaseService(db_session).claim(worker_id="reconcile-worker")
-    assert lease is not None
     await db_session.refresh(run)
     return _Uncertain(
         workspace_id=workspace.id,
         run=run,
         tool_call=tool_call,
         operation=operation,
-        lease_token=lease.lease_token,
         state_version=run.state_version,
     )
 
@@ -361,7 +367,6 @@ async def test_price_write_budget_gates_not_applied(
         actor_id=(await _actor_id(db_session, seed.workspace_id)),
         run_id=seed.run.id,
         operation_id=seed.operation.operation_id,
-        lease_token=seed.lease_token,
         expected_state_version=seed.state_version,
         reconcile_budget=3,
         write_retry_budget=1,
@@ -369,7 +374,7 @@ async def test_price_write_budget_gates_not_applied(
     outcome = await service.apply_result(ReconcileResult.NOT_APPLIED)
     assert outcome.tool_call_status is expected
     assert outcome.direct_execute is False
-    assert outcome.next_job_kind is RunJobKind.ADVANCE_RUN
+    assert outcome.next_step is RunNextStep.ADVANCE
     # 预算上界(1)内不会产生额外的平台逻辑写:本次回查从未调用平台写路径。
     assert await adapter.count_logical_writes(str(seed.operation.operation_id)) == 0
 

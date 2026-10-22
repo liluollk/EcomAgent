@@ -138,7 +138,7 @@ def test_runtime_memory_has_no_product_specific_critical_kind() -> None:
 
 _SCRIPTED_ENDPOINT_ALLOWLIST = {
     "apps/api/e2e.py",
-    "apps/worker/e2e.py",
+    "apps/scripted_e2e.py",
 }
 
 

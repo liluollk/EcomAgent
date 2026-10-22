@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.agent_tool_keys import P1_BUSINESS_TOOL_KEYS
-from apps.worker.e2e import E2EScriptedBackend
+from apps.scripted_e2e import E2EScriptedBackend
 from eval.capability_manifest import (
     CAPABILITY_MANIFEST_MISMATCH,
     CapabilityManifestMismatch,

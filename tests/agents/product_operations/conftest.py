@@ -51,7 +51,7 @@ from fixtures.product_operations import (
 from agents.product_operations.persistence.models import Listing
 from agents.product_operations.persistence.repository import ProductRepository
 from agents.product_operations.policy.models import PricePolicyConfig
-from apps.worker.assembly import (
+from apps.assembly import (
     ProductApplication,
     build_product_application,
 )
@@ -247,7 +247,6 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM operations WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM tool_calls WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM run_attempts WHERE workspace_id = :ws", "ws"),
-    ("DELETE FROM run_jobs WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM messages WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM run_tool_versions WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM run_skill_versions WHERE workspace_id = :ws", "ws"),
@@ -344,7 +343,7 @@ async def product_application(
         workspace_id=ids.workspace_id,
         actor_id=ids.user_id,
         membership_id=ids.membership_id,
-        worker_id=f"product-worker-{uuid.uuid4()}",
+        executor_id=f"product-executor-{uuid.uuid4()}",
         commerce_adapter=commerce_adapter_for_application,
         adapter_key=(
             "rest-commerce"
@@ -397,7 +396,7 @@ def rebuild_product_application(
             workspace_id=ids.workspace_id,
             actor_id=ids.user_id,
             membership_id=ids.membership_id,
-            worker_id=f"product-worker-{uuid.uuid4()}",
+            executor_id=f"product-executor-{uuid.uuid4()}",
             commerce_adapter=commerce_adapter_for_application,
             adapter_key=(
                 "rest-commerce"

@@ -61,7 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from agents.product_operations.domain.models import StorePlatform
 from agents.product_operations.persistence.models import Listing, PriceLock, Store
 from agents.product_operations.pricing.gateway import SetListingPriceCommand
-from apps.worker.assembly import ProductApplication, RunView
+from apps.assembly import ProductApplication, RunView
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import ResourceScopeMode, ToolCallStatus
@@ -358,7 +358,10 @@ async def _drive_response_lost(runner: SafetyCaseRunner) -> RunView:
     )
     assert run.status is RunStatus.WAITING_CONFIRMATION
     run = await runner.application.confirm(run.pending_confirmation_id)  # type: ignore[arg-type]
-    assert run.status is RunStatus.WAITING_RECONCILIATION
+    # 进程内执行器在 confirm 内就完成回查(RECONCILE 后立即续推),因此返回时
+    # Run 已离开 WAITING_RECONCILIATION;持久化的不确定状态仍在上一步提交过,
+    # 崩溃窗口由恢复扫描覆盖。
+    assert run.status is not RunStatus.WAITING_RECONCILIATION
     return await runner.application.recover(run.run_id)
 
 

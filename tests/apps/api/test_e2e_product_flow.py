@@ -11,16 +11,15 @@
 
 CONFIRM_WRITES 模式下写前经 API 确认端点接受;AUTO_EXECUTE 模式下写直接
 执行。确认/写执行由 Runtime 重新校验权限、Policy 与资源版本(既有语义)。
-Worker 以真实 WorkerHost + TransactionalLeaseGateway 驱动(与 compose 中
-``python -m apps.worker`` 的 RUNTIME_E2E 路径一致),API 走完整路由栈;
-不依赖任何外部真实服务(模型=Scripted,mem0/langfuse 不启用)。
+Run 由 API 进程内的 RunExecutor 推进(应用 lifespan 装配,``RUNTIME_E2E=1``),
+路由提交事务后唤醒执行器;API 走完整路由栈,不依赖任何外部真实服务
+(模型=Scripted,mem0/langfuse 不启用)。
 """
 
 import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
 from decimal import Decimal
 from typing import Any, Final
 
@@ -35,8 +34,6 @@ from agents.product_operations.domain.models import ListingStatus
 from agents.product_operations.persistence.models import InventoryLevel, Listing
 from agents.product_operations.skill import SKILL_KEY
 from apps.api.main import create_app
-from apps.worker.e2e import E2EJobHandler
-from apps.worker.main import TransactionalLeaseGateway, WorkerHost
 from runtime.persistence.base import ExecutionMode
 
 
@@ -78,7 +75,9 @@ async def e2e_environment(
     """RUNTIME_E2E=1 的 API 应用 + 幂等种子;结束按外键顺序清理提交行。"""
     monkeypatch.setenv("RUNTIME_E2E", "1")
     app = create_app(engine=engine)
-    async with AsyncClient(
+    # 进入应用 lifespan:装配并启动进程内 Run 执行器(RUNTIME_E2E=1),
+    # 路由提交后由执行器推进;退出时释放单写者锁。
+    async with app.router.lifespan_context(app), AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         response = await client.post("/api/e2e/seed")
@@ -100,7 +99,6 @@ async def _cleanup_seeded_rows(engine: AsyncEngine, seed: dict[str, Any]) -> Non
         "DELETE FROM operations WHERE workspace_id = :ws",
         "DELETE FROM tool_calls WHERE workspace_id = :ws",
         "DELETE FROM run_attempts WHERE workspace_id = :ws",
-        "DELETE FROM run_jobs WHERE workspace_id = :ws",
         "UPDATE messages SET run_id = NULL WHERE workspace_id = :ws",
         "UPDATE runs SET trigger_message_id = NULL WHERE workspace_id = :ws",
         "DELETE FROM messages WHERE workspace_id = :ws",
@@ -291,19 +289,6 @@ async def _submit_task(
     return session_id, response.json()["run_id"]
 
 
-async def _start_worker(engine: AsyncEngine) -> tuple[WorkerHost, E2EJobHandler]:
-    handler = E2EJobHandler(engine, worker_id="e2e-test-worker")
-    host = WorkerHost(
-        gateway=TransactionalLeaseGateway(engine),
-        handler=handler,
-        worker_id="e2e-test-worker",
-        heartbeat_interval=timedelta(seconds=5),
-        poll_interval=timedelta(milliseconds=20),
-    )
-    await host.start()
-    return host, handler
-
-
 def _pending_inputs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return snapshot["pending_inputs"]
 
@@ -349,30 +334,24 @@ async def test_e2e_price_path_confirmed_mode(
     client: AsyncClient = e2e_environment["client"]
     seed: dict[str, Any] = e2e_environment["seed"]
     await _login(client, seed)
-    host, handler = await _start_worker(engine)
-    try:
-        session_id, run_id = await _submit_task(
-            client, seed, "把 SKU-001 改成 99 元"
-        )
-        await _answer_store_ref(client, run_id, session_id, seed["store_id"])
-        await _wait_for(
-            lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
-        )
-        response = await client.get(f"/api/sessions/{session_id}")
-        confirmation = _pending_confirmations(response.json())[0]
-        arguments = confirmation["normalized_arguments"]
-        assert arguments["sku"] == "SKU-001"
-        assert arguments["store_ref"] == "淘宝旗舰店"
-        assert Decimal(str(arguments["target_price"])) == Decimal("99.00")
-        response = await client.post(
-            f"/api/requests/{confirmation['id']}/confirmation/accept"
-        )
-        assert response.status_code == 200, response.text
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    session_id, run_id = await _submit_task(
+        client, seed, "把 SKU-001 改成 99 元"
+    )
+    await _answer_store_ref(client, run_id, session_id, seed["store_id"])
+    await _wait_for(
+        lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
+    )
+    response = await client.get(f"/api/sessions/{session_id}")
+    confirmation = _pending_confirmations(response.json())[0]
+    arguments = confirmation["normalized_arguments"]
+    assert arguments["sku"] == "SKU-001"
+    assert arguments["store_ref"] == "淘宝旗舰店"
+    assert Decimal(str(arguments["target_price"])) == Decimal("99.00")
+    response = await client.post(
+        f"/api/requests/{confirmation['id']}/confirmation/accept"
+    )
+    assert response.status_code == 200, response.text
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert await _authoritative_price(engine, seed["listing_id"]) == Decimal("99.00")
 
 
@@ -386,20 +365,14 @@ async def test_e2e_price_full_path_auto_mode(
     await _set_execution_mode(
         engine, seed["workspace_id"], ExecutionMode.AUTO_EXECUTE
     )
-    host, handler = await _start_worker(engine)
-    try:
-        session_id, run_id = await _submit_task(
-            client,
-            seed,
-            "对比各店铺 SKU-001 的价格，然后把 SKU-001 改成 99 元，再回查一次",
-        )
-        # 写前仍需补店铺引用(Input Request 与执行模式无关)。
-        await _answer_store_ref(client, run_id, session_id, seed["store_id"])
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    session_id, run_id = await _submit_task(
+        client,
+        seed,
+        "对比各店铺 SKU-001 的价格，然后把 SKU-001 改成 99 元，再回查一次",
+    )
+    # 写前仍需补店铺引用(Input Request 与执行模式无关)。
+    await _answer_store_ref(client, run_id, session_id, seed["store_id"])
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert await _authoritative_price(engine, seed["listing_id"]) == Decimal("99.00")
 
 
@@ -415,30 +388,24 @@ async def test_e2e_inventory_path_confirmed_mode(
     client: AsyncClient = e2e_environment["client"]
     seed: dict[str, Any] = e2e_environment["seed"]
     await _login(client, seed)
-    host, handler = await _start_worker(engine)
-    try:
-        session_id, run_id = await _submit_task(
-            client, seed, "把淘宝旗舰店的 SKU-001 库存补 5 件，前后各回查一次"
-        )
-        await _wait_for(
-            lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
-        )
-        response = await client.get(f"/api/sessions/{session_id}")
-        confirmation = _pending_confirmations(response.json())[0]
-        arguments = confirmation["normalized_arguments"]
-        assert arguments["sku"] == "SKU-001"
-        assert arguments["store_ref"] == "淘宝旗舰店"
-        assert int(arguments["delta"]) == 5
-        assert arguments["reason"] == "RECEIPT"
-        response = await client.post(
-            f"/api/requests/{confirmation['id']}/confirmation/accept"
-        )
-        assert response.status_code == 200, response.text
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    session_id, run_id = await _submit_task(
+        client, seed, "把淘宝旗舰店的 SKU-001 库存补 5 件，前后各回查一次"
+    )
+    await _wait_for(
+        lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
+    )
+    response = await client.get(f"/api/sessions/{session_id}")
+    confirmation = _pending_confirmations(response.json())[0]
+    arguments = confirmation["normalized_arguments"]
+    assert arguments["sku"] == "SKU-001"
+    assert arguments["store_ref"] == "淘宝旗舰店"
+    assert int(arguments["delta"]) == 5
+    assert arguments["reason"] == "RECEIPT"
+    response = await client.post(
+        f"/api/requests/{confirmation['id']}/confirmation/accept"
+    )
+    assert response.status_code == 200, response.text
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert await _authoritative_quantity(engine, seed["workspace_id"]) == 25
 
 
@@ -452,16 +419,10 @@ async def test_e2e_inventory_path_auto_mode(
     await _set_execution_mode(
         engine, seed["workspace_id"], ExecutionMode.AUTO_EXECUTE
     )
-    host, handler = await _start_worker(engine)
-    try:
-        _, run_id = await _submit_task(
-            client, seed, "把淘宝旗舰店的 SKU-001 库存补 5 件，前后各回查一次"
-        )
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    _, run_id = await _submit_task(
+        client, seed, "把淘宝旗舰店的 SKU-001 库存补 5 件，前后各回查一次"
+    )
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert await _authoritative_quantity(engine, seed["workspace_id"]) == 25
 
 
@@ -478,28 +439,22 @@ async def test_e2e_publish_path_confirmed_mode(
     seed: dict[str, Any] = e2e_environment["seed"]
     await _set_listing_status(engine, seed["listing_id"], ListingStatus.UNPUBLISHED)
     await _login(client, seed)
-    host, handler = await _start_worker(engine)
-    try:
-        session_id, run_id = await _submit_task(
-            client, seed, "上架淘宝旗舰店的 SKU-001"
-        )
-        await _wait_for(
-            lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
-        )
-        response = await client.get(f"/api/sessions/{session_id}")
-        confirmation = _pending_confirmations(response.json())[0]
-        arguments = confirmation["normalized_arguments"]
-        assert arguments["store_ref"] == "淘宝旗舰店"
-        assert arguments["sku"] == "SKU-001"
-        response = await client.post(
-            f"/api/requests/{confirmation['id']}/confirmation/accept"
-        )
-        assert response.status_code == 200, response.text
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    session_id, run_id = await _submit_task(
+        client, seed, "上架淘宝旗舰店的 SKU-001"
+    )
+    await _wait_for(
+        lambda: _wait_status(client, run_id, "WAITING_CONFIRMATION")
+    )
+    response = await client.get(f"/api/sessions/{session_id}")
+    confirmation = _pending_confirmations(response.json())[0]
+    arguments = confirmation["normalized_arguments"]
+    assert arguments["store_ref"] == "淘宝旗舰店"
+    assert arguments["sku"] == "SKU-001"
+    response = await client.post(
+        f"/api/requests/{confirmation['id']}/confirmation/accept"
+    )
+    assert response.status_code == 200, response.text
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert (
         await _authoritative_publication_state(engine, seed["listing_id"])
         is ListingStatus.PUBLISHED
@@ -516,16 +471,10 @@ async def test_e2e_unpublish_path_auto_mode(
     await _set_execution_mode(
         engine, seed["workspace_id"], ExecutionMode.AUTO_EXECUTE
     )
-    host, handler = await _start_worker(engine)
-    try:
-        _, run_id = await _submit_task(
-            client, seed, "下架淘宝旗舰店的 SKU-001"
-        )
-        assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
-    finally:
-        await host.request_shutdown()
-        await host.wait_stopped(timeout=10.0)
-        await handler.aclose()
+    _, run_id = await _submit_task(
+        client, seed, "下架淘宝旗舰店的 SKU-001"
+    )
+    assert await _wait_for(lambda: _wait_status(client, run_id, "COMPLETED"))
     assert (
         await _authoritative_publication_state(engine, seed["listing_id"])
         is ListingStatus.UNPUBLISHED

@@ -1,7 +1,7 @@
 """端到端改价闭环测试(计划 03 Task 6;架构文档 §5、§6、§7)。
 
 ``product_application`` 夹具组装完整 Runtime(真库,参照 crash_harness
-模式)+ ProductOperationsSeeder 种子;``start`` 包装 RunFactory → ADVANCE_RUN
+模式)+ ProductOperationsSeeder 种子;``start`` 包装 RunFactory → Run(QUEUED)
 Job → Runtime Worker 推进;``confirm`` 用 ConfirmationService.accept +
 恢复推进。模型流由确定性 ScriptedAgentBackend 脚本产生 set_listing_price
 ToolCall，模型只使用公开的 ``store_ref``，内部 UUID 不进入 Tool 参数。
@@ -147,9 +147,12 @@ async def test_response_lost_reconciles_to_applied_without_second_write(
     assert run.status == RunStatus.WAITING_CONFIRMATION
 
     run = await product_application.confirm(run.pending_confirmation_id)
-    assert run.status == RunStatus.WAITING_RECONCILIATION
+    # 执行器在 confirm 内完成回查:Run 已越过 WAITING_RECONCILIATION,
+    # 不写第二遍即收敛。
+    assert run.status is not RunStatus.WAITING_RECONCILIATION
     snapshot = await product_application.tool_call_snapshot(run.run_id)
     assert snapshot is not None
+    assert snapshot.status == "SUCCEEDED"
     operation_id = snapshot.operation_id
     assert operation_id is not None
 
@@ -172,9 +175,8 @@ async def test_reconciliation_adapter_is_called_without_runtime_transaction(
     )
     run = await product_application.start("把淘宝旗舰店 SKU-001 改成 99 元")
     assert run.status == RunStatus.WAITING_CONFIRMATION
-    run = await product_application.confirm(run.pending_confirmation_id)
-    assert run.status == RunStatus.WAITING_RECONCILIATION
 
+    # 探针必须装在 confirm 之前:回查发生在 confirm 内部(执行器 RECONCILE)。
     original_factory = product_application._session_factory
     reconciliation_sessions = []
 
@@ -184,14 +186,20 @@ async def test_reconciliation_adapter_is_called_without_runtime_transaction(
         return session
 
     original_reconcile = product_application.adapter.reconcile_price
+    reconcile_calls = 0
 
     async def transaction_checking_reconcile(command):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
         assert reconciliation_sessions
         assert all(not session.in_transaction() for session in reconciliation_sessions)
         return await original_reconcile(command)
 
     product_application._session_factory = tracked_factory
     product_application.adapter.reconcile_price = transaction_checking_reconcile
+    run = await product_application.confirm(run.pending_confirmation_id)
+    assert reconcile_calls == 1
+    assert run.status is not RunStatus.WAITING_RECONCILIATION
     run = await product_application.recover(run.run_id)
     assert run.status == RunStatus.COMPLETED
     snapshot = await product_application.tool_call_snapshot(run.run_id)

@@ -25,7 +25,6 @@ from runtime.persistence.models.execution import Run
 from runtime.persistence.models.identity import User, Workspace, WorkspaceMembership
 from runtime.persistence.models.interaction import Session
 from runtime.persistence.repositories.events import EventRepository
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.requests import RequestRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
@@ -116,11 +115,6 @@ def session_repository(db_session: AsyncSession) -> SessionRepository:
 @pytest.fixture()
 def run_repository(db_session: AsyncSession) -> RunRepository:
     return RunRepository(db_session)
-
-
-@pytest.fixture()
-def jobs_repository(db_session: AsyncSession) -> JobRepository:
-    return JobRepository(db_session)
 
 
 @pytest.fixture()

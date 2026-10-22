@@ -1,7 +1,7 @@
 """Session/Run/Request 命令 API 测试(计划 04 Task 3;架构文档《Runtime执行状态与恢复设计》§4、§5、§6、§9)。
 
 覆盖计划原文测试(活动 Run 阻止新用户消息)与补充语义:
-- 创建 Session 绑定当前 actor;提交用户消息创建 Run(QUEUED)+ ADVANCE_RUN Job;
+- 创建 Session 绑定当前 actor;提交用户消息创建 Run(QUEUED),由执行器推进;
 - 私有 Session:非创建者/非成员读取一律 404,不泄漏存在性;
 - 取消 Run 经 transitions 合法路径迁移 CANCELLED,终态再取消 409;
 - Input Request 单次回答:未声明字段 422 UNDECLARED_FIELD,已处理 409 REQUEST_NOT_PENDING,
@@ -36,7 +36,6 @@ from runtime.persistence.base import (
     ConfigVersionStatus,
     MembershipRole,
     ModelBackendType,
-    RunJobKind,
     ToolEffect,
 )
 from runtime.persistence.models.configuration import (
@@ -49,7 +48,7 @@ from runtime.persistence.models.configuration import (
     WorkspaceAgentBinding,
 )
 from runtime.persistence.models.events import AgentEvent, AuditEvent
-from runtime.persistence.models.execution import Run, RunAttempt, RunJob, ToolCall
+from runtime.persistence.models.execution import Run, RunAttempt, ToolCall
 from runtime.persistence.models.identity import User, Workspace, WorkspaceMembership
 from runtime.persistence.models.interaction import (
     ConfirmationRequest,
@@ -100,7 +99,6 @@ async def _cleanup(session: AsyncSession, workspace_id: UUID, extra: SeededWorks
     """
     await session.execute(sa.delete(AgentEvent).where(AgentEvent.workspace_id == workspace_id))
     await session.execute(sa.delete(AuditEvent).where(AuditEvent.workspace_id == workspace_id))
-    await session.execute(sa.delete(RunJob).where(RunJob.workspace_id == workspace_id))
     await session.execute(sa.delete(RunAttempt).where(RunAttempt.workspace_id == workspace_id))
     await session.execute(sa.delete(InputRequest).where(InputRequest.workspace_id == workspace_id))
     await session.execute(
@@ -611,15 +609,16 @@ async def test_submit_message_creates_run_and_advance_job(
         session_row = await db.get(Session, session_id)
         assert session_row is not None
         assert session_row.agent_version_id == workspace.agent_version.id
-        job = (
+        # 命令层只落 QUEUED;推进由进程内执行器负责,此处不应产生 Attempt。
+        attempts = (
             await db.scalars(
-                select(RunJob).where(
-                    RunJob.workspace_id == workspace.id, RunJob.run_id == run_id
+                select(RunAttempt).where(
+                    RunAttempt.workspace_id == workspace.id,
+                    RunAttempt.run_id == run_id,
                 )
             )
-        ).one()
-        assert job.kind == RunJobKind.ADVANCE_RUN
-        assert job.status.value == "PENDING"
+        ).all()
+        assert attempts == []
     finally:
         await db.close()
 
@@ -738,9 +737,6 @@ async def test_resource_from_other_workspace_returns_404(
                 )
                 await db.execute(
                     sa.delete(AgentEvent).where(AgentEvent.workspace_id == other_ws.id)
-                )
-                await db.execute(
-                    sa.delete(RunJob).where(RunJob.workspace_id == other_ws.id)
                 )
                 await db.execute(
                     sa.update(Message)

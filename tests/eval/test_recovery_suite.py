@@ -3,7 +3,7 @@
 - 计划原文用例:``recovery_suite.result_for("write-applied-response-lost")``
   必须声明 ``UNKNOWN → APPLIED`` 的回查路径与恰好一次逻辑写;
 - 数据集(eval/datasets/recovery/faults.yaml)声明 ≥7 类故障点(模型超时、
-  Tool 调用前退出、写入已生效响应丢失、确认后 Worker 重启、平台持续不可用、
+  Tool 调用前崩溃、写入已生效响应丢失、确认后执行器重启、平台持续不可用、
   回查暂时不一致、重复提交),每例携带故障注名、期望回查路径、逻辑写上界
   与权威最终状态(价格 + Run 终态);
 - ``run_all()`` 全部通过(failed/infrastructure_errors/skipped 均为 0)且恢复
@@ -58,9 +58,9 @@ def test_recovery_suite_checks_authoritative_outcome(recovery_suite: RecoverySui
 def test_recovery_suite_contains_required_fault_points(recovery_suite: RecoverySuite) -> None:
     assert recovery_suite.case_ids >= {
         "model-timeout",
-        "worker-exit-before-write",
+        "executor-exit-before-write",
         "write-applied-response-lost",
-        "worker-restart-after-confirmation",
+        "executor-restart-after-confirmation",
         "platform-persistent-failure",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
@@ -71,18 +71,18 @@ def test_recovery_suite_contains_required_fault_points(recovery_suite: RecoveryS
 def test_required_constants_cover_plan_faults() -> None:
     assert REQUIRED_CASE_IDS >= {
         "model-timeout",
-        "worker-exit-before-write",
+        "executor-exit-before-write",
         "write-applied-response-lost",
-        "worker-restart-after-confirmation",
+        "executor-restart-after-confirmation",
         "platform-persistent-failure",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
     }
     assert REQUIRED_FAULTS == {
         "model_timeout",
-        "worker_exit_before_write",
+        "executor_exit_before_write",
         "response_lost_after_commit",
-        "worker_restart_after_confirmation",
+        "executor_restart_after_confirmation",
         "permanent_failure",
         "temporary_reconcile_unknown",
         "duplicate_submit",

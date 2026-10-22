@@ -51,7 +51,7 @@ from agents.product_operations.persistence.models import (
     Store,
 )
 from agents.product_operations.pricing.gateway import SetListingPriceCommand
-from apps.worker.assembly import ProductApplication
+from apps.assembly import ProductApplication
 from runtime.backend.protocol import BackendCompleted, ToolCallCompleted
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import ResourceScopeMode, ToolCallStatus
@@ -500,7 +500,8 @@ async def _run_scenario(
         runner.application.adapter.faults.inject("response_lost_after_commit")
         run = await runner.start_write(spec, store_ref=DEFAULT_STORE_REF)
         run = await runner.confirm(run)
-        assert run.status is RunStatus.WAITING_RECONCILIATION
+        # 执行器在 confirm 内完成回查,Run 不再停在 WAITING_RECONCILIATION。
+        assert run.status is not RunStatus.WAITING_RECONCILIATION
         run = await runner.application.recover(run.run_id)
         return await runner.outcome(run.run_id, spec)
     if scenario == "duplicate_submit":

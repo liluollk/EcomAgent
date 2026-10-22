@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.persistence.models import Product
-from apps.worker.e2e import E2EScriptedBackend
+from apps.scripted_e2e import E2EScriptedBackend
 from eval.config import EvalConfig
 from eval.fixtures import IsolatedEnvironment, _seed_listing
 from eval.results import EvalRoundResult, by_case_id

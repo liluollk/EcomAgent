@@ -1,18 +1,17 @@
-"""崩溃恢复集成测试(计划 02 Task 10;架构文档 §8、§13、§14)。
+"""崩溃恢复集成测试(计划 02 Task 10;架构文档 §8、§13、§14;ADR-003)。
 
 以 ``crash_harness`` 夹具封装故障注入:seed Run → 以受控故障点运行
 Runtime/AgentLoop → 恢复 → 断言。外部世界(模型流、写 Tool handler、
-回查适配器)用确定性 fake 注入;状态机、租约、回查与事件全部走真实
+回查适配器)用确定性 fake 注入;状态机、执行器领取、回查与事件全部走真实
 Runtime 服务与真库(沿用 tests/runtime 现有模式:种子行提交 + 独立
 Session 工厂 + 结束清理,因 Runtime 使用独立 Session)。
 
-覆盖场景:
-1. 执行前 Worker 退出(租约被 Sweeper 回收,Run 回 QUEUED 可重新领取);
-2. Operation 已改 EXECUTING 后 Worker 退出(Attempt ABANDONED,恢复 Job 为
-   RECONCILE_OPERATION);
-3. 外部写入生效但响应丢失(计划原文场景:回查 APPLIED,不二次写);
-4. 回查 UNKNOWN → APPLIED(预算内继续调度,确认后 Run 恢复推进);
-5. 旧 Worker 使用失效 fencing token 提交(LeaseStaleError / complete False);
+覆盖场景(首版单执行器模型):
+1. 执行前进程崩溃(Run 停在 RUNNING;重启扫描收尾遗留 Attempt 并继续推进);
+2. Operation 已改 EXECUTING 后进程崩溃(EXECUTING 同样是不确定写,先回查);
+3. 外部写入生效但响应丢失(回查 APPLIED,不二次写);
+4. 回查 UNKNOWN → APPLIED(预算内继续回查,消除不确定性后恢复推进);
+5. 同一 Run 的第二个推进者被 ``state_version`` CAS 拒绝;
 6. ToolResult Schema 失败不清除已发生写入(APPLIED 保持、权威事实不改写);
 7. Context 压缩不丢 Protected Context(安全规则、当前用户消息、待确认
    fingerprint 在超预算组装结果中)。
@@ -23,7 +22,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -40,11 +39,10 @@ from runtime.backend.protocol import (
     ToolCallCompleted,
 )
 from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.executor import AdvanceOutcome, RunClaim, RunExecutor
 from runtime.execution.operations import (
     BegunOperation,
-    LeaseStaleError,
     OperationOutcome,
-    OperationResultRecord,
     OperationService,
 )
 from runtime.execution.pretool.decisions import allow
@@ -60,7 +58,6 @@ from runtime.execution.tool_result_processor import (
     ToolResultProcessor,
 )
 from runtime.interfaces.state import AssistantMessageStatus, MessageType, RunStatus
-from runtime.jobs.lease_service import Lease, LeaseService
 from runtime.orchestration.agent_loop import ToolPin
 from runtime.orchestration.context import (
     AssembledContext,
@@ -82,8 +79,7 @@ from runtime.persistence.base import (
     ModelBackendType,
     OperationStatus,
     RunAttemptStatus,
-    RunJobKind,
-    RunJobStatus,
+    RunNextStep,
     ToolEffect,
 )
 from runtime.persistence.base import (
@@ -101,7 +97,6 @@ from runtime.persistence.models.execution import (
     Operation,
     Run,
     RunAttempt,
-    RunJob,
     ToolCall,
 )
 from runtime.persistence.models.identity import (
@@ -110,7 +105,6 @@ from runtime.persistence.models.identity import (
     WorkspaceMembership,
 )
 from runtime.persistence.models.interaction import Message, Session
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -274,14 +268,19 @@ class RecoverySnapshot:
     """从真库回读的恢复断言视图。"""
 
     run: Run
-    job: RunJob | None
     tool_call: ToolCall | None
     operation: Operation | None
     attempts: tuple[RunAttempt, ...]
 
 
 class CrashHarness:
-    """故障注入封装:seed → 受控故障点推进 → 恢复 → 断言(全部真实服务)。"""
+    """故障注入封装:seed → 受控故障点推进 → 恢复 → 断言(全部真实服务)。
+
+    首版执行模型没有 Job/租约:``advance`` 先以 state_version CAS 把 Run
+    置为 RUNNING(创建 Attempt),再调用 ``Runtime.advance``。故障点抛出的
+    异常不被回收——模拟进程在外部调用中途被杀,Run 停在 RUNNING。
+    恢复走 ``RunExecutor.recover``:先回查不确定的外部写,再继续推进。
+    """
 
     def __init__(self, engine: AsyncEngine, ids: Mapping[str, Any]) -> None:
         self._engine = engine
@@ -342,49 +341,138 @@ class CrashHarness:
                 self.write_handler,
             ),
             pipeline_factory=lambda: AlwaysAllowPipeline(),
-            worker_id="crash-worker",
         )
+
+    def _executor(self) -> RunExecutor:
+        return RunExecutor(
+            session_factory=lambda: AsyncSession(self._engine, expire_on_commit=False),
+            driver=self,
+            instance_id="crash-executor",
+        )
+
+    # -- RunDriver -------------------------------------------------------
+
+    async def advance(self, claim: RunClaim, *, answered: Any = None) -> AdvanceOutcome:
+        del answered
+        return await self._runtime().advance(claim)
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        """回查该 Run 的 UNKNOWN Operation;返回是否可以继续推进。"""
+        del workspace_id
+        outcome = await self.apply_reconcile(self._next_verdict())
+        return outcome.next_step is RunNextStep.ADVANCE
+
+    def _next_verdict(self) -> ReconcileResult:
+        if self._reconcile_verdicts:
+            return self._reconcile_verdicts.pop(0)
+        return ReconcileResult.APPLIED
 
     # -- 受控故障推进与恢复 ----------------------------------------------
 
-    async def run_until(self, crash_point: str) -> RecoverySnapshot:
-        """以受控故障点推进一轮 Worker:Runtime claim → advance → complete。"""
+    async def advance_until(self, crash_point: str | None = None) -> RecoverySnapshot:
+        """推进一次;``crash_point`` 处抛异常并放弃收尾(模拟进程被杀)。"""
         self.write_handler.crash_point = crash_point
-        assert await self._runtime().run_worker_once() is True
-        self.write_handler.crash_point = None
+        claim = await self.claim()
+        if claim is None:
+            self.write_handler.crash_point = None
+            return await self.snapshot()
+        try:
+            await self._runtime().advance(claim)
+        except RuntimeError:
+            if crash_point is None:
+                raise
+        finally:
+            self.write_handler.crash_point = None
         return await self.snapshot()
+
+    async def state_version(self) -> int:
+        """读取 Run 当前 ``state_version``(模拟另一个推进者的读视图)。"""
+        session = self._session()
+        try:
+            run = await _fresh_run(
+                session, self._ids["workspace_id"], self._ids["run_id"]
+            )
+            return run.state_version
+        finally:
+            await session.close()
+
+    async def try_cas(self, expected_version: int) -> bool:
+        """以过期版本直接 CAS:零行更新即被并发保护拒绝。"""
+        session = self._session()
+        try:
+            async with session.begin():
+                return await RunRepository(session).compare_and_set_status(
+                    workspace_id=self._ids["workspace_id"],
+                    run_id=self._ids["run_id"],
+                    expected_version=expected_version,
+                    new_status=PersistenceRunStatus.RUNNING.value,
+                    expected_status=PersistenceRunStatus.QUEUED.value,
+                )
+        finally:
+            await session.close()
+
+    async def claim(self) -> RunClaim | None:
+        """以 state_version CAS 把 Run 推入 RUNNING 并创建 Attempt。
+
+        返回 None 表示 Run 已不在 QUEUED(终态或已被推进)。
+        """
+        session = self._session()
+        try:
+            async with session.begin():
+                run = await _fresh_run(
+                    session, self._ids["workspace_id"], self._ids["run_id"]
+                )
+                if run.status is not PersistenceRunStatus.QUEUED:
+                    return None
+                moved = await RunRepository(session).compare_and_set_status(
+                    workspace_id=run.workspace_id,
+                    run_id=run.id,
+                    expected_version=run.state_version,
+                    new_status=PersistenceRunStatus.RUNNING.value,
+                    expected_status=PersistenceRunStatus.QUEUED.value,
+                )
+                if not moved:
+                    return None
+                attempt_no = (
+                    await session.scalar(
+                        sa.select(sa.func.max(RunAttempt.attempt_no)).where(
+                            RunAttempt.run_id == run.id
+                        )
+                    )
+                    or 0
+                ) + 1
+                attempt = RunAttempt(
+                    workspace_id=run.workspace_id,
+                    run_id=run.id,
+                    attempt_no=attempt_no,
+                    executor_id="crash-executor",
+                    status="RUNNING",
+                    started_at=datetime.now(UTC),
+                )
+                session.add(attempt)
+                await session.flush()
+                return RunClaim(
+                    run_id=run.id,
+                    workspace_id=run.workspace_id,
+                    actor_id=run.created_by_actor_id,
+                    membership_id=run.created_by_membership_id,
+                    attempt_id=attempt.id,
+                    attempt_no=attempt_no,
+                )
+        finally:
+            await session.close()
 
     async def recover(self) -> RecoverySnapshot:
-        """恢复:按注入结论回查 WAITING_RECONCILIATION Run,再排队推进。"""
-        while True:
-            snapshot = await self.snapshot()
-            if snapshot.run.status is not PersistenceRunStatus.WAITING_RECONCILIATION:
-                break
-            verdict = (
-                self._reconcile_verdicts.pop(0)
-                if self._reconcile_verdicts
-                else ReconcileResult.APPLIED
-            )
-            await self.reconcile(verdict)
-        snapshot = await self.snapshot()
-        if snapshot.run.status is PersistenceRunStatus.QUEUED:
-            await self.requeue_advance_job()
-            assert await self._runtime().run_worker_once() is True
+        """进程重启恢复:先回查不确定的外部写,再继续推进。"""
+        await self._executor().recover()
         return await self.snapshot()
 
-    async def reconcile(self, verdict: ReconcileResult) -> ReconcileOutcome:
-        """创建并领取 RECONCILE_OPERATION Job,以真实 ReconciliationService 回查。"""
+    async def apply_reconcile(self, verdict: ReconcileResult) -> ReconcileOutcome:
+        """以真实 ReconciliationService 提交一次回查结论(无租约)。"""
         operation_id = await self._load_operation_id()
         session = self._session()
         try:
             async with session.begin():
-                job = await JobRepository(session).create(
-                    workspace_id=self._ids["workspace_id"],
-                    run_id=self._ids["run_id"],
-                    kind=RunJobKind.RECONCILE_OPERATION,
-                )
-                lease = await LeaseService(session).claim(worker_id="reconcile-worker")
-                assert lease is not None
                 run = await _fresh_run(
                     session, self._ids["workspace_id"], self._ids["run_id"]
                 )
@@ -394,67 +482,15 @@ class CrashHarness:
                     actor_id=self._ids["user_id"],
                     run_id=self._ids["run_id"],
                     operation_id=operation_id,
-                    lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=TEST_LIMITS.reconcile_budget,
                     write_retry_budget=TEST_LIMITS.write_retry_budget,
                 )
-                outcome = await service.apply_result(verdict)
-                assert await LeaseService(session).complete(job.id, lease.lease_token)
-            return outcome
+                return await service.apply_result(verdict)
         finally:
             await session.close()
 
-    async def requeue_advance_job(self) -> RunJob:
-        """回查 ADVANCE_RUN 指令落地:排队恢复推进 Job(调度方语义)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                return await JobRepository(session).create(
-                    workspace_id=self._ids["workspace_id"],
-                    run_id=self._ids["run_id"],
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
-        finally:
-            await session.close()
-
-    async def run_worker_once(self) -> bool:
-        """直接驱动一轮真实 Worker 循环(重新领取路径)。"""
-        return await self._runtime().run_worker_once()
-
-    # -- 低层边界(场景 a/b/e:Worker 退出与 fencing)--------------------
-
-    async def claim_lease(self, worker_id: str = "crashed-worker") -> Lease:
-        """领取 ADVANCE_RUN 租约并提交(模拟 Worker 已开始执行)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                lease = await LeaseService(session).claim(worker_id)
-                assert lease is not None
-                return lease
-        finally:
-            await session.close()
-
-    async def expire_leases(self) -> None:
-        """把活动租约的过期时间回拨到过去,模拟 Worker 失联(租约将过期)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                await session.execute(
-                    sa.update(RunJob)
-                    .where(
-                        RunJob.workspace_id == self._ids["workspace_id"],
-                        RunJob.run_id == self._ids["run_id"],
-                        RunJob.status == RunJobStatus.LEASED,
-                    )
-                    .values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1))
-                )
-        finally:
-            await session.close()
-
-    async def sweep(self) -> int:
-        """LeaseSweeper 回收过期租约(Runtime.sweep 调度入口)。"""
-        return await self._runtime().sweep()
+    # -- 低层边界 --------------------------------------------------------
 
     async def seed_pending_write_tool_call(self) -> ToolCall:
         """为"执行边界已提交"场景 seed VALIDATING ToolCall(执行 conftest 同模式)。"""
@@ -491,8 +527,8 @@ class CrashHarness:
         finally:
             await session.close()
 
-    async def begin_operation(self, lease: Lease) -> BegunOperation:
-        """执行边界短事务:OperationService.begin 提交 EXECUTING 后 Worker 退出。"""
+    async def begin_operation(self) -> BegunOperation:
+        """执行边界短事务:OperationService.begin 提交 EXECUTING 后进程退出。"""
         session = self._session()
         try:
             async with session.begin():
@@ -505,7 +541,6 @@ class CrashHarness:
                     workspace_id=self._ids["workspace_id"],
                     actor_id=self._ids["user_id"],
                     run_id=self._ids["run_id"],
-                    lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                 )
                 return await service.begin(
@@ -517,66 +552,12 @@ class CrashHarness:
         finally:
             await session.close()
 
-    async def submit_stale_result(
-        self, lease: Lease, tool_call_id: uuid.UUID, outcome: OperationOutcome
-    ) -> None:
-        """旧 Worker 以失效 fencing token 提交结果(状态迁移/异常原样冒泡)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                service = OperationService(
-                    session,
-                    workspace_id=self._ids["workspace_id"],
-                    actor_id=self._ids["user_id"],
-                    run_id=self._ids["run_id"],
-                    lease_token=lease.lease_token,
-                    expected_state_version=1,
-                )
-                await service.record_result(
-                    OperationResultRecord(
-                        tool_call_id=tool_call_id,
-                        outcome=outcome,
-                        payload={"result": "written"},
-                    )
-                )
-        finally:
-            await session.close()
-
-    async def complete_lease(self, job_id: uuid.UUID, lease_token: uuid.UUID) -> bool:
-        """以给定 token 提交租约完成(真实 LeaseService fencing)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                return await LeaseService(session).complete(job_id, lease_token)
-        finally:
-            await session.close()
-
-    async def claim_next_job(self, worker_id: str) -> Lease | None:
-        """领取任意到期 Job(验证 RECONCILE_OPERATION Job 可被恢复方领取)。"""
-        session = self._session()
-        try:
-            async with session.begin():
-                return await LeaseService(session).claim(worker_id)
-        finally:
-            await session.close()
-
     # -- 断言辅助 --------------------------------------------------------
 
     async def snapshot(self) -> RecoverySnapshot:
         session = self._session()
         try:
             run = await _fresh_run(session, self._ids["workspace_id"], self._ids["run_id"])
-            job = (
-                await session.scalars(
-                    sa.select(RunJob)
-                    .where(
-                        RunJob.workspace_id == self._ids["workspace_id"],
-                        RunJob.run_id == self._ids["run_id"],
-                    )
-                    .order_by(RunJob.created_at.desc())
-                    .limit(1)
-                )
-            ).one_or_none()
             tool_call = await self._load_tool_call(session, required=False)
             operation: Operation | None = None
             if tool_call is not None:
@@ -602,7 +583,6 @@ class CrashHarness:
             ).all()
             return RecoverySnapshot(
                 run=run,
-                job=job,
                 tool_call=tool_call,
                 operation=operation,
                 attempts=tuple(attempts),
@@ -643,7 +623,7 @@ class CrashHarness:
 
 
 # ---------------------------------------------------------------------------
-# 种子与清理(已提交种子行 + 独立 Session 工厂模式,见 jobs/编排层测试)
+# 种子与清理(已提交种子行 + 独立 Session 工厂模式,见编排层测试)
 # ---------------------------------------------------------------------------
 
 
@@ -679,7 +659,7 @@ def _write_tool_pins(
 
 
 async def _seed_committed_scenario(engine: AsyncEngine) -> dict[str, Any]:
-    """提交最小种子链:身份、Session、Run、ADVANCE_RUN Job 与写 Tool 行。"""
+    """提交最小种子链:身份、Session、Run 与写 Tool 行。"""
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
@@ -743,9 +723,6 @@ async def _seed_committed_scenario(engine: AsyncEngine) -> dict[str, Any]:
                 agent_version_id=agent_version.id,
                 model_config_version_id=model_config_version.id,
             )
-            job = await JobRepository(session).create(
-                workspace_id=workspace.id, run_id=run.id, kind=RunJobKind.ADVANCE_RUN
-            )
             write_tool_key = _stable_key("write-tool")
             tool_definition = ToolDefinition(
                 id=uuid.uuid4(),
@@ -774,7 +751,6 @@ async def _seed_committed_scenario(engine: AsyncEngine) -> dict[str, Any]:
                 "model_connection_id": model_connection.id,
                 "model_config_version_id": model_config_version.id,
                 "run_id": run.id,
-                "job_id": job.id,
                 "write_tool_key": write_tool_key,
                 "tool_definition_id": tool_definition.id,
                 "tool_version_id": tool_version.id,
@@ -830,10 +806,6 @@ async def _cleanup_scenario(engine: AsyncEngine, ids: Mapping[str, Any]) -> None
                 ),
                 (
                     "DELETE FROM run_attempts WHERE workspace_id = :ws",
-                    {"ws": ids["workspace_id"]},
-                ),
-                (
-                    "DELETE FROM run_jobs WHERE workspace_id = :ws",
                     {"ws": ids["workspace_id"]},
                 ),
                 (
@@ -930,7 +902,7 @@ async def test_response_loss_reconciles_without_second_write(
     harness = crash_harness
     harness.set_backend_rounds([harness.write_round()])
 
-    first = await harness.run_until(AFTER_EXTERNAL_WRITE_BEFORE_RESULT)
+    first = await harness.advance_until(AFTER_EXTERNAL_WRITE_BEFORE_RESULT)
     assert first.run.status == RunStatus.WAITING_RECONCILIATION
 
     recovered = await harness.recover()
@@ -948,65 +920,49 @@ async def test_response_loss_reconciles_without_second_write(
 # ---------------------------------------------------------------------------
 
 
-async def test_worker_exit_before_execution_requeues_run(
+async def test_interrupted_run_recovers_and_completes(
     crash_harness: CrashHarness,
 ) -> None:
-    """场景 a:执行前 Worker 退出——租约被 Sweeper 回收,Run 回 QUEUED 可重新领取。"""
+    """场景 a:执行前进程退出——RUNNING 残留由恢复扫描退回 QUEUED 并推进完成。"""
     harness = crash_harness
     harness.set_backend_rounds([])  # 恢复推进一轮即完成(无 ToolCall)。
 
-    await harness.claim_lease("lost-worker")
-    await harness.expire_leases()
-    assert await harness.sweep() == 1
-
+    # 模拟"领取后、开始推进前进程被杀":Run 已 RUNNING,Attempt 停在 RUNNING。
+    claim = await harness.claim()
+    assert claim is not None
     snapshot = await harness.snapshot()
-    assert snapshot.run.status == RunStatus.QUEUED
-    assert snapshot.job is not None
-    assert snapshot.job.status == RunJobStatus.PENDING
+    assert snapshot.run.status == RunStatus.RUNNING
     assert len(snapshot.attempts) == 1
-    assert snapshot.attempts[0].status == RunAttemptStatus.ABANDONED
-    assert harness.external_write_count == 0
 
-    # Run 回 QUEUED 后可被真实 Worker 重新领取并推进到终态。
-    assert await harness.run_worker_once() is True
-    recovered = await harness.snapshot()
+    recovered = await harness.recover()
     assert recovered.run.status == RunStatus.COMPLETED
     assert len(recovered.attempts) == 2
     assert recovered.attempts[1].status == RunAttemptStatus.SUCCEEDED
     assert harness.external_write_count == 0
 
 
-async def test_executing_operation_exit_schedules_reconcile_job(
+async def test_executing_operation_exit_reconciles_before_resuming(
     crash_harness: CrashHarness,
 ) -> None:
-    """场景 b:Operation 已改 EXECUTING 后 Worker 退出——Attempt ABANDONED,
-    恢复时下一 Job 为 RECONCILE_OPERATION。"""
+    """场景 b:Operation 已 EXECUTING 后进程退出——恢复必须先回查,不得直接推进。"""
     harness = crash_harness
     await harness.seed_pending_write_tool_call()
 
-    lease = await harness.claim_lease("lost-worker")
-    begun = await harness.begin_operation(lease)
+    claim = await harness.claim()
+    assert claim is not None
+    begun = await harness.begin_operation()
     assert begun.status == OperationStatus.EXECUTING
 
-    await harness.expire_leases()
-    assert await harness.sweep() == 1
-
-    snapshot = await harness.snapshot()
-    assert len(snapshot.attempts) == 1
-    assert snapshot.attempts[0].status == RunAttemptStatus.ABANDONED
-    assert snapshot.job is not None
-    # 执行边界已提交而外部调用未发生:回查语义接管(禁止盲目重试)。
-    assert snapshot.job.kind == RunJobKind.RECONCILE_OPERATION
-    assert snapshot.job.status == RunJobStatus.PENDING
-    assert snapshot.run.status == RunStatus.WAITING_RECONCILIATION
-    assert snapshot.operation is not None
-    assert snapshot.operation.status == OperationStatus.EXECUTING
+    # 恢复扫描发现 EXECUTING Operation:Run 转 WAITING_RECONCILIATION 并回查。
+    harness.set_reconcile_verdicts([ReconcileResult.APPLIED])
+    recovered = await harness.recover()
+    assert recovered.operation is not None
+    assert recovered.operation.status == OperationStatus.APPLIED
     assert harness.external_write_count == 0
 
-    # RECONCILE_OPERATION Job 可被恢复方按租约语义领取(token 已轮换)。
-    reconcile_lease = await harness.claim_next_job("reconcile-worker")
-    assert reconcile_lease is not None
-    assert reconcile_lease.lease_token != lease.lease_token
+    # 恢复前的中间快照语义:Run 不可能在 EXECUTING 状态下被直接推进。
+    snapshot = await harness.snapshot()
+    assert snapshot.run.status != RunStatus.RUNNING
 
 
 async def test_reconcile_unknown_then_applied_resumes_run(
@@ -1015,22 +971,22 @@ async def test_reconcile_unknown_then_applied_resumes_run(
     """场景 d:回查 UNKNOWN → APPLIED——预算内继续调度,确认后 Run 恢复推进。"""
     harness = crash_harness
     harness.set_backend_rounds([harness.write_round()])
-    harness.set_reconcile_verdicts([ReconcileResult.UNKNOWN, ReconcileResult.APPLIED])
 
-    first = await harness.run_until(AFTER_EXTERNAL_WRITE_BEFORE_RESULT)
+    first = await harness.advance_until(AFTER_EXTERNAL_WRITE_BEFORE_RESULT)
     assert first.run.status == RunStatus.WAITING_RECONCILIATION
     assert first.operation is not None
     assert first.operation.status == OperationStatus.UNKNOWN
 
     # 第一次回查仍 UNKNOWN:预算内保持 WAITING_RECONCILIATION 并再次调度。
-    uncertain = await harness.reconcile(ReconcileResult.UNKNOWN)
+    uncertain = await harness.apply_reconcile(ReconcileResult.UNKNOWN)
     assert uncertain.result is ReconcileResult.UNKNOWN
     assert uncertain.operation_status == OperationStatus.UNKNOWN
     assert uncertain.run_status == RunStatus.WAITING_RECONCILIATION
-    assert uncertain.next_job_kind == RunJobKind.RECONCILE_OPERATION
+    assert uncertain.next_step is RunNextStep.RECONCILE
     assert uncertain.budget_exhausted is False
 
     # 回查适配器确认 APPLIED:Operation APPLIED,Run 恢复推进到 COMPLETED。
+    harness.set_reconcile_verdicts([ReconcileResult.APPLIED])
     recovered = await harness.recover()
     assert recovered.operation is not None
     assert recovered.operation.status == OperationStatus.APPLIED
@@ -1038,17 +994,23 @@ async def test_reconcile_unknown_then_applied_resumes_run(
     assert harness.external_write_count == 1
 
 
-async def test_stale_fencing_token_rejected_without_second_write(
+async def test_second_advance_is_blocked_by_state_version_cas(
     crash_harness: CrashHarness,
 ) -> None:
-    """场景 e:旧 Worker 使用失效 fencing token 提交——LeaseStaleError / False,
-    不产生第二次写入。"""
+    """场景 e:同一 Run 已 RUNNING 时,第二个推进者被 state_version CAS 挡住。
+
+    首版删除了租约与 fencing token,``runs.state_version`` CAS 是唯一并发保护;
+    本用例验证它仍然阻止重复推进与第二次外部写入。
+    """
     harness = crash_harness
     tool_call = await harness.seed_pending_write_tool_call()
 
-    stale_lease = await harness.claim_lease("stale-worker")
-    begun = await harness.begin_operation(stale_lease)
-    # 旧 Worker 已发出外部写请求(网络请求无法被租约撤回)。
+    # 第二个推进者读到的版本(领取前):第一个推进者领取后它必须 CAS 失败。
+    stale_version = await harness.state_version()
+
+    claim = await harness.claim()
+    assert claim is not None
+    begun = await harness.begin_operation()
     prepared = await harness.write_handler.prepare(
         normalized_arguments={"listing_id": "L1"}
     )
@@ -1060,24 +1022,14 @@ async def test_stale_fencing_token_rejected_without_second_write(
     )
     assert harness.external_write_count == 1
 
-    # 租约过期被回收,RECONCILE_OPERATION Job 由新执行者领取(fencing 失效)。
-    await harness.expire_leases()
-    assert await harness.sweep() == 1
-    assert await harness.claim_next_job("reconcile-worker") is not None
-
-    # 旧 Worker 迟到的结果提交被 fencing 拒绝,不得覆盖权威状态。
-    with pytest.raises(LeaseStaleError):
-        await harness.submit_stale_result(
-            stale_lease, tool_call.id, OperationOutcome.APPLIED
-        )
-    # 旧 Worker 的租约完成同样被拒。
-    assert await harness.complete_lease(stale_lease.job_id, stale_lease.lease_token) is False
-
+    # 第二个推进者持有旧 state_version:直接 CAS 必须零行更新。
+    assert await harness.try_cas(stale_version) is False
+    # 走正常领取路径同样失败:Run 已不在 QUEUED。
+    assert await harness.claim() is None
     snapshot = await harness.snapshot()
+    assert snapshot.run.status == RunStatus.RUNNING
     assert snapshot.operation is not None
     assert snapshot.operation.status == OperationStatus.EXECUTING
-    assert snapshot.tool_call is not None
-    assert snapshot.tool_call.status.value == "EXECUTING"
     assert harness.external_write_count == 1
 
 
@@ -1090,7 +1042,7 @@ async def test_schema_failure_keeps_applied_write_and_authoritative_fact(
     harness.set_backend_rounds([harness.write_round()])
     harness.set_receipt(status="APPLIED", payload={"bogus": 1})  # 违反 Output Schema。
 
-    snapshot = await harness.run_until("no-crash")
+    snapshot = await harness.advance_until("no-crash")
     assert snapshot.run.status == RunStatus.COMPLETED
     assert snapshot.tool_call is not None
 
