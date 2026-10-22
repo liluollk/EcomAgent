@@ -401,6 +401,12 @@ class EvalRunner:
                     )
             elif view.status is RunStatus.WAITING_RECONCILIATION:
                 view = await application.recover(view.run_id)
+            elif view.status is RunStatus.QUEUED:
+                # 推进未完成(例如 NOT_APPLIED 重试)会把 Run 退回 QUEUED
+                # 等下一轮推进;生产由执行器后台兜底循环捞取,评测里的同步
+                # 门面不跑后台循环,所以按同一语义在这里再推一次。反复退回会
+                # 耗尽 Attempt 预算,最终由 Runtime 自己判 FAILED。
+                view = await application.resume(view.run_id)
             elif view.status is RunStatus.COMPLETED:
                 return view, interaction_index
             elif view.status in _TERMINAL_RUN_STATUSES:

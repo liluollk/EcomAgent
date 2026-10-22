@@ -655,8 +655,19 @@ class ProductApplication:
             await self._push(run_id)
         return await self.run_view(run_id)
 
-    # -- RunDriver(进程内执行器注入的推进实现)--------------------------
+    async def resume(self, run_id: uuid.UUID) -> RunView:
+        """继续推进一个仍停在 QUEUED 的 Run(同步调用方驱动用)。
 
+        请求内推进的步数预算耗尽、或回查/重试把 Run 退回 QUEUED 时,生产环境
+        靠执行器后台兜底循环捡起来;不跑后台循环的同步调用方(评测)用这个方法
+        按同一语义再推一轮:仍在 QUEUED 才推,已经到别的边界就直接返回。
+        """
+        view = await self.run_view(run_id)
+        if view.status is RunStatus.QUEUED:
+            await self._push(run_id)
+        return await self.run_view(run_id)
+
+    # -- RunDriver(进程内执行器注入的推进实现)--------------------------
     async def advance(
         self,
         claim: RunClaim,
