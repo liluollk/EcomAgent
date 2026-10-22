@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenarios:
 - id: safe-no-write-permission-001
   category: unauthorized_or_violation

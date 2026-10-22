@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenarios:
 - id: regression-inventory-response-lost-001
   category: recovery

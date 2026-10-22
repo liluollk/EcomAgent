@@ -36,7 +36,7 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 6
+REPORT_SCHEMA_VERSION: int = 7
 """报告结构版本:字段语义或结构变化时递增。
 
 v5:新增 ``metrics.decision`` / ``metrics.recovery`` 顶层分项、安全披露与未决
@@ -48,6 +48,10 @@ v6:口径拆开、分母外显——``metrics.state_completion_rate`` 只算权�
 ``metrics.decision.decision_accuracy_by_decision`` 给决策级(而非逐例全对)
 准确率;``assertion_coverage`` 说明本分区到底有多少场景声明了哪类断言,
 避免"没断言"被读成"断言全过"。
+v7:行为合同进报告——``metrics.contract``(入参/禁止调用/逐轮答复)独立成
+维度,并计入任务完成的口径;``cases[].scores.contract`` 之外,轨迹里的
+ToolCall 带出**脱敏后的实际入参**,使"改价原因码写错"这类缺陷可从报告直接
+看出,不必回捞数据库。
 """
 
 
@@ -171,6 +175,10 @@ class ReportBuilder:
         grounding_passed = sum(
             1 for s in grounding_applicable if s.grounding.passed is True
         )
+        contract_applicable = [s for s in contributing if s.contract.applicable]
+        contract_passed = sum(
+            1 for s in contract_applicable if s.contract.passed is True
+        )
         decision_applicable = [s for s in contributing if s.decision.total_decisions > 0]
         decision_correct = sum(
             1 for s in decision_applicable if s.decision.decision_accuracy is True
@@ -237,6 +245,38 @@ class ReportBuilder:
                 "passed_executions": grounding_passed,
                 "pass_rate": _rate(grounding_passed, len(grounding_applicable)),
             },
+            "contract": {
+                "applicable_executions": len(contract_applicable),
+                "passed_executions": contract_passed,
+                "pass_rate": _rate(contract_passed, len(contract_applicable)),
+                "checked_assertions": sum(
+                    s.contract.checked_assertions for s in contract_applicable
+                ),
+                "violating_executions": len(contract_applicable) - contract_passed,
+                "arguments": {
+                    "violating_executions": sum(
+                        1
+                        for s in contract_applicable
+                        if s.contract.argument_violations
+                    ),
+                },
+                "forbidden_calls": {
+                    "violating_executions": sum(
+                        1
+                        for s in contract_applicable
+                        if s.contract.forbidden_call_violations
+                    ),
+                    "attempts": sum(
+                        len(s.contract.forbidden_call_violations)
+                        for s in contract_applicable
+                    ),
+                },
+                "turns": {
+                    "violating_executions": sum(
+                        1 for s in contract_applicable if s.contract.turn_violations
+                    ),
+                },
+            },
             "recovery": {
                 "applicable_cases": len(recovery_applicable),
                 "recovery_success_rate": _rate(
@@ -252,6 +292,18 @@ class ReportBuilder:
                 "state_passed": state_passed,
                 "grounding_applicable_executions": len(grounding_applicable),
                 "process_applicable_executions": len(process_applicable),
+                "contract_applicable_executions": len(contract_applicable),
+                "contract_passed_executions": contract_passed,
+                "contract_argument_violations": sum(
+                    len(s.contract.argument_violations) for s in contract_applicable
+                ),
+                "contract_forbidden_calls": sum(
+                    len(s.contract.forbidden_call_violations)
+                    for s in contract_applicable
+                ),
+                "contract_turn_violations": sum(
+                    len(s.contract.turn_violations) for s in contract_applicable
+                ),
                 "dangerous_attempts": sum(
                     s.safety.dangerous_attempts for s in contributing
                 ),
@@ -282,6 +334,7 @@ class ReportBuilder:
                 "recovery_applicable_cases": len(recovery_applicable),
                 "grounding_applicable_cases": len(grounding_applicable),
                 "process_applicable_cases": len(process_applicable),
+                "contract_applicable_cases": len(contract_applicable),
                 "legal_write_decisions": legal_write_decisions,
                 "forbidden_write_decisions": forbidden_write_decisions,
             },
@@ -327,6 +380,7 @@ class ReportBuilder:
             )
             entry["scores"] = {
                 "task": s.task.model_dump(mode="json"),
+                "contract": s.contract.model_dump(mode="json"),
                 "decision": s.decision.model_dump(mode="json"),
                 "process": s.process.model_dump(mode="json"),
                 "grounding": s.grounding.model_dump(mode="json"),
@@ -373,6 +427,11 @@ def _trace(result: CaseResult) -> dict[str, Any]:
                 "ordinal": call.ordinal,
                 "status": call.status,
                 "failure_code": call.failure_code,
+                "arguments": (
+                    dict(call.normalized_arguments)
+                    if call.normalized_arguments is not None
+                    else None
+                ),
             }
             for call in sorted(result.tool_calls, key=lambda item: item.ordinal)
         ],
@@ -401,11 +460,12 @@ def _rate(numerator: int, denominator: int) -> float | None:
 
 
 def _product_task_passed(score: ScoredCaseResult) -> bool:
-    """商品任务成功需满足状态判分及所有适用的过程/回答证据约束。"""
+    """商品任务成功需满足状态判分与全部适用的行为约束(过程/依据/合同)。"""
     return (
         score.task.passed
         and score.process.passed is not False
         and score.grounding.passed is not False
+        and score.contract.passed is not False
     )
 
 

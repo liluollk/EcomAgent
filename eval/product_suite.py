@@ -261,11 +261,19 @@ def run_assertion_coverage(
             "tool_order_constraints": bucket(lambda s: bool(s.tool_order_constraints)),
             "allowed_side_effects": bucket(lambda s: bool(s.allowed_side_effects)),
             "forbidden_side_effects": bucket(lambda s: bool(s.forbidden_side_effects)),
+            "tool_arguments": bucket(lambda s: bool(s.expected_tool_arguments)),
+            "forbidden_tool_calls": bucket(lambda s: bool(s.forbidden_tool_calls)),
+            "turn_expectations": bucket(lambda s: bool(s.turn_expectations)),
         },
         "cases_without_response_facts": [
             scenario.id
             for scenario in scenarios
             if not scenario.expected_response_facts
+        ],
+        "cases_without_tool_arguments": [
+            scenario.id
+            for scenario in scenarios
+            if not scenario.expected_tool_arguments
         ],
     }
 

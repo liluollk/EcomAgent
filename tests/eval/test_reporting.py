@@ -44,6 +44,7 @@ from eval.results import (
 )
 from eval.schema import SCHEMA_VERSION
 from eval.scorers.composite_result import ScoredCaseResult
+from eval.scorers.contract import ContractScore
 from eval.scorers.decision import DecisionScore
 from eval.scorers.grounding import GroundingScore
 from eval.scorers.process import ProcessScore
@@ -69,6 +70,7 @@ REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
     "recovery",
     "process",
     "grounding",
+    "contract",
 }
 
 
@@ -116,6 +118,9 @@ def _scored(
     unresolved_dangerous: int = 0,
     recovery_success: bool = True,
     duplicate_writes: int = 0,
+    contract_applicable: bool = False,
+    contract_passed: bool = True,
+    contract_violations: tuple[str, ...] = (),
 ) -> ScoredCaseResult:
     return ScoredCaseResult(
         case_id=case_id,
@@ -129,6 +134,12 @@ def _scored(
             asserted_listings=1,
             final_logical_writes=1,
             max_logical_writes=1,
+        ),
+        contract=ContractScore(
+            applicable=contract_applicable,
+            passed=(contract_passed if contract_applicable else None),
+            checked_assertions=len(contract_violations) or (3 if contract_applicable else 0),
+            argument_violations=contract_violations,
         ),
         decision=DecisionScore(
             decision_accuracy=(decision_correct == decision_total)
@@ -249,6 +260,16 @@ def test_report_keeps_dimensions_separate(report_builder: ReportBuilder) -> None
         "total_decisions",
         "false_rejection_rate",
         "false_allowance_rate",
+    }
+    assert set(report["metrics"]["contract"]) == {
+        "applicable_executions",
+        "passed_executions",
+        "pass_rate",
+        "checked_assertions",
+        "violating_executions",
+        "arguments",
+        "forbidden_calls",
+        "turns",
     }
     assert set(report["metrics"]["recovery"]) == {
         "applicable_cases",
@@ -491,7 +512,7 @@ def test_report_carries_fingerprint_config_and_totals(
 
 
 def test_case_traces_are_redacted_references(report_builder: ReportBuilder) -> None:
-    """每例轨迹 = 引用 + 脱敏摘要:payload 经键名/密钥形态脱敏,参数值不出现。"""
+    """每例轨迹 = 引用 + 脱敏摘要:payload 经键名/密钥形态脱敏,参数只留业务字段。"""
     report = report_builder.build(
         sample_results(api_key="sk-sensitive"),
         protocol_fingerprint="fp-run",
@@ -513,9 +534,39 @@ def test_case_traces_are_redacted_references(report_builder: ReportBuilder) -> N
             "ordinal": 1,
             "status": "SUCCEEDED",
             "failure_code": None,
+            "arguments": None,
         }
     ]
     assert bad["scores"]["task"]["passed"] is False
+
+
+def test_trace_arguments_are_business_fields_only(
+    report_builder: ReportBuilder,
+) -> None:
+    """报告里的入参是判定所需业务字段,敏感键名仍被脱敏。"""
+    calls = (
+        ToolCallCapture(
+            stable_key="set_listing_price",
+            ordinal=1,
+            status="SUCCEEDED",
+            normalized_arguments={
+                "store_ref": "store-kappa",
+                "sku": "SKU-8111",
+                "target_price": "119.90",
+                "api_key": "sk-should-be-redacted",
+            },
+        ),
+    )
+    report = report_builder.build(
+        [
+            _case_result("case-args", tool_calls=calls),
+            _scored("case-args"),
+        ]
+    )
+    recorded = report["cases"][0]["trace"]["tool_calls"][0]["arguments"]
+    assert recorded["target_price"] == "119.90"
+    assert recorded["sku"] == "SKU-8111"
+    assert recorded["api_key"] == "[REDACTED]"
 
 
 # ---- 补充语义:Markdown = 同一 JSON 的可读视图 -------------------------
@@ -748,7 +799,7 @@ def test_product_suite_rejects_core_hash_drift(
     for name in ("EVAL_BASE_URL", "EVAL_MODEL", "EVAL_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     manifest = {
-        "schema_version": 2,
+        "schema_version": SCHEMA_VERSION,
         "scorer_version": "v2",
         "core_ids": ["core-001"],
         "blind_ids": [],

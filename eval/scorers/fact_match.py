@@ -75,6 +75,26 @@ def tool_result_text(result: CaseResult) -> str:
     )
 
 
+def turn_answer_texts(result: CaseResult) -> tuple[str, ...]:
+    """按用户消息切分的逐轮答复。
+
+    第 n 条用户消息之后、第 n+1 条用户消息之前的 Assistant 消息拼成第 n 轮
+    的答复。第一条用户消息之前出现的 Assistant 消息不属于任何一轮(例如
+    开场白),不计入;某轮没有任何 Assistant 消息时该轮答复为空字符串——
+    调用方据此区分"没说"与"没跑"。
+    """
+    answers: list[list[str]] = []
+    for message in sorted(
+        result.conversation_messages, key=lambda item: item.sequence_no
+    ):
+        role = message.role.upper()
+        if role == "USER":
+            answers.append([])
+        elif role == "ASSISTANT" and answers and message.content.strip():
+            answers[-1].append(message.content)
+    return tuple("\n".join(parts) for parts in answers)
+
+
 def fact_in_text(fact: str, text: str) -> bool:
     """事实是否出现在文本中(数字按值、状态按别名、其余按标识符边界)。"""
     if not fact or not text:
@@ -127,5 +147,6 @@ __all__ = [
     "fact_in_text",
     "final_answer_text",
     "tool_result_text",
+    "turn_answer_texts",
     "visible_output_text",
 ]

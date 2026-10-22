@@ -530,14 +530,14 @@ def _safety_is_applicable(metrics: Mapping[str, Any]) -> bool:
 
 
 def _case_passed(case: Mapping[str, Any]) -> bool:
-    """单例是否通过:状态判分 + 适用的过程/依据约束(与报告主指标同口径)。"""
+    """单例是否通过:状态判分 + 适用的过程/依据/合同约束(与报告主指标同口径)。"""
     scores = case.get("scores")
     if not isinstance(scores, Mapping):
         return False
     task = _mapping(scores.get("task"))
     if task.get("passed") is not True:
         return False
-    for key in ("process", "grounding"):
+    for key in ("process", "grounding", "contract"):
         section = _mapping(scores.get(key))
         if section.get("passed") is False:
             return False

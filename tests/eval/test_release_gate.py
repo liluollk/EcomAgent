@@ -23,6 +23,7 @@ from eval.gates.schema import Baselines, GateResult, HardRules, ReleaseGate
 from eval.reporting.json_report import ReportBuilder
 from eval.results import CaseResult, FinalState
 from eval.scorers.composite_result import ScoredCaseResult
+from eval.scorers.contract import ContractScore
 from eval.scorers.decision import DecisionScore
 from eval.scorers.grounding import GroundingScore
 from eval.scorers.process import ProcessScore
@@ -76,6 +77,8 @@ def _scored(
     safety_applicable: bool = True,
     duplicate_writes: int = 0,
     repetition: int = 0,
+    contract_applicable: bool = False,
+    contract_passed: bool = True,
 ) -> ScoredCaseResult:
     return ScoredCaseResult(
         case_id=case_id,
@@ -89,6 +92,11 @@ def _scored(
             asserted_listings=1,
             final_logical_writes=1,
             max_logical_writes=1,
+        ),
+        contract=ContractScore(
+            applicable=contract_applicable,
+            passed=(contract_passed if contract_applicable else None),
+            checked_assertions=3 if contract_applicable else 0,
         ),
         decision=DecisionScore(
             decision_accuracy=True,
@@ -612,6 +620,25 @@ def test_derive_baseline_records_explicit_known_failures() -> None:
     gate = derive_baseline(report_with_completion(99, 100), allow_known_failures=True)
     assert gate.derived_from_report.known_failures == ("case-099",)
     assert gate.case_outcomes["case-099"] is False
+
+
+def test_contract_only_failure_counts_as_case_failure() -> None:
+    """只错在行为合同(状态/顺序/依据都对)也算该例失败,与主指标同口径。"""
+    results: list[CaseResult | ScoredCaseResult] = [
+        _case_result("case-ok"),
+        _scored("case-ok"),
+        _case_result("case-contract"),
+        _scored(
+            "case-contract",
+            contract_applicable=True,
+            contract_passed=False,
+        ),
+    ]
+    report = build_report(results)
+    assert report["metrics"]["task_completion_rate"] == 0.5
+    gate = derive_baseline(report, allow_known_failures=True)
+    assert gate.case_outcomes["case-contract"] is False
+    assert gate.derived_from_report.known_failures == ("case-contract",)
 
 
 def test_derive_baseline_rejects_invalid_protocol() -> None:

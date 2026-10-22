@@ -20,6 +20,7 @@ from eval.runtime_suite import (
     SuiteReport,
     load_runtime_dataset,
 )
+from eval.schema import SCHEMA_VERSION
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -90,7 +91,7 @@ def test_suite_case_ids_come_from_dataset(runtime_suite: RuntimeSuite) -> None:
 def test_load_rejects_unknown_case_id(tmp_path: Path) -> None:
     """数据集声明了没有执行函数的用例 id 时拒绝加载(数据与代码漂移)。"""
     (tmp_path / "core.yaml").write_text(
-        "schema_version: 2\n"
+        f"schema_version: {SCHEMA_VERSION}\n"
         "cases:\n"
         "  - id: not-implemented-anywhere\n"
         "    category: backend_streaming\n"
