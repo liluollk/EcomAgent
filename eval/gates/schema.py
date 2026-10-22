@@ -35,11 +35,19 @@ class Baselines(BaseModel):
 
 
 class HardRules(BaseModel):
-    """随 Gate 固化的任务完成率回归容差。"""
+    """随 Gate 固化的硬规则快照。"""
 
     model_config = ConfigDict(frozen=True)
 
     task_completion_tolerance: float = Field(default=0.02, ge=0.0, le=1.0)
+    """Core 任务完成率允许的最大回退(百分点比例)。"""
+
+    require_attestations: bool = True
+    """是否要求报告明确声明 Runtime 确定性套件与 E2E 通过。
+
+    默认要求:报告未声明即"无法验证",按失败处理——缺失不能等价于通过。
+    只有明确只想做完成率回归检查的 Gate 才把它设为 ``False``。
+    """
 
 
 class DerivedFromReport(BaseModel):
@@ -52,6 +60,12 @@ class DerivedFromReport(BaseModel):
     benchmark_fingerprint: str
     totals: dict[str, Any] = Field(default_factory=dict)
     dataset: dict[str, Any] | None = None
+    known_failures: tuple[str, ...] = ()
+    """派生时被显式接受的失败用例(来源报告里未通过的 case_id)。
+
+    默认派生要求来源报告全部通过;只有 ``allow_known_failures`` 才允许冻结
+    带失败的基线,并把例外项记在这里,避免"静默把缺陷固化成底线"。
+    """
 
 
 class ReleaseGate(BaseModel):
@@ -63,6 +77,13 @@ class ReleaseGate(BaseModel):
     benchmark_fingerprint: str = Field(min_length=1)
     baselines: Baselines
     hard_rules: HardRules = Field(default_factory=HardRules)
+    case_outcomes: dict[str, bool] = Field(default_factory=dict)
+    """基线逐例结果(``case_id`` → 全部重复是否都通过)。
+
+    允许平均分掩盖单例退化:基线里通过、候选报告里失败的用例必须单独报出来,
+    不能被别处的改善抵消。
+    """
+
     derived_from_report: DerivedFromReport
     created_at: datetime
 

@@ -11,6 +11,19 @@ from collections.abc import Mapping
 from typing import Any
 
 
+_SUBSECTIONS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    (
+        "行为决策",
+        "decision",
+        frozenset(
+            {"decision_accuracy_rate", "false_rejection_rate", "false_allowance_rate"}
+        ),
+    ),
+    ("故障恢复", "recovery", frozenset({"recovery_success_rate"})),
+)
+"""metrics 下的嵌套分项 -> (标题, 键名, 按比率渲染的字段)。"""
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     """把 JSON 报告 dict 渲染为 Markdown(纯视图,不计算任何新数字)。"""
     lines: list[str] = [
@@ -36,8 +49,11 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 f"- {key}: {_cell(counts.get(key))}"
                 for key in (
                     "actual_dangerous_side_effects",
+                    "sensitive_disclosures",
+                    "unresolved_dangerous_attempts",
                     "dangerous_attempts",
                     "prevented_attempts",
+                    "duplicate_logical_writes",
                 )
             )
         stability = metrics.get("scenario_stability")
@@ -51,6 +67,19 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                     )
                 ]
             )
+        for title, key, rate_keys in _SUBSECTIONS:
+            section = metrics.get(key)
+            if isinstance(section, Mapping):
+                lines.extend(_section(title))
+                lines.append(
+                    f"- applicable_cases: {_cell(section.get('applicable_cases'))}"
+                )
+                lines.extend(
+                    f"- {name}: "
+                    f"{_rate_text(value) if name in rate_keys else _cell(value)}"
+                    for name, value in section.items()
+                    if name != "applicable_cases"
+                )
         diagnostics = metrics.get("diagnostics")
         if isinstance(diagnostics, Mapping):
             lines.extend(_section("失败诊断"))
@@ -118,7 +147,14 @@ def _metric_lines(metrics: Mapping[str, Any]) -> list[str]:
     }
     lines: list[str] = []
     for key, value in metrics.items():
-        if key in ("counts", "denominators", "diagnostics", "scenario_stability"):
+        if key in (
+            "counts",
+            "denominators",
+            "diagnostics",
+            "scenario_stability",
+            "decision",
+            "recovery",
+        ):
             continue
         detail = ""
         if key in detail_by_metric:

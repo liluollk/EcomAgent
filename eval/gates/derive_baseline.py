@@ -8,11 +8,16 @@
 - 无基础设施错误(``totals.infrastructure_errors == 0`` 且报告的
   ``infrastructure_errors`` 列表为空);
 - ``dataset.split`` 为 ``core``;
-- 真实分母 > 0,且任务完成率基线可读。
+- 真实分母 > 0,且任务完成率基线可读;
+- **全部用例通过**——默认拒绝把带失败的版本冻成基线;确实要接受已知失败时
+  必须显式 ``allow_known_failures=True``,失败项会写进
+  ``derived_from_report.known_failures``,不能被静默覆盖。
 
 派生内容:基线取报告 ``metrics`` 分项比率原值;``hard_rules`` 固化规则
-快照(任务完成率容差 ±2 个百分点);
-``derived_from_report`` 记录来源报告摘要(totals/dataset 快照)。
+快照(任务完成率容差 ±2 个百分点,并要求报告声明 Runtime/E2E 通过);
+``case_outcomes`` 冻结逐例通过结果,供后续 Gate 逐例比对,避免平均分掩盖
+单例退化;``derived_from_report`` 记录来源报告摘要(totals/dataset 快照)
+与显式接受的失败项。
 
 CLI::
 
@@ -33,6 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from eval.gates.check_release import case_outcomes
 from eval.gates.schema import (
     Baselines,
     DerivedFromReport,
@@ -47,11 +53,18 @@ class BaselineDerivationError(Exception):
 
 
 def derive_baseline(
-    report: Mapping[str, Any], *, gate_version: str = "v1"
+    report: Mapping[str, Any],
+    *,
+    gate_version: str = "v1",
+    allow_known_failures: bool = False,
 ) -> ReleaseGate:
     """校验报告资格并派生 :class:`ReleaseGate`;不合格即抛出明确错误。"""
     totals = _mapping(report.get("totals"))
     metrics = _mapping(report.get("metrics"))
+    outcomes = case_outcomes(report)
+    known_failures = tuple(
+        sorted(case_id for case_id, passed in outcomes.items() if not passed)
+    )
     problems: list[str] = []
 
     fingerprint = report.get("benchmark_fingerprint")
@@ -80,6 +93,13 @@ def derive_baseline(
     if not is_metric_number(task_completion):
         problems.append("metrics.task_completion_rate is missing or not numeric")
 
+    if known_failures and not allow_known_failures:
+        problems.append(
+            "core report has failing cases ("
+            + ", ".join(known_failures)
+            + "); pass allow_known_failures to freeze them explicitly"
+        )
+
     if problems:
         raise BaselineDerivationError("; ".join(problems))
 
@@ -93,6 +113,7 @@ def derive_baseline(
             task_completion_rate=task_completion,
         ),
         hard_rules=HardRules(),
+        case_outcomes=outcomes,
         derived_from_report=DerivedFromReport(
             report_schema_version=(
                 schema_version if isinstance(schema_version, int) else None
@@ -101,6 +122,7 @@ def derive_baseline(
             benchmark_fingerprint=fingerprint,
             totals=totals,
             dataset=dict(dataset) if isinstance(dataset, dict) else None,
+            known_failures=known_failures,
         ),
         created_at=datetime.now(UTC),
     )
@@ -115,6 +137,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", required=True, help="path of the source JSON report")
     parser.add_argument("--output", required=True, help="path of the gate JSON to write")
     parser.add_argument("--gate-version", default="v1", help="gate version label")
+    parser.add_argument(
+        "--allow-known-failures",
+        action="store_true",
+        help="freeze a baseline that still has failing cases (recorded in the gate)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -133,7 +160,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        gate = derive_baseline(document, gate_version=args.gate_version)
+        gate = derive_baseline(
+            document,
+            gate_version=args.gate_version,
+            allow_known_failures=args.allow_known_failures,
+        )
     except BaselineDerivationError as error:
         print(
             "derive_baseline: report is not eligible for baseline derivation: "
@@ -156,6 +187,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"gate_version={gate.gate_version}")
     print(f"benchmark_fingerprint={gate.benchmark_fingerprint}")
     print(f"task_completion_rate={_rate_text(gate.baselines.task_completion_rate)}")
+    if gate.derived_from_report.known_failures:
+        print(
+            "known_failures=" + ", ".join(gate.derived_from_report.known_failures)
+        )
     print(f"written: {output}")
     return 0
 

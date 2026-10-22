@@ -7,12 +7,14 @@ on:
       split:
         description: 选择商品 Agent 评测数据分区
         required: true
-        default: development
+        default: core
         type: choice
         options:
-          - development
+          - core
+          - blind
+          - clarification
+          - regression
           - safety
-          - held_out
 
 jobs:
   deterministic:
@@ -29,10 +31,29 @@ jobs:
   # 真实模型 Eval(DeepSeek):仅手动触发,不在 Pull Request 中自动消耗额度。
   # 需要仓库 Secrets:EVAL_BASE_URL、EVAL_MODEL、EVAL_API_KEY。
   # 运行前需在 GitHub 仓库 Settings → Secrets and variables → Actions 配置。
+  #
+  # 能力清单必须由正式 Provisioner 对着已迁移的库生成:本 job 起 postgres、
+  # 跑迁移、再生成清单,三个前置步骤缺一步都会在参数/环境校验阶段失败。
   product-real-model:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: runtime
+          POSTGRES_PASSWORD: runtime
+          POSTGRES_DB: agent_runtime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runtime -d agent_runtime_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
+      RUNTIME_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
       EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
       EVAL_MODEL: ${{ secrets.EVAL_MODEL }}
       EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}
@@ -48,8 +69,31 @@ jobs:
               exit 1
             fi
           done
-      # Regression 目前为空，待确认 Bad Case 后再加入手动选项。
-      - run: uv run python -m eval.product_suite --split "${{ inputs.split }}" --output "reports/${{ inputs.split }}.json"
+      - name: Prepare test database
+        run: uv run alembic upgrade head
+      - name: Build freeze-time capability manifest
+        run: uv run python -m eval.capability_manifest --output "$RUNNER_TEMP/capability-manifest.json"
+      # 报告里的 Runtime/E2E 通过声明由本 job 自己的执行结果决定,用于发布 Gate。
+      - name: Deterministic Runtime and E2E attestations
+        run: |
+          uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
+          uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
+          uv run pytest tests/apps/api/test_e2e_product_flow.py -q
+      - name: Run product eval split
+        run: |
+          uv run python -m eval.product_suite \
+            --split "${{ inputs.split }}" \
+            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
+            --runtime-suite-result passed \
+            --e2e-result passed \
+            --output "reports/${{ inputs.split }}.json"
+      # 冻结门存在且本次是 core 报告时才做放行检查;没有基线不虚构结论。
+      - name: Release gate (core only, when a frozen gate exists)
+        if: inputs.split == 'core' && hashFiles('eval/gates/v*.json') != ''
+        run: |
+          gate=$(ls eval/gates/v*.json | sort -V | tail -1)
+          uv run python -m eval.gates.check_release \
+            --gate "$gate" --report "reports/${{ inputs.split }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: product-eval-${{ inputs.split }}-${{ github.run_id }}
