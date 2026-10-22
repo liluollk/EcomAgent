@@ -13,7 +13,7 @@ Backend 驱动真实 Runtime 推进(start → 缺店铺 Input → 确认 → 终
   (如 401)、连接失败(``OSError`` 系,含 ``ConnectionError``/``TimeoutError``)
   或依赖不可用(``sqlalchemy`` ``InterfaceError``/``OperationalError``)——
   这类失败与被测 Agent 行为无关,``included_in_quality_score=False``。
-  RunJobWorker 会吞掉推进异常并把 Job 释放回 PENDING(Run 回 QUEUED),
+  执行器会把推进异常归入 Run/Attempt 的失败码(Run 可能回 QUEUED),
   因此 Backend 异常经观察代理(``_ObservingBackend``)在流边界记录、于
   Run 停滞时原样重抛,按真实异常类型分类;
 - ``FAILED``:Agent/Runtime 执行失败(若 Workspace/Run 已建立则计入任务完成率,
@@ -126,8 +126,8 @@ class _DriveState:
 class _ObservingBackend:
     """Backend 代理:记录 ``stream`` 抛出的异常并原样续传事件。
 
-    必要性:RunJobWorker 会吞掉推进回调的异常并把 Job 释放回 PENDING
-    (Run 回 QUEUED),Provider 失败的原始异常因此不会传到驱动方。本代理
+    必要性:执行器会吞掉推进回调的异常并把 Run 退回 QUEUED,Provider 失败
+    的原始异常因此不会传到驱动方。本代理
     在 Provider 边界记录真实异常类型,供驱动循环在 Run 停滞时重新抛出,
     实现 deterministic 的基础设施失败分类(不猜测)。
     """
@@ -294,9 +294,8 @@ class EvalRunner:
                 state=state,
             )
         finally:
-            # 环境独立且不共享业务状态;teardown 清理防止失败的 ADVANCE_RUN
-            # Job(回滚释放回 PENDING)被后续 case 的 Worker 推进误领取
-            # (LeaseService.claim 不区分 workspace)。捕获已完成,痕迹在结果里。
+            # 环境独立且不共享业务状态;teardown 清理防止失败用例残留的
+            # QUEUED Run 被下一次恢复扫描捡起。捕获已完成,痕迹在结果里。
             await environment.aclose()
             if self._cleanup_environments:
                 await environment.cleanup()
@@ -425,7 +424,7 @@ class EvalRunner:
                     f"{view.status.value}"
                 )
             else:
-                # 推进回调异常被 RunJobWorker 吞掉并释放 Job(Run 回 QUEUED):
+                # 推进回调异常被执行器收尾(Run 回 QUEUED):
                 # Backend 在流边界记录的真实异常在此重新抛出,按类型分类。
                 if state.observed is not None and state.observed.recorded:
                     raise state.observed.recorded[0]

@@ -60,9 +60,9 @@ from runtime.backend.protocol import (
 from runtime.backend.scripted import ScriptedBackend
 from runtime.events.writer import AgentEventWriter
 from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.executor import AdvanceOutcome, RunClaim, RunExecutor
 from runtime.execution.operations import (
     BegunOperation,
-    LeaseStaleError,
     OperationOutcome,
     OperationResultRecord,
     OperationService,
@@ -83,8 +83,6 @@ from runtime.execution.tool_result_processor import (
 from runtime.execution.transitions import InvalidTransition
 from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interfaces.state import AssistantMessageStatus, MessageType, RunStatus
-from runtime.jobs.lease_service import Lease, LeaseService
-from runtime.jobs.sweeper import LeaseSweeper
 from runtime.memory.service import MemoryCandidate, MemoryHit, MemoryService
 from runtime.orchestration.agent_loop import ToolPin
 from runtime.orchestration.context import (
@@ -105,7 +103,7 @@ from runtime.persistence.base import (
     MessageRole,
     MessageStatus,
     ModelBackendType,
-    RunJobKind,
+    RunAttemptStatus,
     ToolCallStatus,
     ToolEffect,
 )
@@ -122,7 +120,7 @@ from runtime.persistence.models.execution import (
     Operation,
     OperationAttempt,
     Run,
-    RunJob,
+    RunAttempt,
     ToolCall,
 )
 from runtime.persistence.models.identity import (
@@ -133,7 +131,6 @@ from runtime.persistence.models.identity import (
 from runtime.persistence.models.integrations import MemoryRecord
 from runtime.persistence.models.interaction import Message
 from runtime.persistence.repositories.events import EventRepository
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -145,7 +142,7 @@ REQUIRED_CASE_IDS: Final[frozenset[str]] = frozenset(
         "tool-delta-never-executes",
         "input-resume-revalidates",
         "confirmation-toctou",
-        "stale-lease-rejected",
+        "write-result-after-cancel",
         "unknown-reconciles-first",
         "cancelled-never-resumes",
         "event-replay-deduplicates",
@@ -163,7 +160,10 @@ _TEST_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
 
 _EVAL_ADAPTER_KEY: Final = "eval-adapter"
 
-_STALE_LEASE_EXPECTED_STATE: Final[dict[str, Any]] = {"operation_type": "TEST_WRITE"}
+_EXECUTOR_ID: Final = "eval-runtime-executor"
+"""评测执行器实例标识(只用于 RunAttempt 归因)。"""
+
+_EVAL_OPERATION_EXPECTED_STATE: Final[dict[str, Any]] = {"operation_type": "TEST_WRITE"}
 """评测 harness 写 Tool 的执行 Profile Adapter Key(与历史 Operation 行一致)。"""
 
 _TEST_LIMITS: Final = RunLimits(
@@ -434,21 +434,6 @@ async def _seed_identity_and_run(
     return ids
 
 
-async def _seed_advance_job(engine: AsyncEngine, ids: _SeedIds) -> RunJob:
-    """提交一个 PENDING ADVANCE_RUN Job(Worker 循环的可领取入口)。"""
-    _, run_id = _require_run_ids(ids)
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            return await JobRepository(session).create(
-                workspace_id=ids.workspace_id,
-                run_id=run_id,
-                kind=RunJobKind.ADVANCE_RUN,
-            )
-    finally:
-        await session.close()
-
-
 async def _seed_write_tool(engine: AsyncEngine, ids: _SeedIds) -> _WriteToolRows:
     """提交 GLOBAL 写 Tool 版本行(Runtime 的 ToolPin 解析依赖)。"""
     tool_definition_id = uuid.uuid4()
@@ -543,7 +528,6 @@ _CLEANUP_STATEMENTS: Final[tuple[str, ...]] = (
     "DELETE FROM operations WHERE workspace_id = :ws",
     "DELETE FROM tool_calls WHERE workspace_id = :ws",
     "DELETE FROM run_attempts WHERE workspace_id = :ws",
-    "DELETE FROM run_jobs WHERE workspace_id = :ws",
     "UPDATE messages SET run_id = NULL WHERE workspace_id = :ws",
     "UPDATE runs SET trigger_message_id = NULL WHERE workspace_id = :ws",
     "DELETE FROM messages WHERE workspace_id = :ws",
@@ -706,9 +690,30 @@ class _HarnessSnapshot:
     """从真库回读的断言视图。"""
 
     run: Run
-    job: RunJob | None
+    attempt: RunAttempt | None
     tool_call: ToolCall | None
     operation: Operation | None
+
+
+class _HarnessDriver:
+    """把 :class:`Runtime` 适配成执行器的 ``RunDriver``。
+
+    eval 没有真实平台适配器,回查结论由用例脚本显式注入(见
+    :meth:`_RuntimeHarness.reconcile`),因此执行器的自动回查在这里是空操作。
+    """
+
+    def __init__(self, runtime: Runtime) -> None:
+        self._runtime = runtime
+
+    async def advance(
+        self, claim: RunClaim, *, answered: Mapping[str, str] | None = None
+    ) -> AdvanceOutcome:
+        del answered  # eval 未在这些用例中重启用已答字段
+        return await self._runtime.advance(claim)
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        del run_id, workspace_id
+        return False
 
 
 class _RuntimeHarness:
@@ -725,7 +730,6 @@ class _RuntimeHarness:
     async def create(cls, engine: AsyncEngine) -> _RuntimeHarness:
         ids = await _seed_identity_and_run(engine)
         tool = await _seed_write_tool(engine, ids)
-        await _seed_advance_job(engine, ids)
         return cls(engine, ids, tool)
 
     # -- 装配 ------------------------------------------------------------
@@ -768,31 +772,28 @@ class _RuntimeHarness:
                 self._tool.stable_key, self._tool.tool_version_id, self.write_handler
             ),
             pipeline_factory=lambda: _AlwaysAllowPipeline(),
-            worker_id="eval-runtime-worker",
         )
 
     # -- 推进与恢复 ------------------------------------------------------
 
-    async def run_worker_once(self) -> bool:
-        return await self._runtime().run_worker_once()
+    async def run_once(self) -> bool:
+        """以真实执行器推进一次;Run 不可推进(QUEUED 以外)返回 False。"""
+        assert self._ids.run_id is not None
+        executor = RunExecutor(
+            session_factory=lambda: AsyncSession(self._engine, expire_on_commit=False),
+            driver=_HarnessDriver(self._runtime()),
+            instance_id=_EXECUTOR_ID,
+            lock=None,
+        )
+        return await executor.advance_now(self._ids.run_id) is not None
 
     async def reconcile(self, verdict: ReconcileResult) -> ReconcileOutcome:
-        """创建并领取 RECONCILE_OPERATION Job,以真实 ReconciliationService 回查。"""
+        """以真实 ReconciliationService 提交脚本化的回查结论。"""
         operation_id = await self._load_operation_id()
         assert self._ids.run_id is not None
         session = AsyncSession(self._engine, expire_on_commit=False)
         try:
             async with session.begin():
-                job = await JobRepository(session).create(
-                    workspace_id=self._ids.workspace_id,
-                    run_id=self._ids.run_id,
-                    kind=RunJobKind.RECONCILE_OPERATION,
-                )
-                lease = await LeaseService(session).claim(
-                    worker_id="eval-reconcile-worker"
-                )
-                if lease is None:
-                    raise CaseFailure("reconcile job could not be leased")
                 run = await self._fresh_run(session)
                 service = ReconciliationService(
                     session,
@@ -800,29 +801,11 @@ class _RuntimeHarness:
                     actor_id=self._ids.user_id,
                     run_id=self._ids.run_id,
                     operation_id=operation_id,
-                    lease_token=lease.lease_token,
                     expected_state_version=run.state_version,
                     reconcile_budget=_TEST_LIMITS.reconcile_budget,
                     write_retry_budget=_TEST_LIMITS.write_retry_budget,
                 )
-                outcome = await service.apply_result(verdict)
-                if not await LeaseService(session).complete(job.id, lease.lease_token):
-                    raise CaseFailure("reconcile lease completion was rejected")
-            return outcome
-        finally:
-            await session.close()
-
-    async def requeue_advance_job(self) -> None:
-        """回查 APPLIED 后的恢复推进:排队 ADVANCE_RUN Job(调度方语义)。"""
-        assert self._ids.run_id is not None
-        session = AsyncSession(self._engine, expire_on_commit=False)
-        try:
-            async with session.begin():
-                await JobRepository(session).create(
-                    workspace_id=self._ids.workspace_id,
-                    run_id=self._ids.run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
+                return await service.apply_result(verdict)
         finally:
             await session.close()
 
@@ -833,14 +816,14 @@ class _RuntimeHarness:
         session = AsyncSession(self._engine, expire_on_commit=False)
         try:
             run = await self._fresh_run(session)
-            job = (
+            attempt = (
                 await session.scalars(
-                    sa.select(RunJob)
+                    sa.select(RunAttempt)
                     .where(
-                        RunJob.workspace_id == self._ids.workspace_id,
-                        RunJob.run_id == self._ids.run_id,
+                        RunAttempt.workspace_id == self._ids.workspace_id,
+                        RunAttempt.run_id == self._ids.run_id,
                     )
-                    .order_by(RunJob.created_at.desc())
+                    .order_by(RunAttempt.attempt_no.desc())
                     .limit(1)
                 )
             ).one_or_none()
@@ -867,7 +850,7 @@ class _RuntimeHarness:
                     )
                 ).one_or_none()
             return _HarnessSnapshot(
-                run=run, job=job, tool_call=tool_call, operation=operation
+                run=run, attempt=attempt, tool_call=tool_call, operation=operation
             )
         finally:
             await session.close()
@@ -933,8 +916,8 @@ async def _case_tool_delta_never_executes(engine: AsyncEngine) -> None:
     try:
         # ScriptedBackend 只发 ToolCallDelta,不发 ToolCallCompleted/Completed。
         harness.set_rounds([[ToolCallDelta(arguments_delta='{"listing_id": "L1"')]])
-        if await harness.run_worker_once() is not True:
-            raise CaseFailure("worker did not process the seeded ADVANCE_RUN job")
+        if await harness.run_once() is not True:
+            raise CaseFailure("the executor did not advance the seeded QUEUED run")
         snapshot = await harness.snapshot()
         if snapshot.run.status.value != "FAILED":
             raise CaseFailure(f"run expected FAILED, got {snapshot.run.status.value}")
@@ -953,8 +936,11 @@ async def _case_tool_delta_never_executes(engine: AsyncEngine) -> None:
         events = await _event_types(engine, snapshot.run.workspace_id, snapshot.run.id)
         if "TOOL_CALL_PROPOSED" in events:
             raise CaseFailure("TOOL_CALL_PROPOSED must not be emitted for delta-only streams")
-        if snapshot.job is None or snapshot.job.status.value != "DEAD":
-            raise CaseFailure("deterministic stream failure must dead-letter the job")
+        if snapshot.attempt is None or snapshot.attempt.status is not RunAttemptStatus.FAILED:
+            raise CaseFailure(
+                "deterministic stream failure must finish the attempt as FAILED, got "
+                f"{None if snapshot.attempt is None else snapshot.attempt.status.value}"
+            )
     finally:
         await harness.cleanup()
 
@@ -1138,93 +1124,118 @@ async def _case_confirmation_toctou(engine: AsyncEngine) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 用例 d)stale-lease-rejected
+# 用例 d)write-result-after-cancel
 # ---------------------------------------------------------------------------
 
 
-async def _case_stale_lease_rejected(engine: AsyncEngine) -> None:
+async def _case_write_result_after_cancel(engine: AsyncEngine) -> None:
+    """外部写执行期间 Run 被取消 → 迟到的写回执必须记账,但不得复活 Run。
+
+    取代旧模型的"失租 token 被 fencing 拒绝":首版没有租约,写结果事务也不再
+    以 Run 是否 RUNNING 为准——外部写可能已经发生,回执是权威事实,必须落库。
+    风险因此转为"回执不得把已取消的 Run 拉回活跃状态":Run 保持 CANCELLED,
+    不产生新的调度(next_step 为空),也不产生第二次权威写入。
+    """
     ids = await _seed_identity_and_run(engine)
     tool = await _seed_write_tool_call(engine, ids)
     _, run_id = _require_run_ids(ids)
     tool_call_id = tool.tool_call_id
     if tool_call_id is None:
         raise CaseFailure("seeded write tool call is missing")
-    # 领取 ADVANCE_RUN 租约:Run QUEUED→RUNNING,fencing token 生成。
-    lease = await _claim_advance_lease(engine, ids)
+    # 执行器领取:Run QUEUED→RUNNING。
+    await _start_run(engine, ids)
     # 执行边界:Operation EXECUTING 经短事务提交。
-    begun = await _begin_operation(engine, ids, lease, tool_call_id)
-    # 回拨租约过期时间:Worker 失联(租约将过期)。
-    await _expire_lease(engine, lease.job_id)
-    # 真实 LeaseSweeper 回收失租:Attempt ABANDONED,Job 回 PENDING。
-    swept = await _sweep_expired(engine)
-    if swept != 1:
-        raise CaseFailure(f"sweeper must reclaim the expired lease, reclaimed {swept}")
-    # 回查 Job 由新执行者领取:旧 token 的 fencing 资格已被轮换。
-    if await _claim_next_job(engine) is None:
-        raise CaseFailure("reclaimed job could not be leased by the recovery worker")
-    # 失租 token 提交写结果:fencing 拒绝(结果事务整体回滚)。
-    session = AsyncSession(engine, expire_on_commit=False)
-    record_rejected = False
-    try:
-        try:
-            async with session.begin():
-                run = await _read_run(session, ids.workspace_id, run_id)
-                service = OperationService(
-                    session,
-                    workspace_id=ids.workspace_id,
-                    actor_id=ids.user_id,
-                    run_id=run_id,
-                    lease_token=lease.lease_token,
-                    expected_state_version=run.state_version,
-                )
-                await service.record_result(
-                    OperationResultRecord(
-                        tool_call_id=tool_call_id,
-                        outcome=OperationOutcome.APPLIED,
-                        payload={"result": "late write"},
-                    )
-                )
-        except LeaseStaleError:
-            record_rejected = True
-    finally:
-        await session.close()
-    if not record_rejected:
-        raise CaseFailure("stale lease token must be rejected with LeaseStaleError")
-    if await _complete_lease(engine, lease.job_id, lease.lease_token) is not False:
-        raise CaseFailure("stale lease token must not complete the job")
-    operation = await _read_operation_by_row(engine, begun.operation_row_id)
-    if operation.status.value != "EXECUTING":
-        raise CaseFailure(
-            f"authoritative operation must stay EXECUTING, got {operation.status.value}"
-        )
-    if operation.last_receipt is not None:
-        raise CaseFailure("rejected result must not leave any recorded receipt")
-    tool_call = await _read_tool_call(engine, tool_call_id)
-    if tool_call.status.value != "EXECUTING":
-        raise CaseFailure(
-            "tool call must stay EXECUTING after fencing rejection, got "
-            f"{tool_call.status.value}"
-        )
-    if await _count_operation_attempts(engine, begun.operation_row_id) != 1:
-        raise CaseFailure("no second write attempt may be recorded for a stale token")
-    await _cleanup_seed(engine, ids, tool_definition_id=tool.tool_definition_id)
-
-
-async def _claim_advance_lease(engine: AsyncEngine, ids: _SeedIds) -> Lease:
-    await _seed_advance_job(engine, ids)
+    begun = await _begin_operation(engine, ids, tool_call_id)
+    # 写仍在外部系统执行时,用户取消 Run。
+    await _cancel_run(engine, ids)
+    # 迟到结果:回执照常落库(外部事实),但不改变 Run 状态、不再调度。
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
-            lease = await LeaseService(session).claim(worker_id="eval-stale-worker")
-            if lease is None:
-                raise CaseFailure("seeded ADVANCE_RUN job could not be leased")
-            return lease
+            run = await _read_run(session, ids.workspace_id, run_id)
+            service = OperationService(
+                session,
+                workspace_id=ids.workspace_id,
+                actor_id=ids.user_id,
+                run_id=run_id,
+                expected_state_version=run.state_version,
+            )
+            recorded = await service.record_result(
+                OperationResultRecord(
+                    tool_call_id=tool_call_id,
+                    outcome=OperationOutcome.APPLIED,
+                    payload={"result": "late write"},
+                )
+            )
+    finally:
+        await session.close()
+    if recorded.next_step is not None:
+        raise CaseFailure(
+            f"a late result must not reschedule the run, got {recorded.next_step}"
+        )
+    cancelled = await _read_run_row(engine, ids.workspace_id, run_id)
+    if cancelled.status.value != "CANCELLED":
+        raise CaseFailure(
+            f"a late write result must not revive the run, got {cancelled.status.value}"
+        )
+    operation = await _read_operation_by_row(engine, begun.operation_row_id)
+    if operation.status.value != "APPLIED":
+        raise CaseFailure(
+            f"the late receipt must be recorded as APPLIED, got {operation.status.value}"
+        )
+    receipt = operation.last_receipt
+    if not isinstance(receipt, dict) or receipt.get("outcome") != "APPLIED":
+        raise CaseFailure(f"the authoritative receipt must read APPLIED, got {receipt!r}")
+    tool_call = await _read_tool_call(engine, tool_call_id)
+    if tool_call.status.value != "SUCCEEDED":
+        raise CaseFailure(
+            f"tool call must record the applied write, got {tool_call.status.value}"
+        )
+    if await _count_operation_attempts(engine, begun.operation_row_id) != 1:
+        raise CaseFailure("no second write attempt may be recorded")
+    await _cleanup_seed(engine, ids, tool_definition_id=tool.tool_definition_id)
+
+
+async def _start_run(engine: AsyncEngine, ids: _SeedIds) -> None:
+    """CAS QUEUED → RUNNING,等价于执行器领取(不建 Attempt)。"""
+    _, run_id = _require_run_ids(ids)
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        async with session.begin():
+            run = await _read_run(session, ids.workspace_id, run_id)
+            moved = await RunRepository(session).compare_and_set_status(
+                workspace_id=ids.workspace_id,
+                run_id=run_id,
+                expected_version=run.state_version,
+                new_status=RunStatus.RUNNING.value,
+                expected_status=RunStatus.QUEUED.value,
+            )
+            if not moved:
+                raise CaseFailure("the harness lost the QUEUED→RUNNING CAS race")
+    finally:
+        await session.close()
+
+
+async def _cancel_run(engine: AsyncEngine, ids: _SeedIds) -> None:
+    """用户取消:经真实 RunService 迁移 CANCELLED 并写事件。"""
+    _, run_id = _require_run_ids(ids)
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        async with session.begin():
+            await RunService(
+                session=session, workspace_id=ids.workspace_id
+            ).transition_run(
+                run_id=run_id,
+                target_status=RunStatus.CANCELLED,
+                event_kind="RUN_CANCELLED",
+                event_payload={"reason": "USER_CANCELLED"},
+            )
     finally:
         await session.close()
 
 
 async def _begin_operation(
-    engine: AsyncEngine, ids: _SeedIds, lease: Lease, tool_call_id: uuid.UUID
+    engine: AsyncEngine, ids: _SeedIds, tool_call_id: uuid.UUID
 ) -> BegunOperation:
     _, run_id = _require_run_ids(ids)
     session = AsyncSession(engine, expire_on_commit=False)
@@ -1236,59 +1247,14 @@ async def _begin_operation(
                 workspace_id=ids.workspace_id,
                 actor_id=ids.user_id,
                 run_id=run_id,
-                lease_token=lease.lease_token,
                 expected_state_version=run.state_version,
             )
             return await service.begin(
                 tool_call_id,
                 adapter_key=_EVAL_ADAPTER_KEY,
-                expected_state=dict(_STALE_LEASE_EXPECTED_STATE),
+                expected_state=dict(_EVAL_OPERATION_EXPECTED_STATE),
                 supports_reconciliation=True,
             )
-    finally:
-        await session.close()
-
-
-async def _expire_lease(engine: AsyncEngine, job_id: uuid.UUID) -> None:
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            await session.execute(
-                sa.update(RunJob)
-                .where(RunJob.id == job_id)
-                .values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1))
-            )
-    finally:
-        await session.close()
-
-
-async def _complete_lease(
-    engine: AsyncEngine, job_id: uuid.UUID, lease_token: uuid.UUID
-) -> bool:
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            return await LeaseService(session).complete(job_id, lease_token)
-    finally:
-        await session.close()
-
-
-async def _sweep_expired(engine: AsyncEngine) -> int:
-    """LeaseSweeper 回收过期租约(独立短事务提交)。"""
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            return await LeaseSweeper(session).sweep_expired()
-    finally:
-        await session.close()
-
-
-async def _claim_next_job(engine: AsyncEngine) -> Lease | None:
-    """领取任意到期 Job(失租后由新执行者轮换 fencing token)。"""
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            return await LeaseService(session).claim(worker_id="eval-recovery-worker")
     finally:
         await session.close()
 
@@ -1303,8 +1269,8 @@ async def _case_unknown_reconciles_first(engine: AsyncEngine) -> None:
     try:
         harness.set_rounds([harness.write_round()])
         harness.write_handler.crash_point = _AFTER_EXTERNAL_WRITE_BEFORE_RESULT
-        if await harness.run_worker_once() is not True:
-            raise CaseFailure("worker did not process the seeded ADVANCE_RUN job")
+        if await harness.run_once() is not True:
+            raise CaseFailure("the executor did not advance the seeded QUEUED run")
         harness.write_handler.crash_point = None
         first = await harness.snapshot()
         if first.run.status.value != "WAITING_RECONCILIATION":
@@ -1315,8 +1281,7 @@ async def _case_unknown_reconciles_first(engine: AsyncEngine) -> None:
         if first.operation is None or first.operation.status.value != "UNKNOWN":
             raise CaseFailure("operation must be UNKNOWN until the adapter is asked first")
         await harness.reconcile(ReconcileResult.APPLIED)
-        await harness.requeue_advance_job()
-        if await harness.run_worker_once() is not True:
+        if await harness.run_once() is not True:
             raise CaseFailure("run did not resume after the APPLIED reconciliation")
         recovered = await harness.snapshot()
         if recovered.run.status.value != "COMPLETED":
@@ -1547,8 +1512,8 @@ async def _case_posttool_invalid_output_keeps_write_outcome(engine: AsyncEngine)
         harness.set_rounds([harness.write_round()])
         harness.write_handler.receipt_status = "APPLIED"
         harness.write_handler.receipt_payload = {"bogus": 1}  # 违反 Output Schema。
-        if await harness.run_worker_once() is not True:
-            raise CaseFailure("worker did not process the seeded ADVANCE_RUN job")
+        if await harness.run_once() is not True:
+            raise CaseFailure("the executor did not advance the seeded QUEUED run")
         snapshot = await harness.snapshot()
         if snapshot.run.status.value != "COMPLETED":
             raise CaseFailure(f"run expected COMPLETED, got {snapshot.run.status.value}")
@@ -1659,7 +1624,7 @@ _CASE_EXECUTORS: Final[Mapping[str, CaseExecutor]] = {
     "tool-delta-never-executes": _case_tool_delta_never_executes,
     "input-resume-revalidates": _case_input_resume_revalidates,
     "confirmation-toctou": _case_confirmation_toctou,
-    "stale-lease-rejected": _case_stale_lease_rejected,
+    "write-result-after-cancel": _case_write_result_after_cancel,
     "unknown-reconciles-first": _case_unknown_reconciles_first,
     "cancelled-never-resumes": _case_cancelled_never_resumes,
     "event-replay-deduplicates": _case_event_replay_deduplicates,
@@ -1688,6 +1653,17 @@ async def _read_run(
             .execution_options(populate_existing=True)
         )
     ).one()
+
+
+async def _read_run_row(
+    engine: AsyncEngine, workspace_id: uuid.UUID, run_id: uuid.UUID
+) -> Run:
+    """只读独立短事务读取 Run(断言用,不复用业务事务)。"""
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        return await _read_run(session, workspace_id, run_id)
+    finally:
+        await session.close()
 
 
 async def _read_tool_call(engine: AsyncEngine, tool_call_id: uuid.UUID) -> ToolCall:
