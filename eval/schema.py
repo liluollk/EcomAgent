@@ -246,9 +246,24 @@ def benchmark_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
     )
 
 
-def system_fingerprint(manifest: EvalCapabilityManifest) -> str:
-    """被测系统指纹直接使用已冻结 Manifest 的能力指纹。"""
-    return manifest.capability_fingerprint
+def system_fingerprint(
+    manifest: EvalCapabilityManifest, config: EvalConfig | None = None
+) -> str:
+    """被测系统指纹:冻结能力清单 + 评测时真实调用的模型端点。
+
+    能力清单来自 Runtime 库里的已发布行,不包含评测进程真实使用的 Provider
+    (真实模型评测会替换掉库里的 Mock 后端)。只哈希清单会让指纹描述一个
+    被替换掉的组件,因此把 ``config.model`` / ``config.base_url`` 一起纳入。
+    """
+    if config is None:
+        return manifest.capability_fingerprint
+    return _sha256(
+        {
+            "capability_fingerprint": manifest.capability_fingerprint,
+            "model": config.model,
+            "base_url": config.base_url,
+        }
+    )
 
 
 def protocol_fingerprint(

@@ -42,7 +42,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -231,6 +231,45 @@ def run_benchmark_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def run_assertion_coverage(
+    scenarios: Sequence[Scenario], *, repetitions: int
+) -> dict[str, Any]:
+    """本分区声明的断言覆盖:哪类断言有多少场景真的在用。
+
+    报告里的比率只有在"有断言"时才说明问题。把覆盖数量写进报告,是为了让
+    ``answer_grounding_rate=1.0`` 这类数字无法被读成"所有执行都验证了答复"。
+    """
+
+    def bucket(predicate: Callable[[Scenario], bool]) -> dict[str, int]:
+        count = sum(1 for scenario in scenarios if predicate(scenario))
+        return {"scenarios": count, "executions": count * repetitions}
+
+    return {
+        "scenarios": len(scenarios),
+        "repetitions": repetitions,
+        "declared": {
+            "final_state": bucket(
+                lambda s: bool(
+                    s.expected_final_state.listings
+                    or s.expected_final_state.inventory_levels
+                )
+            ),
+            "response_facts": bucket(lambda s: bool(s.expected_response_facts)),
+            "forbidden_response_facts": bucket(
+                lambda s: bool(s.forbidden_response_facts)
+            ),
+            "tool_order_constraints": bucket(lambda s: bool(s.tool_order_constraints)),
+            "allowed_side_effects": bucket(lambda s: bool(s.allowed_side_effects)),
+            "forbidden_side_effects": bucket(lambda s: bool(s.forbidden_side_effects)),
+        },
+        "cases_without_response_facts": [
+            scenario.id
+            for scenario in scenarios
+            if not scenario.expected_response_facts
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # 运行与报告
 # ---------------------------------------------------------------------------
@@ -267,10 +306,13 @@ async def _execute(
                     scenarios, config, manifest
                 ),
                 benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
-                system_fingerprint=system_fingerprint(manifest),
+                system_fingerprint=system_fingerprint(manifest, config),
                 infrastructure_errors=infrastructure_errors,
                 config=config,
                 capability_manifest=manifest,
+                assertion_coverage=run_assertion_coverage(
+                    scenarios, repetitions=config.repetitions
+                ),
             )
             return report, False
 
@@ -302,10 +344,13 @@ async def _execute(
             [*round_result.results, *scored],
             protocol_fingerprint=run_protocol_fingerprint(scenarios, config, manifest),
             benchmark_fingerprint=run_benchmark_fingerprint(scenarios, config),
-            system_fingerprint=system_fingerprint(manifest),
+            system_fingerprint=system_fingerprint(manifest, config),
             infrastructure_errors=infrastructure_errors,
             config=config,
             capability_manifest=manifest,
+            assertion_coverage=run_assertion_coverage(
+                scenarios, repetitions=config.repetitions
+            ),
         )
         clean = not (
             round_result.failed

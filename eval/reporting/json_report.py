@@ -36,12 +36,18 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 5
+REPORT_SCHEMA_VERSION: int = 6
 """报告结构版本:字段语义或结构变化时递增。
 
 v5:新增 ``metrics.decision`` / ``metrics.recovery`` 顶层分项、安全披露与未决
 危险调用两项比率(此前 DecisionScore/RecoveryScore 只出现在逐例结果里,
 无法一眼比较版本间的误拒、误放行、恢复成功率与重复写)。
+v6:口径拆开、分母外显——``metrics.state_completion_rate`` 只算权威状态,
+``metrics.task_completion_rate`` 才是"状态 + 已声明的过程/依据约束";
+``metrics.grounding`` / ``metrics.process`` 给出通过数与适用数,
+``metrics.decision.decision_accuracy_by_decision`` 给决策级(而非逐例全对)
+准确率;``assertion_coverage`` 说明本分区到底有多少场景声明了哪类断言,
+避免"没断言"被读成"断言全过"。
 """
 
 
@@ -61,6 +67,7 @@ class ReportBuilder:
         infrastructure_errors: Sequence[Mapping[str, Any]] | None = None,
         config: EvalConfig | None = None,
         capability_manifest: EvalCapabilityManifest | None = None,
+        assertion_coverage: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """组装分项报告并整体脱敏;返回 JSON 可序列化的 dict。"""
         case_results = [r for r in results if isinstance(r, CaseResult)]
@@ -94,6 +101,7 @@ class ReportBuilder:
                 if capability_manifest is not None
                 else None
             ),
+            "assertion_coverage": dict(assertion_coverage or {}),
             "totals": self._totals(case_results, scored, denominator),
             "metrics": self._metrics(contributing, denominator),
             "cases": self._cases(case_results, scored, by_key),
@@ -131,6 +139,11 @@ class ReportBuilder:
         contributing: list[ScoredCaseResult], denominator: int
     ) -> dict[str, Any]:
         task_passed = sum(1 for score in contributing if _product_task_passed(score))
+        state_passed = sum(1 for score in contributing if score.task.passed)
+        decision_correct_decisions = sum(
+            s.decision.correct_decisions for s in contributing
+        )
+        decision_total_decisions = sum(s.decision.total_decisions for s in contributing)
         task_results_by_case: dict[str, list[bool]] = {}
         for score in contributing:
             task_results_by_case.setdefault(score.case_id, []).append(
@@ -180,6 +193,7 @@ class ReportBuilder:
             s.recovery.unknown_handled_correctly for s in contributing
         )
         return {
+            "state_completion_rate": _rate(state_passed, denominator),
             "task_completion_rate": _rate(task_passed, denominator),
             "scenario_stability": {
                 "total_scenarios": len(task_results_by_case),
@@ -203,10 +217,25 @@ class ReportBuilder:
                 "decision_accuracy_rate": _rate(
                     decision_correct, len(decision_applicable)
                 ),
+                "decision_accuracy_by_decision": _rate(
+                    decision_correct_decisions, decision_total_decisions
+                ),
+                "correct_decisions": decision_correct_decisions,
+                "total_decisions": decision_total_decisions,
                 "false_rejection_rate": _rate(false_rejections, legal_write_decisions),
                 "false_allowance_rate": _rate(
                     false_allowances, forbidden_write_decisions
                 ),
+            },
+            "process": {
+                "applicable_executions": len(process_applicable),
+                "passed_executions": process_passed,
+                "pass_rate": _rate(process_passed, len(process_applicable)),
+            },
+            "grounding": {
+                "applicable_executions": len(grounding_applicable),
+                "passed_executions": grounding_passed,
+                "pass_rate": _rate(grounding_passed, len(grounding_applicable)),
             },
             "recovery": {
                 "applicable_cases": len(recovery_applicable),
@@ -220,6 +249,9 @@ class ReportBuilder:
             },
             "counts": {
                 "task_passed": task_passed,
+                "state_passed": state_passed,
+                "grounding_applicable_executions": len(grounding_applicable),
+                "process_applicable_executions": len(process_applicable),
                 "dangerous_attempts": sum(
                     s.safety.dangerous_attempts for s in contributing
                 ),
@@ -248,6 +280,8 @@ class ReportBuilder:
                 "safety_applicable_cases": len(safety_applicable),
                 "decision_applicable_cases": len(decision_applicable),
                 "recovery_applicable_cases": len(recovery_applicable),
+                "grounding_applicable_cases": len(grounding_applicable),
+                "process_applicable_cases": len(process_applicable),
                 "legal_write_decisions": legal_write_decisions,
                 "forbidden_write_decisions": forbidden_write_decisions,
             },

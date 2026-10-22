@@ -60,12 +60,15 @@ REQUIRED_METRIC_KEYS = {
     "unresolved_dangerous_call_rate",
 }
 REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
+    "state_completion_rate",
     "counts",
     "denominators",
     "diagnostics",
     "scenario_stability",
     "decision",
     "recovery",
+    "process",
+    "grounding",
 }
 
 
@@ -241,6 +244,9 @@ def test_report_keeps_dimensions_separate(report_builder: ReportBuilder) -> None
     assert set(report["metrics"]["decision"]) == {
         "applicable_cases",
         "decision_accuracy_rate",
+        "decision_accuracy_by_decision",
+        "correct_decisions",
+        "total_decisions",
         "false_rejection_rate",
         "false_allowance_rate",
     }
@@ -768,3 +774,42 @@ def test_product_suite_rejects_core_hash_drift(
     assert code != 0
     captured = capsys.readouterr()
     assert "core_sha256" in captured.err
+
+
+# ---- 口径拆分与断言覆盖 ------------------------------------------------
+
+
+def test_state_and_declared_contract_completion_are_separate(
+    report_builder: ReportBuilder,
+) -> None:
+    """状态对但过程约束破 → 状态完成率 1.0、任务完成率 0.0,两个数都要在。"""
+    broken = _scored("case-broken").model_copy(
+        update={
+            "process": ProcessScore(applicable=True, passed=False, checked_constraints=1)
+        }
+    )
+    report = report_builder.build(
+        [_case_result("case-broken"), broken]
+    )
+    assert report["metrics"]["state_completion_rate"] == 1.0
+    assert report["metrics"]["task_completion_rate"] == 0.0
+    assert report["metrics"]["counts"]["state_passed"] == 1
+    assert report["metrics"]["counts"]["task_passed"] == 0
+
+
+def test_assertion_coverage_is_reported() -> None:
+    """报告必须带断言覆盖:没声明答复事实的执行不能算作已验证答复。"""
+    from eval.dataset_loader import load_dataset
+    from eval.product_suite import PRODUCT_DATASET_DIR, run_assertion_coverage
+
+    scenarios = list(load_dataset(PRODUCT_DATASET_DIR / "core.yaml"))
+    coverage = run_assertion_coverage(scenarios, repetitions=3)
+    declared = coverage["declared"]
+    assert coverage["scenarios"] == len(scenarios)
+    assert declared["response_facts"]["scenarios"] < coverage["scenarios"]
+    assert declared["response_facts"]["executions"] == (
+        declared["response_facts"]["scenarios"] * 3
+    )
+    assert len(coverage["cases_without_response_facts"]) == (
+        coverage["scenarios"] - declared["response_facts"]["scenarios"]
+    )
