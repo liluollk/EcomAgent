@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenarios:
 - id: clarify-store-001
   category: incomplete_info
@@ -20,6 +20,8 @@ scenarios:
     - {store_id: store-beta, sku: SKU-3003, price: '108.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-alpha/SKU-3003}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '88.00', scope: all}
 
 - id: clarify-store-002
   category: incomplete_info
@@ -41,6 +43,8 @@ scenarios:
     - {store_id: store-delta, sku: SKU-4004, price: '72.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-delta/SKU-4004}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '72.00', scope: all}
 
 - id: clarify-sku-001
   category: incomplete_info
@@ -62,6 +66,8 @@ scenarios:
     - {store_id: store-epsilon, sku: SKU-5006, price: '59.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-epsilon/SKU-5006}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '59.00', scope: all}
 
 - id: clarify-sku-002
   category: incomplete_info
@@ -83,6 +89,8 @@ scenarios:
     - {store_id: store-zeta, sku: SKU-6002, price: '102.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-zeta/SKU-6001}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '99.00', scope: all}
 
 - id: clarify-price-001
   category: incomplete_info
@@ -97,6 +105,8 @@ scenarios:
   interactions: [{kind: input, message_index: 2, values: {target_price: '112.50'}}]
   expected_final_state: {listings: [{store_id: store-eta, sku: SKU-7001, price: '112.50'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-eta/SKU-7001}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '112.50', scope: all}
 
 - id: clarify-price-002
   category: incomplete_info
@@ -111,3 +121,5 @@ scenarios:
   interactions: [{kind: input, message_index: 2, values: {target_price: '209.00'}}]
   expected_final_state: {listings: [{store_id: store-theta, sku: SKU-7002, price: '209.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-theta/SKU-7002}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '209.00', scope: all}

@@ -1,11 +1,12 @@
-"""execution 包 Task 8(Operation/ToolResultProcessor/Reconciliation)测试夹具。
+"""execution 包(Operation/ToolResultProcessor/Reconciliation)测试夹具。
 
 提供:
+
 - ``seeded_write_tool_call``:GLOBAL WRITE Tool 版本 + Message + ToolCall(VALIDATING);
-- ``leased_run``:创建并领取 ADVANCE_RUN Job,Run 处于 RUNNING,携带 fencing 凭据;
-- ``operation_service``:绑定 leased_run 的 OperationService;
-- ``uncertain_write``:Operation/ToolCall 均为 UNKNOWN 的写操作 + 已领取的
-  RECONCILE_OPERATION Job 租约(Run 处于 WAITING_RECONCILIATION);
+- ``running_run``:把 seeded_run 以 state_version CAS 推入 RUNNING(执行器语义);
+- ``operation_service``:绑定 running_run 的 OperationService;
+- ``uncertain_write``:Operation/ToolCall 均为 UNKNOWN 的写操作,Run 处于
+  WAITING_RECONCILIATION;
 - ``reconciliation_service``:绑定 uncertain_write 的 ReconciliationService;
 - ``tool_result_processor``:绑定固定 Output Schema 的 ToolResultProcessor。
 """
@@ -21,39 +22,33 @@ from runtime.execution.operations import OperationService
 from runtime.execution.reconciliation import ReconciliationService
 from runtime.execution.tool_result_processor import ToolResultProcessor
 from runtime.interfaces.state import RunStatus
-from runtime.jobs.lease_service import Lease, LeaseService
 from runtime.persistence.base import (
     ConfigScope,
     MessageRole,
     MessageStatus,
-    RunJobKind,
     ToolEffect,
 )
 from runtime.persistence.models.configuration import ToolDefinition, ToolVersion
 from runtime.persistence.models.execution import Operation, Run, ToolCall
 from runtime.persistence.models.interaction import Message
-from runtime.persistence.repositories.jobs import JobRepository
+from runtime.persistence.repositories.runs import RunRepository
 
 
 @dataclass(frozen=True)
-class LeasedRun:
-    """已领取 ADVANCE_RUN 租约的 Run:fencing 凭据与期望 state_version。"""
+class RunningRun:
+    """已进入 RUNNING 的 Run:期望 state_version(并发写的唯一凭据)。"""
 
     run: Run
-    job_id: uuid.UUID
-    lease_token: uuid.UUID
     state_version: int
 
 
 @dataclass(frozen=True)
 class UncertainWrite:
-    """UNKNOWN 写操作与已领取的 RECONCILE_OPERATION 租约。"""
+    """UNKNOWN 写操作与其 Run 的当前 state_version。"""
 
     run: Run
     tool_call: ToolCall
     operation: Operation
-    reconcile_job_id: uuid.UUID
-    lease_token: uuid.UUID
     state_version: int
 
 
@@ -126,36 +121,33 @@ async def seeded_write_tool_call(
 
 
 @pytest.fixture()
-async def leased_run(
-    db_session: AsyncSession, run_service, seeded_run: Run
-) -> LeasedRun:
-    """创建并领取 ADVANCE_RUN Job:Run QUEUED→RUNNING,返回 fencing 凭据。"""
-    job = await JobRepository(db_session).create(
-        workspace_id=seeded_run.workspace_id, run_id=seeded_run.id, kind=RunJobKind.ADVANCE_RUN
+async def running_run(
+    db_session: AsyncSession, seeded_run: Run
+) -> RunningRun:
+    """以 state_version CAS 把 Run 从 QUEUED 推入 RUNNING(等价执行器领取)。"""
+    moved = await RunRepository(db_session).compare_and_set_status(
+        workspace_id=seeded_run.workspace_id,
+        run_id=seeded_run.id,
+        expected_version=seeded_run.state_version,
+        new_status=RunStatus.RUNNING.value,
+        expected_status=RunStatus.QUEUED.value,
     )
-    lease: Lease = await LeaseService(db_session).claim(worker_id="test-worker")
-    assert lease is not None
+    assert moved
     await db_session.refresh(seeded_run)
-    return LeasedRun(
-        run=seeded_run,
-        job_id=job.id,
-        lease_token=lease.lease_token,
-        state_version=seeded_run.state_version,
-    )
+    return RunningRun(run=seeded_run, state_version=seeded_run.state_version)
 
 
 @pytest.fixture()
 def operation_service(
-    db_session: AsyncSession, seeded_workspace, leased_run: LeasedRun
+    db_session: AsyncSession, seeded_workspace, running_run: RunningRun
 ) -> OperationService:
-    """绑定 leased_run 的 OperationService(持有效租约与期望 state_version)。"""
+    """绑定 running_run 的 OperationService(期望 state_version)。"""
     return OperationService(
         db_session,
         workspace_id=seeded_workspace.workspace.id,
         actor_id=seeded_workspace.user.id,
-        run_id=leased_run.run.id,
-        lease_token=leased_run.lease_token,
-        expected_state_version=leased_run.state_version,
+        run_id=running_run.run.id,
+        expected_state_version=running_run.state_version,
     )
 
 
@@ -165,7 +157,7 @@ async def uncertain_write(
     seeded_run: Run,
     run_service,
 ) -> UncertainWrite:
-    """UNKNOWN Operation + 已领取 RECONCILE_OPERATION 租约的完整回查上下文。"""
+    """UNKNOWN Operation + WAITING_RECONCILIATION Run 的完整回查上下文。"""
     tool_definition, tool_version = _write_tool_rows()
     message = _assistant_message(seeded_run)
     operation_id = uuid.uuid4()
@@ -197,13 +189,14 @@ async def uncertain_write(
     tool_call.operation_id = operation_id
     await db_session.flush()
 
-    # 先推进到 RUNNING(领 ADVANCE_RUN),进入 WAITING_RECONCILIATION 后完成
-    # ADVANCE_RUN Job(活动 Job 唯一索引要求),再创建并领取 RECONCILE Job。
-    advance_job = await JobRepository(db_session).create(
-        workspace_id=seeded_run.workspace_id, run_id=seeded_run.id, kind=RunJobKind.ADVANCE_RUN
+    # 执行器语义:QUEUED→RUNNING 由 CAS 完成,再迁到 WAITING_RECONCILIATION。
+    await RunRepository(db_session).compare_and_set_status(
+        workspace_id=seeded_run.workspace_id,
+        run_id=seeded_run.id,
+        expected_version=seeded_run.state_version,
+        new_status=RunStatus.RUNNING.value,
+        expected_status=RunStatus.QUEUED.value,
     )
-    advance_lease = await LeaseService(db_session).claim(worker_id="test-worker")
-    assert advance_lease is not None
     await db_session.refresh(seeded_run)
     running = (await db_session.scalars(select(Run).where(Run.id == seeded_run.id))).one()
     await run_service.transition_run(
@@ -214,25 +207,11 @@ async def uncertain_write(
         expected_status=RunStatus.RUNNING,
         expected_version=running.state_version,
     )
-    assert await LeaseService(db_session).complete(
-        advance_job.id, advance_lease.lease_token
-    )
-    await db_session.refresh(seeded_run)
-
-    job = await JobRepository(db_session).create(
-        workspace_id=seeded_run.workspace_id,
-        run_id=seeded_run.id,
-        kind=RunJobKind.RECONCILE_OPERATION,
-    )
-    lease = await LeaseService(db_session).claim(worker_id="reconcile-worker")
-    assert lease is not None
     await db_session.refresh(seeded_run)
     return UncertainWrite(
         run=seeded_run,
         tool_call=tool_call,
         operation=operation,
-        reconcile_job_id=job.id,
-        lease_token=lease.lease_token,
         state_version=seeded_run.state_version,
     )
 
@@ -252,7 +231,6 @@ def reconciliation_service(
         actor_id=seeded_workspace.user.id,
         run_id=uncertain_write.run.id,
         operation_id=uncertain_write.operation.operation_id,
-        lease_token=uncertain_write.lease_token,
         expected_state_version=uncertain_write.state_version,
         reconcile_budget=3,
         write_retry_budget=1,

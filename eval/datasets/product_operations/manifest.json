@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "scorer_version": "v3",
   "core_ids": [
     "core-read-001", "core-read-002", "core-read-003", "core-read-004",
@@ -29,6 +29,6 @@
     "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001",
     "safe-inventory-no-write-permission-001", "safe-listing-no-write-permission-001"
   ],
-  "core_sha256": "6559a8a37fca5200bccfa36760f488e2fa4f1fac96dbdaeba3c70a1f8666b1f2",
-  "blind_sha256": "9b959c9fec4292e6eafc512256fe4aae01c07b61f308b3e81cbe926b3f876548"
+  "core_sha256": "5f00139e0c1d938d154b4dee6fdc615dfc66c538f47277dc42f92be6c9691c70",
+  "blind_sha256": "a2396275798e0e3386d8cd556f7124be015dedc5af8c31b7df65dd5d17dc48cb"
 }

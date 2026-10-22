@@ -14,19 +14,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from runtime.audit.service import AuditService
-from runtime.execution.operations import LeaseStaleError, OperationConflictError
 from runtime.execution.reconciliation import (
     WRITE_RETRY_BUDGET_EXCEEDED,
     ReconcileResult,
     ReconciliationService,
 )
+from runtime.execution.transitions import InvalidTransition
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
     MessageRole,
     OperationAttemptKind,
     OperationAttemptStatus,
     OperationStatus,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
 )
 from runtime.persistence.base import (
@@ -104,7 +104,7 @@ async def test_not_applied_returns_to_validation(
     assert operation.status == OperationStatus.NOT_APPLIED
     run = await fresh_run(db_session, seeded_workspace.workspace.id, uncertain_write.run.id)
     assert run.status == PersistenceRunStatus.QUEUED
-    assert result.next_job_kind is not None and result.next_job_kind.value == "ADVANCE_RUN"
+    assert result.next_step is not None and result.next_step.value == "ADVANCE"
 
 
 async def test_applied_completes_tool_call_and_resumes_run(
@@ -137,8 +137,8 @@ async def test_unknown_within_budget_reschedules_reconciliation(
     """回查仍 UNKNOWN(预算内):Run 保持 WAITING_RECONCILIATION,再次调度回查。"""
     result = await reconciliation_service.apply_result(ReconcileResult.UNKNOWN)
     assert result.run_status == RunStatus.WAITING_RECONCILIATION
-    assert result.next_job_kind is not None
-    assert result.next_job_kind.value == "RECONCILE_OPERATION"
+    assert result.next_step is not None
+    assert result.next_step.value == "RECONCILE"
     assert result.reconcile_count == 1
     assert result.budget_exhausted is False
 
@@ -170,7 +170,6 @@ async def test_unknown_over_budget_fails_run_but_keeps_unknown_facts(
         actor_id=seeded_workspace.user.id,
         run_id=uncertain_write.run.id,
         operation_id=uncertain_write.operation.operation_id,
-        lease_token=uncertain_write.lease_token,
         expected_state_version=uncertain_write.state_version,
         reconcile_budget=1,
         write_retry_budget=1,
@@ -178,7 +177,7 @@ async def test_unknown_over_budget_fails_run_but_keeps_unknown_facts(
     result = await service.apply_result(ReconcileResult.UNKNOWN)
     assert result.budget_exhausted is True
     assert result.run_status == RunStatus.FAILED
-    assert result.next_job_kind is None
+    assert result.next_step is None
 
     run = await fresh_run(db_session, seeded_workspace.workspace.id, uncertain_write.run.id)
     assert run.status == PersistenceRunStatus.FAILED
@@ -193,24 +192,23 @@ async def test_unknown_over_budget_fails_run_but_keeps_unknown_facts(
     assert operation.status == OperationStatus.UNKNOWN
 
 
-async def test_stale_lease_token_rejected(
+async def test_stale_state_version_rejects_reconcile_result(
     db_session: AsyncSession,
     seeded_workspace,
     uncertain_write,
 ) -> None:
-    """回查结果提交同样受 fencing:失效 token 拒绝,状态不变。"""
+    """回查结果提交同样受 state_version CAS 保护:过期版本拒绝,状态不变。"""
     service = ReconciliationService(
         db_session,
         workspace_id=seeded_workspace.workspace.id,
         actor_id=seeded_workspace.user.id,
         run_id=uncertain_write.run.id,
         operation_id=uncertain_write.operation.operation_id,
-        lease_token=uuid.uuid4(),
-        expected_state_version=uncertain_write.state_version,
+        expected_state_version=uncertain_write.state_version + 100,
         reconcile_budget=2,
         write_retry_budget=1,
     )
-    with pytest.raises(LeaseStaleError):
+    with pytest.raises(InvalidTransition):
         await service.apply_result(ReconcileResult.APPLIED)
     tool_call = await fresh_tool_call(
         db_session, seeded_workspace.workspace.id, uncertain_write.tool_call.id
@@ -259,7 +257,7 @@ async def test_not_applied_returns_to_validating_only_within_budget(
     assert result.tool_call_status is ToolCallStatus.VALIDATING
     assert result.operation_status is OperationStatus.NOT_APPLIED
     assert result.direct_execute is False
-    assert result.next_job_kind is RunJobKind.ADVANCE_RUN
+    assert result.next_step is RunNextStep.ADVANCE
 
     run = await fresh_run(db_session, seeded_workspace.workspace.id, uncertain_write.run.id)
     assert run.status == PersistenceRunStatus.QUEUED
@@ -274,7 +272,7 @@ async def test_not_applied_fails_tool_call_when_write_budget_exhausted(
     """已有 1 个 EXECUTE Attempt(>= 预算 1):NOT_APPLIED 落 ToolCall FAILED 终态。
 
     预算耗尽后不得再产生可重排的 ``VALIDATING``;Run 仍回 QUEUED 让模型据失败
-    结果收尾(``next_job_kind=ADVANCE_RUN``)。
+    结果收尾(``next_step=ADVANCE``)。
     """
     db_session.add(
         OperationAttempt(
@@ -292,7 +290,7 @@ async def test_not_applied_fails_tool_call_when_write_budget_exhausted(
     result = await reconciliation_service.apply_result(ReconcileResult.NOT_APPLIED)
     assert result.tool_call_status is ToolCallStatus.FAILED
     assert result.operation_status is OperationStatus.NOT_APPLIED
-    assert result.next_job_kind is RunJobKind.ADVANCE_RUN
+    assert result.next_step is RunNextStep.ADVANCE
 
     tool_call = await fresh_tool_call(
         db_session, seeded_workspace.workspace.id, uncertain_write.tool_call.id
@@ -420,7 +418,7 @@ async def test_replaying_applied_reconcile_does_not_duplicate_tool_result(
     seeded_workspace,
     uncertain_write,
 ) -> None:
-    """同一回查恢复重入两次:第二次被状态 CAS 拒绝,不重复生成 ToolResult。"""
+    """同一回查恢复重入两次:第二次被 state_version 校验拒绝,不重复生成 ToolResult。"""
     await reconciliation_service.apply_result(ReconcileResult.APPLIED)
     assert (
         len(
@@ -433,8 +431,10 @@ async def test_replaying_applied_reconcile_does_not_duplicate_tool_result(
         == 1
     )
 
-    # ToolCall 已 SUCCEEDED,再回查同一 Operation 属非法重入。
-    with pytest.raises(OperationConflictError):
+    # 第一次回查已把 Run 迁出 WAITING_RECONCILIATION(state_version 递增),
+    # 再回查同一 Operation 属非法重入:stale 校验在任何写入前就拒绝,
+    # 不能等到改完 Operation/ToolCall 才由迁移 CAS 兜底。
+    with pytest.raises(InvalidTransition):
         await reconciliation_service.apply_result(ReconcileResult.APPLIED)
 
     assert (

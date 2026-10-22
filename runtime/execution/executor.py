@@ -408,7 +408,7 @@ class RunExecutor:
 
     async def _handle_failure(self, claim: RunClaim, error: BaseException) -> AdvanceOutcome:
         """暂时性错误:未耗尽预算退回 QUEUED,否则 Run FAILED。"""
-        code = type(error).__name__.upper()[:64]
+        code = str(getattr(error, "code", "") or type(error).__name__).upper()[:64]
         await self._finish_attempt(claim, RunAttemptStatus.FAILED, code)
         session = self._session_factory()
         try:
@@ -439,6 +439,18 @@ class RunExecutor:
                     new_status=target.value,
                     expected_status=RunStatus.RUNNING.value,
                 )
+                if target is RunStatus.FAILED:
+                    # 失败码写进 Run 行:只留在 Attempt 里的话,读 Run 的人
+                    # (API、评测、排障)只能看到 status=FAILED 而不知道原因。
+                    await session.execute(
+                        sa.update(Run)
+                        .where(
+                            Run.workspace_id == run.workspace_id,
+                            Run.id == claim.run_id,
+                        )
+                        .values(failure_code=code)
+                        .execution_options(synchronize_session=False)
+                    )
         finally:
             await session.close()
         if target is RunStatus.QUEUED:

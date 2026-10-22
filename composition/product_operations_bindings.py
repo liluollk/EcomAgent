@@ -63,6 +63,7 @@ from agents.product_operations.pricing.tools import (
     SET_LISTING_PRICE_DEFINITION,
     compare_listing_prices,
 )
+from agents.product_operations.shared.errors import ProductOperationError
 from agents.product_operations.tools.definitions import (
     COMPARE_LISTING_PRICES_DEFINITION as LEGACY_COMPARE_LISTING_PRICES_DEFINITION,
 )
@@ -72,6 +73,7 @@ from agents.product_operations.tools.definitions import (
 from agents.product_operations.tools.definitions import (
     SEARCH_PRODUCTS_DEFINITION as LEGACY_SEARCH_PRODUCTS_DEFINITION,
 )
+from agents.product_operations.tools.errors import ToolAccessError
 from agents.product_operations.tools.handlers import (
     CompareListingPricesHandler,
     GetProductSnapshotHandler,
@@ -163,6 +165,13 @@ class ProductOperationsBindingDependencies:
     legacy_update_handler: Any
 
 
+def _domain_error_code(error: ProductOperationError | ToolAccessError) -> str:
+    """领域错误的规范码:越权用 ``reason_code``,查找类失败用 ``code``。"""
+    if isinstance(error, ToolAccessError):
+        return error.reason_code
+    return error.code
+
+
 class _ReadHandler:
     """把领域只读函数适配到 Runtime ``read`` 协议。"""
 
@@ -194,7 +203,17 @@ class _ReadHandler:
                 workspace_id=self._workspace_id,
                 request_id=f"read-{tool_call_id}",
             )
-            result = await self._invoke(actor, session, normalized_arguments)
+            try:
+                result = await self._invoke(actor, session, normalized_arguments)
+            except (ProductOperationError, ToolAccessError) as error:
+                # 越权与查找失败是领域结果,不是运行崩溃:回填 FAILED 回执让
+                # 模型看到规范错误码(如 RESOURCE_SCOPE_DENIED)并决定下一步。
+                # 直接抛出会让整个 Run 失败,连"拒绝"这件事都无法汇报给用户。
+                return ToolExecutionReceipt(
+                    tool_call_id=tool_call_id,
+                    status="FAILED",
+                    error_code=_domain_error_code(error),
+                )
             return ToolExecutionReceipt(
                 tool_call_id=tool_call_id,
                 status="OK",

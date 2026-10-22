@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -13,6 +14,7 @@ import yaml
 from eval.config import fixed_eval_config
 from eval.dataset_loader import DatasetManifest, load_dataset, load_manifest
 from eval.schema import SCHEMA_VERSION, Scenario
+from eval.scorers.fact_match import fact_in_text
 
 
 DATASET_DIR: Final[Path] = (
@@ -273,3 +275,31 @@ def test_core_multi_store_writes_name_every_candidate_store(
             listing.store_id for listing in scenario.initial_state.listings
         }
         assert all(store_id in user_text for store_id in candidate_stores), scenario.id
+
+
+def test_expected_facts_are_derivable_from_declared_authoritative_states(
+    partitions: Mapping[str, tuple[Scenario, ...]],
+) -> None:
+    """期望事实必须能从场景声明的权威状态里得到证据。
+
+    否则该样本必定失败:模型说声明的值,权威状态里没有对应证据(判 unsupported);
+    模型说权威状态里的值,又不符合期望事实(判 omitted)。这条校验专门拦截
+    "Gold 期望与判分口径互相矛盾"的样本(如状态声明 ``PUBLISHED`` 却要求回答
+    ``ACTIVE``)。
+    """
+    for name, scenarios in partitions.items():
+        for scenario in scenarios:
+            declared = json.dumps(
+                {
+                    "initial": scenario.initial_state.model_dump(mode="json"),
+                    "expected_final": scenario.expected_final_state.model_dump(
+                        mode="json"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+            for fact in scenario.expected_response_facts:
+                assert fact_in_text(fact.value, declared), (
+                    f"{name}/{scenario.id}: 期望事实 {fact.value!r} "
+                    f"(source={fact.source}) 在声明的权威状态里找不到证据"
+                )

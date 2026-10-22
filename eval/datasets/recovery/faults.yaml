@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 # 故障恢复数据集(计划 05 Task 6):数据声明期望,代码执行验证。
 #
 # 每例声明:id / category / risk_level / fault(故障注名,执行分派键)/
@@ -6,11 +6,11 @@ schema_version: 2
 # 路径;未发生 UNKNOWN 时空)/ max_logical_writes(逻辑写上界)/
 # expected_final_state(权威最终状态:平台价格 + Run 终态)。
 #
-# 覆盖七类故障点:模型超时、Tool 调用前退出、写入已生效响应丢失、确认后
-# Worker 重启、平台持续不可用、回查暂时不一致、重复提交。其中
+# 覆盖七类故障点:模型超时、Tool 调用前进程崩溃、写入已生效响应丢失、确认后
+# 执行器重启、平台持续不可用、回查暂时不一致、重复提交。其中
 # response_lost_after_commit / permanent_failure / temporary_reconcile_unknown
 # 与 adapters.commerce.faults.FaultInjector 的命名故障一一对应;其余四类由
-# crash-harness 模式(真实 LeaseService/LeaseSweeper/ScriptedBackend 注入)
+# crash-harness 模式(真实 RunExecutor 恢复扫描 + ScriptedBackend 注入)
 # 确定性构造。
 cases:
   - id: model-timeout
@@ -26,26 +26,28 @@ cases:
       price: "128.00"
       run_status: FAILED
 
-  - id: worker-exit-before-write
-    category: worker_lifecycle
+  - id: executor-exit-before-write
+    category: executor_lifecycle
     risk_level: medium
-    fault: worker_exit_before_write
+    fault: executor_exit_before_write
     expectation: >-
-      Tool 调用前 Worker 退出:领取后租约过期被 LeaseSweeper 回收,Run 回
-      QUEUED 可重新领取,Attempt ABANDONED,零写入、权威价格不变。
+      外部写前执行器崩溃:Run 与 Attempt 停在 RUNNING,尚无 ToolCall / Operation。
+      进程重启后恢复扫描把遗留 Attempt 标记 ABANDONED(EXECUTOR_RESTART),Run
+      退回 QUEUED 并重新推进到下一个用户边界(仍需补充的输入不被跳过),崩溃
+      前后均零外部写入、权威价格不变。
     expected_reconcile_path: []
     max_logical_writes: 0
     expected_final_state:
       price: "128.00"
-      run_status: QUEUED
+      run_status: WAITING_INPUT
 
   - id: write-applied-response-lost
     category: response_loss
     risk_level: high
     fault: response_lost_after_commit
     expectation: >-
-      写入已生效但响应丢失:Run 进入 WAITING_RECONCILIATION(Operation
-      UNKNOWN),回查 APPLIED 后恢复推进到 COMPLETED,权威写入恰好一次,
+      写入已生效但响应丢失:Operation 落 UNKNOWN、Run 进入 WAITING_RECONCILIATION,
+      由执行器在同一推进内回查 APPLIED 并续推到 COMPLETED,权威写入恰好一次,
       价格落到目标值。
     expected_reconcile_path: ["UNKNOWN", "APPLIED"]
     max_logical_writes: 1
@@ -53,13 +55,13 @@ cases:
       price: "99.00"
       run_status: COMPLETED
 
-  - id: worker-restart-after-confirmation
-    category: worker_lifecycle
+  - id: executor-restart-after-confirmation
+    category: executor_lifecycle
     risk_level: high
-    fault: worker_restart_after_confirmation
+    fault: executor_restart_after_confirmation
     expectation: >-
-      确认接受后 Worker 退出:租约过期被 Sweeper 回收后,新 Worker 重新领取
-      推进,已接受的确认语义保持,写入恰好一次,Run COMPLETED。
+      确认接受后执行器崩溃:接受已提交、Run 停在 RUNNING;进程重启后恢复扫描
+      接管并继续推进,已接受的确认语义保持,写入恰好一次,Run COMPLETED。
     expected_reconcile_path: []
     max_logical_writes: 1
     expected_final_state:

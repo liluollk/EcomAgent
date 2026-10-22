@@ -8,7 +8,7 @@
   不跨 case 共享;
 - 能力版本(Agent/Skill/Tool/Model)按 stable_key 幂等落库复用,不随
   case 重复创建;
-- 推进经与 apps/worker 同源的 :class:`ProductApplication` 门面(组合核心
+- 推进经与 API 宿主同源的 :class:`ProductApplication` 门面(组合核心
   ``build_product_application`` 位于 :mod:`composition.product_operations`,
   eval 不 import apps)。
 
@@ -17,11 +17,10 @@
 本模块不创建任何模型 Backend。
 
 清理策略:teardown 清理(:meth:`IsolatedEnvironment.cleanup`,按外键逆序
-删除本工作区行,不删全局能力行)。独立 Workspace 本可无需删除,但失败的
-推进会把 ADVANCE_RUN Job 释放回 PENDING,而 ``LeaseService.claim`` 领取
-不区分 workspace——残留 Job 会被后续 case 的 Worker 推进误领取;因此
-:class:`eval.runner.EvalRunner` 默认在每 case 结束后清理(捕获先行,
-痕迹保留在 CaseResult 中)。
+删除本工作区行,不删全局能力行)。每 case 的 Workspace 本就独立,清理是为了
+让失败用例的残留行不干扰后续断言(尤其 ``Run.status=QUEUED`` 的残留 Run 会
+被下一次恢复扫描捡起);因此 :class:`eval.runner.EvalRunner` 默认在每 case
+结束后清理(捕获先行,痕迹保留在 CaseResult 中)。
 """
 
 from __future__ import annotations
@@ -114,7 +113,6 @@ _CLEANUP_STATEMENTS: Final[tuple[tuple[str, str], ...]] = (
     ("DELETE FROM operations WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM tool_calls WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM run_attempts WHERE workspace_id = :ws", "ws"),
-    ("DELETE FROM run_jobs WHERE workspace_id = :ws", "ws"),
     ("UPDATE messages SET run_id = NULL WHERE workspace_id = :ws", "ws"),
     ("UPDATE runs SET trigger_message_id = NULL WHERE workspace_id = :ws", "ws"),
     ("DELETE FROM messages WHERE workspace_id = :ws", "ws"),
@@ -158,16 +156,27 @@ async def _seed_listing(
     currency: str | None,
     status: str | None,
     products_by_sku: dict[str, Product],
+    stores_by_symbol: dict[str, Store],
 ) -> SeededListing:
-    """按 Scenario 符号种子 Store/Product/Listing 并返回符号映射。"""
-    store = Store(
-        id=uuid.uuid4(),
-        workspace_id=workspace_id,
-        platform=StorePlatform.TAOBAO,
-        external_store_ref=f"eval-{uuid.uuid4().hex[:12]}",
-        name=symbol,
-        aliases=[symbol],
-    )
+    """按 Scenario 符号种子 Store/Product/Listing 并返回符号映射。
+
+    Store 按 ``store_id`` 符号复用:一个店铺放多个 SKU 是常态,若每条 Listing
+    都新建一个同名 Store,店铺引用解析会命中多个候选、被判成
+    ``AMBIGUOUS_STORE_REFERENCE``,场景在工具调用阶段就崩掉。
+    """
+    store = stores_by_symbol.get(symbol)
+    if store is None:
+        store = Store(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            platform=StorePlatform.TAOBAO,
+            external_store_ref=f"eval-{uuid.uuid4().hex[:12]}",
+            name=symbol,
+            aliases=[symbol],
+        )
+        stores_by_symbol[symbol] = store
+        session.add(store)
+        await session.flush()
     product = products_by_sku.get(sku)
     if product is None:
         product = Product(
@@ -178,7 +187,6 @@ async def _seed_listing(
         )
         products_by_sku[sku] = product
         session.add(product)
-    session.add(store)
     await session.flush()
     listing = Listing(
         id=uuid.uuid4(),
@@ -251,6 +259,7 @@ class IsolatedEnvironment:
         seeded: list[SeededListing] = []
         seeded_inventory: list[SeededInventory] = []
         products_by_sku: dict[str, Product] = {}
+        stores_by_symbol: dict[str, Store] = {}
 
         session = AsyncSession(engine, expire_on_commit=False)
         try:
@@ -293,6 +302,7 @@ class IsolatedEnvironment:
                             currency=spec.currency,
                             status=spec.status,
                             products_by_sku=products_by_sku,
+                            stores_by_symbol=stores_by_symbol,
                         )
                     )
                 for inventory_spec in scenario.initial_state.inventory_levels:
@@ -366,15 +376,19 @@ class IsolatedEnvironment:
                                 "actor store scope references unseeded stores: "
                                 + ", ".join(sorted(missing_symbols))
                             )
+                        scoped_store_ids = {
+                            listing.store_id
+                            for listing in seeded
+                            if listing.symbol in requested_symbols
+                        }
                         session.add_all(
                             MembershipResourceScope(
                                 workspace_id=workspace_id,
                                 membership_id=membership_id,
                                 resource_type="store",
-                                resource_id=str(listing.store_id),
+                                resource_id=str(store_id),
                             )
-                            for listing in seeded
-                            if listing.symbol in requested_symbols
+                            for store_id in sorted(scoped_store_ids)
                         )
         finally:
             await session.close()
@@ -400,7 +414,7 @@ class IsolatedEnvironment:
             workspace_id=workspace_id,
             actor_id=actor_id,
             membership_id=membership_id,
-            worker_id=f"eval-worker-{uuid.uuid4().hex[:8]}",
+            executor_id=f"eval-executor-{uuid.uuid4().hex[:8]}",
         )
         if not isinstance(application.adapter, MockCommerceAdapter):
             raise TypeError("Eval fixtures require the deterministic MockCommerceAdapter")

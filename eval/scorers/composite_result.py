@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from eval.results import CaseResult
 from eval.schema import Scenario
+from eval.scorers.contract import ContractScore, ContractScorer
 from eval.scorers.decision import DecisionScore, DecisionScorer
 from eval.scorers.grounding import GroundingScore, GroundingScorer
 from eval.scorers.process import ProcessScore, ProcessScorer
@@ -27,6 +28,7 @@ class ScoredCaseResult(BaseModel):
     repetition: int
     scorer_version: str
     task: TaskCompletionScore
+    contract: ContractScore
     decision: DecisionScore
     process: ProcessScore
     grounding: GroundingScore
@@ -47,6 +49,7 @@ def score_case(
         repetition=result.repetition,
         scorer_version=scorer_version,
         task=TaskCompletionScorer(scenario).score(result),
+        contract=ContractScorer(scenario).score(result),
         decision=DecisionScorer(scenario).score(result),
         process=ProcessScorer(scenario).score(result),
         grounding=GroundingScorer(scenario).score(result),

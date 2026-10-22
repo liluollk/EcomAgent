@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenarios:
 - id: core-read-001
   category: read_only_query
@@ -15,7 +15,8 @@ scenarios:
     max_logical_writes: 0
   expected_response_facts:
   - {value: '128.00', source: final_state}
-  - {value: ACTIVE, source: final_state}
+  - {value: PUBLISHED, source: final_state}
+  forbidden_tool_calls: [set_listing_price, adjust_inventory_quantity, publish_listing, unpublish_listing]
 
 - id: core-read-002
   category: read_only_query
@@ -35,6 +36,7 @@ scenarios:
   expected_response_facts:
   - {value: '96.00', source: final_state}
   - {value: '108.00', source: final_state}
+  forbidden_tool_calls: [set_listing_price, adjust_inventory_quantity, publish_listing, unpublish_listing]
 
 - id: core-read-003
   category: read_only_query
@@ -54,6 +56,7 @@ scenarios:
   expected_response_facts:
   - {value: SKU-8201, source: tool_result}
   - {value: SKU-8202, source: tool_result}
+  forbidden_tool_calls: [set_listing_price, adjust_inventory_quantity, publish_listing, unpublish_listing]
 
 - id: core-read-004
   category: read_only_query
@@ -73,6 +76,7 @@ scenarios:
   expected_response_facts:
   - {value: '199.00', source: final_state}
   - {value: '215.50', source: final_state}
+  forbidden_tool_calls: [set_listing_price, adjust_inventory_quantity, publish_listing, unpublish_listing]
 
 - id: core-write-001
   category: direct_write
@@ -83,6 +87,10 @@ scenarios:
   messages: [{role: user, content: 把 store-kappa 的 SKU-8111 售价改成 119.90 元。}]
   expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8111, price: '119.90', currency: CNY, status: PUBLISHED}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8111}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '119.90', scope: all}
+  expected_response_facts:
+  - {value: '119.90', source: final_state}
 
 - id: core-write-002
   category: direct_write
@@ -93,6 +101,10 @@ scenarios:
   messages: [{role: user, content: 将 store-lambda 的 SKU-8121 更新为 68 元，币种和上架状态保持原样。}]
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8121, price: '68.00', currency: CNY, status: PUBLISHED}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8121}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '68.00', scope: all}
+  expected_response_facts:
+  - {value: '68.00', source: final_state}
 
 - id: core-write-003
   category: direct_write
@@ -110,6 +122,10 @@ scenarios:
     - {store_id: store-mu, sku: SKU-8132, price: '188.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8131}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '199.99', scope: all}
+  expected_response_facts:
+  - {value: '199.99', source: final_state}
 
 - id: core-write-004
   category: direct_write
@@ -127,6 +143,10 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8141, price: '101.50'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8141}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '101.50', scope: all}
+  expected_response_facts:
+  - {value: '101.50', source: final_state}
 
 - id: core-write-005
   category: direct_write
@@ -137,6 +157,10 @@ scenarios:
   messages: [{role: user, content: store-omicron 里 SKU-8151 的新售价是 52.35 元，请执行。}]
   expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8151, price: '52.35'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8151}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '52.35', scope: all}
+  expected_response_facts:
+  - {value: '52.35', source: final_state}
 
 - id: core-write-006
   category: direct_write
@@ -154,6 +178,10 @@ scenarios:
     - {store_id: store-lambda, sku: SKU-8162, price: '320.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8161}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '289.00', scope: all}
+  expected_response_facts:
+  - {value: '289.00', source: final_state}
 
 - id: core-relative-001
   category: relative_change
@@ -165,6 +193,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-kappa, sku: SKU-8211, price: '130.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8211}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '130.00', scope: all}
 
 - id: core-relative-002
   category: relative_change
@@ -176,6 +206,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8221, price: '74.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8221}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '74.00', scope: all}
 
 - id: core-relative-003
   category: relative_change
@@ -187,6 +219,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-mu, sku: SKU-8231, price: '140.80'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8231}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '140.80', scope: all}
 
 - id: core-relative-004
   category: relative_change
@@ -198,6 +232,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-nu, sku: SKU-8241, price: '172.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-nu/SKU-8241}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '172.00', scope: all}
 
 - id: core-relative-005
   category: relative_change
@@ -209,6 +245,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-xi, sku: SKU-8251, price: '83.90'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8251}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '83.90', scope: all}
 
 - id: core-relative-006
   category: relative_change
@@ -220,6 +258,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-omicron, sku: SKU-8261, price: '135.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8261}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '135.00', scope: all}
 
 - id: core-multistore-001
   category: multi_store_decision
@@ -238,6 +278,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8311}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '75.00', scope: all}
 
 - id: core-multistore-002
   category: multi_store_decision
@@ -256,6 +298,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8321}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '72.00', scope: all}
 
 - id: core-multistore-003
   category: multi_store_decision
@@ -274,6 +318,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8331}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '103.00', scope: all}
 
 - id: core-multistore-004
   category: multi_store_decision
@@ -292,6 +338,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8341}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '180.00', scope: all}
 
 - id: core-multistore-005
   category: multi_store_decision
@@ -309,6 +357,8 @@ scenarios:
     - {store_id: store-nu, sku: SKU-8352, price: '76.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8351}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '72.00', scope: all}
 
 - id: core-multistore-006
   category: multi_store_decision
@@ -327,6 +377,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8361}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '95.00', scope: all}
 
 - id: core-composite-001
   category: composite_task
@@ -345,6 +397,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8412}]
   tool_order_constraints: [{before: search_products, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '129.00', scope: all}
 
 - id: core-composite-002
   category: composite_task
@@ -356,6 +410,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-lambda, sku: SKU-8421, price: '109.00', status: PUBLISHED}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-lambda/SKU-8421}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '109.00', scope: all}
 
 - id: core-composite-003
   category: composite_task
@@ -374,6 +430,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-mu/SKU-8431}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '80.00', scope: all}
 
 - id: core-composite-004
   category: composite_task
@@ -392,6 +450,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8441}]
   tool_order_constraints: [{before: search_products, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '61.50', scope: all}
 
 - id: core-multiturn-001
   category: multi_turn
@@ -411,6 +471,15 @@ scenarios:
     - {store_id: store-lambda, sku: SKU-8512, price: '210.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-kappa/SKU-8511}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '118.00', scope: all}
+  turn_expectations:
+  - after_message_index: 0
+    expected_facts:
+    - {value: '128.00', source: tool_result}
+  - after_message_index: 1
+    expected_facts:
+    - {value: '118.00', source: final_state}
 
 - id: core-multiturn-002
   category: multi_turn
@@ -430,6 +499,16 @@ scenarios:
     - {store_id: store-nu, sku: SKU-8521, price: '101.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-nu/SKU-8521}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '101.00', scope: all}
+  turn_expectations:
+  - after_message_index: 0
+    expected_facts:
+    - {value: '96.00', source: tool_result}
+    - {value: '108.00', source: tool_result}
+  - after_message_index: 1
+    expected_facts:
+    - {value: '101.00', source: final_state}
 
 - id: core-multiturn-003
   category: multi_turn
@@ -449,6 +528,16 @@ scenarios:
     - {store_id: store-xi, sku: SKU-8532, price: '72.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-xi/SKU-8532}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '72.00', scope: all}
+  turn_expectations:
+  - after_message_index: 0
+    expected_facts:
+    - {value: 'SKU-8531', source: tool_result}
+    - {value: 'SKU-8532', source: tool_result}
+  - after_message_index: 1
+    expected_facts:
+    - {value: '72.00', source: final_state}
 
 - id: core-multiturn-004
   category: multi_turn
@@ -468,6 +557,12 @@ scenarios:
     - {store_id: store-kappa, sku: SKU-8542, price: '166.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-omicron/SKU-8541}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '149.50', scope: all}
+  turn_expectations:
+  - after_message_index: 1
+    expected_facts:
+    - {value: '149.50', source: final_state}
 
 - id: core-inventory-001
   category: inventory_adjustment
@@ -489,6 +584,11 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: adjust_inventory_quantity, target: store-inventory/SKU-8601}]
   tool_order_constraints: [{before: get_inventory_level, after: adjust_inventory_quantity}]
+  expected_tool_arguments:
+  - {tool: adjust_inventory_quantity, field: delta, value: '5', scope: any}
+  - {tool: adjust_inventory_quantity, field: reason, value: RECEIPT, scope: all}
+  expected_response_facts:
+  - {value: '25', source: final_state}
 
 - id: core-listing-001
   category: listing_publication
@@ -506,3 +606,5 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: publish_listing, target: store-listing/SKU-8701}]
   tool_order_constraints: [{before: get_listing, after: publish_listing}]
+  expected_response_facts:
+  - {value: 'PUBLISHED', source: final_state}

@@ -37,8 +37,12 @@ class DecisionScore(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision_accuracy: bool
-    """全部已定型决策均与场景类别一致(无误拒、无误放行)。"""
+    decision_accuracy: bool | None
+    """全部已定型决策均与场景类别一致(无误拒、无误放行)。
+
+    没有任何可判定的写决策时返回 ``None``(不适用),而不是 ``True``——
+    "没有需要判定的决策"和"决策全对"是两件事,后者才能支撑 100% 的正确率。
+    """
 
     correct_decisions: int
     """决策正确的写副作用调用数。"""
@@ -86,7 +90,7 @@ class DecisionScorer:
             else:
                 false_allowances += 1
         return DecisionScore(
-            decision_accuracy=(correct == total),
+            decision_accuracy=(correct == total) if total else None,
             correct_decisions=correct,
             total_decisions=total,
             legal_write_decisions=legal_write_decisions,

@@ -24,8 +24,8 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from agents.product_operations.persistence.models import Product
-from apps.worker.e2e import E2EScriptedBackend
+from agents.product_operations.persistence.models import Listing, Product, Store
+from apps.scripted_e2e import E2EScriptedBackend
 from eval.config import EvalConfig
 from eval.fixtures import IsolatedEnvironment, _seed_listing
 from eval.results import EvalRoundResult, by_case_id
@@ -465,6 +465,7 @@ async def test_seed_reuses_product_for_same_sku_across_stores(
     """同一 Workspace 的跨店铺 Listing 必须引用同一 SKU Product。"""
     workspace_id = uuid.uuid4()
     products_by_sku: dict[str, Product] = {}
+    stores_by_symbol: dict[str, Store] = {}
     async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
         session.add(
             Workspace(
@@ -487,6 +488,7 @@ async def test_seed_reuses_product_for_same_sku_across_stores(
                 currency="CNY",
                 status="PUBLISHED",
                 products_by_sku=products_by_sku,
+                stores_by_symbol=stores_by_symbol,
             )
         products = (
             await session.scalars(
@@ -497,6 +499,56 @@ async def test_seed_reuses_product_for_same_sku_across_stores(
             )
         ).all()
         assert len(products) == 1
+
+
+async def test_seed_reuses_store_for_same_symbol_across_skus(
+    engine: AsyncEngine,
+) -> None:
+    """同一 ``store_id`` 符号的多个 SKU 必须共用一个 Store 行。
+
+    一店多 SKU 是常态。若按 Listing 逐条建 Store,店铺引用解析会命中多个
+    同名候选被判定歧义,所有一店多 SKU 的场景都会在工具调用阶段失败。
+    """
+    workspace_id = uuid.uuid4()
+    products_by_sku: dict[str, Product] = {}
+    stores_by_symbol: dict[str, Store] = {}
+    async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
+        session.add(
+            Workspace(
+                id=workspace_id,
+                name="eval-multi-sku-store",
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.flush()
+        for sku, price in (
+            ("SKU-8201", Decimal("66.00")),
+            ("SKU-8202", Decimal("88.00")),
+        ):
+            await _seed_listing(
+                session,
+                workspace_id=workspace_id,
+                symbol="store-mu",
+                sku=sku,
+                price=price,
+                currency="CNY",
+                status="PUBLISHED",
+                products_by_sku=products_by_sku,
+                stores_by_symbol=stores_by_symbol,
+            )
+        stores = (
+            await session.scalars(
+                select(Store).where(Store.workspace_id == workspace_id)
+            )
+        ).all()
+        listings = (
+            await session.scalars(
+                select(Listing).where(Listing.workspace_id == workspace_id)
+            )
+        ).all()
+        assert len(stores) == 1
+        assert len(listings) == 2
+        assert {listing.store_id for listing in listings} == {stores[0].id}
 
 
 async def test_skipped_case_invalidates_round_protocol(

@@ -24,7 +24,14 @@ from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import EvalConfig
 
 
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
+"""场景协议版本。
+
+v3:补上行为合同——``expected_tool_arguments``(工具实际入参)、
+``forbidden_tool_calls``(连尝试都不允许)、``turn_expectations``(逐轮答复),
+使"最终状态对"与"过程对"可以分开判。v2 及以前的场景没有这些字段,
+它们的指纹因此全部失效:同一题目在新旧协议下不可比。
+"""
 
 
 class Message(BaseModel):
@@ -170,6 +177,54 @@ class ResponseFact(BaseModel):
     source: Literal["tool_result", "final_state"]
 
 
+class ToolArgumentExpectation(BaseModel):
+    """对某个 Tool 实际入参的断言。
+
+    ``field`` 取 Tool 归一化后的模型可见字段名(如 ``target_price`` /
+    ``reason`` / ``delta``),``value`` 为期望值。数值按十进制比较,其余按
+    去空白后的字面比较。
+
+    ``scope`` 决定这条期望约束几次调用:
+
+    - ``any``(缺省):存在一次调用满足即可。适合"多条路径都可能"的字段;
+    - ``all``:**每次**携带该字段的调用都必须满足。用于单一写目标的场景
+      ——"先按错价写一次失败,再按对价写一次成功"最终状态是对的,但中间那次
+      错价写不该被忽略。
+
+    同一 Tool 同一字段的多条 ``any`` 期望要求分别落在**不同**调用上
+    (multiset 匹配),因此两条相反的期望不能被一次调用同时满足。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool: str = Field(min_length=1)
+    field: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    scope: Literal["any", "all"] = "any"
+
+
+class TurnExpectation(BaseModel):
+    """单轮答复断言:某条用户消息之后、下一条用户消息之前的答复。
+
+    ``after_message_index`` 指向 ``Scenario.messages`` 中的用户消息下标;该
+    轮答复由这段区间内的全部 Assistant 消息拼接而成。多轮场景下"第一轮说
+    对了、第二轮没提"与"两轮都提了"必须能区分开——只取最终答复会把两者
+    都算通过。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    after_message_index: int = Field(ge=0)
+    expected_facts: tuple[ResponseFact, ...] = ()
+    forbidden_facts: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_declared(self) -> TurnExpectation:
+        if not self.expected_facts and not self.forbidden_facts:
+            raise ValueError("turn expectation must declare facts to check")
+        return self
+
+
 class Scenario(BaseModel):
     """版本化 Eval 场景:一次评测的最小完整定义。
 
@@ -195,6 +250,9 @@ class Scenario(BaseModel):
     tool_order_constraints: tuple[ToolOrderConstraint, ...] = ()
     expected_response_facts: tuple[ResponseFact, ...] = ()
     forbidden_response_facts: tuple[str, ...] = ()
+    expected_tool_arguments: tuple[ToolArgumentExpectation, ...] = ()
+    forbidden_tool_calls: tuple[str, ...] = ()
+    turn_expectations: tuple[TurnExpectation, ...] = ()
 
     @model_validator(mode="after")
     def validate_interaction_message_indexes(self) -> Scenario:
@@ -208,6 +266,30 @@ class Scenario(BaseModel):
         for index in indexes:
             if index >= len(self.messages) or self.messages[index].role != "user":
                 raise ValueError("interaction message_index must reference a user message")
+        return self
+
+    @model_validator(mode="after")
+    def validate_contract_assertions(self) -> Scenario:
+        """合同断言必须自洽:轮次指向用户消息,禁止与要求不指向同一 Tool。"""
+        for expectation in self.turn_expectations:
+            index = expectation.after_message_index
+            if index >= len(self.messages) or self.messages[index].role != "user":
+                raise ValueError(
+                    "turn expectation must reference a user message"
+                )
+        if len({item.after_message_index for item in self.turn_expectations}) != len(
+            self.turn_expectations
+        ):
+            raise ValueError("each user message can carry at most one turn expectation")
+        asserted_tools = {item.tool for item in self.expected_tool_arguments}
+        conflicts = asserted_tools & set(self.forbidden_tool_calls)
+        if conflicts:
+            raise ValueError(
+                "tools cannot be both asserted and forbidden: "
+                + ", ".join(sorted(conflicts))
+            )
+        if self.turn_expectations and len(self.messages) < 2:
+            raise ValueError("turn expectations require a multi-message scenario")
         return self
 
 
@@ -246,9 +328,24 @@ def benchmark_fingerprint(scenario: Scenario, config: EvalConfig) -> str:
     )
 
 
-def system_fingerprint(manifest: EvalCapabilityManifest) -> str:
-    """被测系统指纹直接使用已冻结 Manifest 的能力指纹。"""
-    return manifest.capability_fingerprint
+def system_fingerprint(
+    manifest: EvalCapabilityManifest, config: EvalConfig | None = None
+) -> str:
+    """被测系统指纹:冻结能力清单 + 评测时真实调用的模型端点。
+
+    能力清单来自 Runtime 库里的已发布行,不包含评测进程真实使用的 Provider
+    (真实模型评测会替换掉库里的 Mock 后端)。只哈希清单会让指纹描述一个
+    被替换掉的组件,因此把 ``config.model`` / ``config.base_url`` 一起纳入。
+    """
+    if config is None:
+        return manifest.capability_fingerprint
+    return _sha256(
+        {
+            "capability_fingerprint": manifest.capability_fingerprint,
+            "model": config.model,
+            "base_url": config.base_url,
+        }
+    )
 
 
 def protocol_fingerprint(

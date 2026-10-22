@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 from runtime.backend.protocol import AgentBackend
 from runtime.capabilities.validation import (
@@ -55,6 +55,20 @@ class AgentDefinition(BaseModel):
     context_policy: dict[str, Any] = {}
     loop_limits: dict[str, Any] = {}
 
+    @field_serializer(
+        "required_backend_capabilities",
+        "required_skill_keys",
+        "required_tool_keys",
+        "required_source_keys",
+    )
+    def _serialize_key_sets(self, value: frozenset[str]) -> list[str]:
+        """集合序列化为排序列表:``definition_hash`` 必须跨进程稳定。
+
+        ``frozenset`` 的迭代顺序随进程的字符串哈希种子变化,直接 dump 会让
+        同一定义的 ``definition_hash`` 每次启动都不同,版本不可复现。
+        """
+        return sorted(value)
+
 
 class SkillDefinition(BaseModel):
     """SkillVersion ``content_json`` 中影响组装的部分(架构文档 §3.4)。"""
@@ -66,6 +80,11 @@ class SkillDefinition(BaseModel):
     required_tool_keys: frozenset[str] = frozenset()
     required_source_keys: frozenset[str] = frozenset()
     prompt_fragments: dict[str, Any] = {}
+
+    @field_serializer("required_tool_keys", "required_source_keys")
+    def _serialize_key_sets(self, value: frozenset[str]) -> list[str]:
+        """集合序列化为排序列表,理由同 :class:`AgentDefinition`。"""
+        return sorted(value)
 
 
 class AgentVersionRecord(VersionedRecord):

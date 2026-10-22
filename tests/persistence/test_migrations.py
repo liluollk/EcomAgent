@@ -5,7 +5,6 @@
 """
 
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
@@ -49,12 +48,6 @@ _INSERT_RUN = sa.text(
     " VALUES (:id, :workspace_id, :session_id, :created_by_actor_id,"
     " :created_by_membership_id, :agent_version_id, :model_config_version_id, :status)"
 )
-_INSERT_RUN_JOB = sa.text(
-    "INSERT INTO run_jobs (id, workspace_id, run_id, kind, status, available_at)"
-    " VALUES (:id, :workspace_id, :run_id, 'ADVANCE_RUN', :status, :available_at)"
-)
-
-
 async def _seed_session(
     connection: Connection,
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
@@ -151,7 +144,6 @@ async def test_initial_migration_creates_runtime_tables(engine) -> None:
         "workspaces",
         "sessions",
         "runs",
-        "run_jobs",
         "agent_events",
         "memory_records",
         "integration_outbox",
@@ -255,74 +247,21 @@ async def test_same_session_cannot_have_two_active_runs(engine) -> None:
         await connection.rollback()
 
 
-async def test_same_run_cannot_have_two_active_jobs(engine) -> None:
-    """部分唯一索引 uq_active_job_per_run:同一 Run 最多一个 PENDING/LEASED Job。"""
+async def test_single_executor_migration_removes_run_jobs(engine) -> None:
+    """0006 迁移:删除 run_jobs,并把 run_attempts.worker_id 改名为 executor_id。"""
     async with engine.connect() as connection:
-        (
-            workspace_id,
-            actor_id,
-            membership_id,
-            session_id,
-            agent_version_id,
-            model_config_version_id,
-        ) = await _seed_session(connection)
-        run_id = uuid.uuid4()
-        first_job_id = uuid.uuid4()
-        second_job_id = uuid.uuid4()
-        available_at = datetime.now(UTC)
-
-        await connection.execute(
-            _INSERT_RUN,
-            _run_params(
-                run_id,
-                workspace_id,
-                session_id,
-                actor_id,
-                membership_id,
-                "QUEUED",
-                agent_version_id,
-                model_config_version_id,
-            ),
+        tables = await connection.run_sync(
+            lambda sync_conn: set(sa.inspect(sync_conn).get_table_names())
         )
-        await connection.execute(
-            _INSERT_RUN_JOB,
-            {
-                "id": first_job_id,
-                "workspace_id": workspace_id,
-                "run_id": run_id,
-                "status": "PENDING",
-                "available_at": available_at,
-            },
-        )
-        with pytest.raises(IntegrityError):
-            async with connection.begin_nested():
-                await connection.execute(
-                    _INSERT_RUN_JOB,
-                    {
-                        "id": second_job_id,
-                        "workspace_id": workspace_id,
-                        "run_id": run_id,
-                        "status": "PENDING",
-                        "available_at": available_at + timedelta(seconds=1),
-                    },
-                )
-
-        # 活动 Job 完成后,同一 Run 允许新的活动 Job。
-        await connection.execute(
-            sa.text("UPDATE run_jobs SET status = 'DONE' WHERE id = :id"),
-            {"id": first_job_id},
-        )
-        await connection.execute(
-            _INSERT_RUN_JOB,
-            {
-                "id": second_job_id,
-                "workspace_id": workspace_id,
-                "run_id": run_id,
-                "status": "PENDING",
-                "available_at": available_at,
-            },
-        )
-        await connection.rollback()
+        columns = {
+            column["name"]
+            for column in await connection.run_sync(
+                lambda sync_conn: sa.inspect(sync_conn).get_columns("run_attempts")
+            )
+        }
+    assert "run_jobs" not in tables
+    assert "executor_id" in columns
+    assert "worker_id" not in columns
 
 
 async def test_p1_migration_creates_inventory_location_tables(engine) -> None:

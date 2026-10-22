@@ -1,19 +1,21 @@
 # Runtime 执行状态与恢复设计
 
-> 版本：v0.2
-> 日期：2026-10-02
-> 状态：已确认
+> 版本：v0.3
+> 日期：2026-10-19
+> 状态：已确认（执行模型经 ADR-003 修订：单 API 进程、单 Runtime Executor）
 
 ## 1. 目标与边界
 
-本文定义 Agent Runtime 的逻辑执行单元、分层状态机、人工交互、写操作确认、任务租约、幂等与回查、事件交付及配置版本语义。本文是数据库建模、Worker、Runtime Eval 和故障注入测试的直接依据。
+本文定义 Agent Runtime 的逻辑执行单元、分层状态机、人工交互、写操作确认、并发控制、幂等与回查、事件交付及配置版本语义。本文是数据库建模、Run 执行器、Runtime Eval 和故障注入测试的直接依据。
+
+首版执行模型见 [ADR-003](ADR-003-首版执行模型.md)：单 API 进程、单 Runtime Executor，不使用 Job / 租约 / 心跳 / fencing token。本文中凡涉及"谁有权推进 Run"的表述，均以 ADR-003 为准。
 
 本文不定义商品价格规则、淘宝或抖音协议细节，也不定义前端视觉样式。业务 Agent 负责领域输入要求与 Policy，Runtime 只执行公开接口并维护通用状态。
 
 ## 2. 核心不变量
 
 1. 一条普通用户消息最多创建一个新的逻辑 Run。
-2. Input Request、Confirmation Request、Worker 重启、失败重试和租约接管只恢复原 Run。
+2. Input Request、Confirmation Request、进程重启和失败重试只恢复原 Run。
 3. 同一 Session 同一时刻最多存在一个非终态 Run；等待输入、等待确认和等待回查均算活动 Run。
 4. `CANCELLED` 是终态，不能恢复；系统故障恢复不等于用户取消后恢复。
 5. ToolCall 只有通过 Schema、业务输入、Access Control、Business Policy 和 Execution Mode 后才能执行。
@@ -21,7 +23,7 @@
 7. 同一逻辑写操作始终复用稳定 `operation_id` 和 idempotency key。
 8. 外部写入结果不确定时不得盲目重试。
 9. Runtime 状态与对应 AgentEvent 在同一数据库事务内提交。
-10. 失去租约的 Worker 不得继续提交 Runtime 状态。
+10. 同一 Run 同一时刻只允许一个推进者；`state_version` CAS 是唯一的并发裁决，落败方必须丢弃本地结果。
 
 ## 3. 实体语义
 
@@ -31,22 +33,22 @@ Session 是持续多轮对话的容器，保存消息、上下文摘要和当前
 
 ### 3.2 Run
 
-Run 是一次逻辑任务执行。普通用户消息创建新 Run；同一个 Run 可以经历多次 Worker 调度、人工等待、进程退出和恢复。
+Run 是一次逻辑任务执行。普通用户消息创建新 Run；同一个 Run 可以经历多次执行器推进、人工等待、进程退出和恢复。
 
 模型用自然语言询问后，本次 Run 正常结束；用户后续回复作为新的普通消息创建新 Run。只有结构化 Input Request 和 Confirmation Request 才挂起并恢复同一个 Run。
 
 ### 3.3 RunAttempt
 
-RunAttempt 表示 Worker 对一个 Run 的一次实际推进。每次领取 Run Job 创建一个新 Attempt，并递增 `attempt_no`。Attempt 用于区分重试和进程接管，不改变 Run 的逻辑身份，也不得生成新的 `operation_id`。
+RunAttempt 表示执行器对一个 Run 的一次实际推进。每次 `RunExecutor` 以 CAS 把 Run 从 `QUEUED` 推入 `RUNNING` 时创建一个新 Attempt，并递增 `attempt_no`。Attempt 用于区分重试和进程重启，不改变 Run 的逻辑身份，也不得生成新的 `operation_id`。`executor_id` 只用于事后归因，不参与互斥。
 
 RunAttempt 状态：
 
 | 状态 | 含义 |
 |---|---|
-| `RUNNING` | Worker 已领取 Job 并开始推进 |
+| `RUNNING` | 执行器已 CAS 领取并开始推进 |
 | `SUCCEEDED` | 本次推进到达新的持久边界或终态 |
-| `FAILED` | 本次推进以确定性错误结束 |
-| `ABANDONED` | Worker 丢失或租约过期，Attempt 不再有提交权 |
+| `FAILED` | 本次推进以确定性错误结束（失败码取自异常类型或结果） |
+| `ABANDONED` | 进程在推进中退出；由下一次启动的恢复扫描收尾（`failure_code=EXECUTOR_RESTART`） |
 
 ### 3.4 ToolCall 与 Operation
 
@@ -58,11 +60,11 @@ ToolCall 是模型提出的一次工具调用。写 Tool 在所有必需参数�
 
 | 状态 | 含义 |
 |---|---|
-| `QUEUED` | 已有可领取的 Run Job |
-| `RUNNING` | Worker 正在推进 Agent Loop 或 ToolCall |
+| `QUEUED` | 等待执行器领取推进（数据库即队列） |
+| `RUNNING` | 执行器正在推进 Agent Loop 或 ToolCall |
 | `WAITING_INPUT` | 等待 Input Request 回答 |
 | `WAITING_CONFIRMATION` | 等待写操作确认或拒绝 |
-| `WAITING_RECONCILIATION` | ToolCall 结果不确定，等待回查 |
+| `WAITING_RECONCILIATION` | 存在不确定的外部写，等待回查 |
 | `COMPLETED` | Run 正常结束 |
 | `FAILED` | Run 以确定错误或无法自动解决的不确定结果结束 |
 | `CANCELLED` | 用户取消，终态且不可恢复 |
@@ -71,7 +73,7 @@ ToolCall 是模型提出的一次工具调用。写 Tool 在所有必需参数�
 
 | 当前状态 | 允许迁移到 | 触发条件 |
 |---|---|---|
-| `QUEUED` | `RUNNING` | Worker 成功领取 Job |
+| `QUEUED` | `RUNNING` | 执行器 CAS 领取成功 |
 | `QUEUED` | `CANCELLED` | 用户在执行前取消 |
 | `RUNNING` | `WAITING_INPUT` | 创建 Input Request |
 | `RUNNING` | `WAITING_CONFIRMATION` | 创建 Confirmation Request |
@@ -79,13 +81,13 @@ ToolCall 是模型提出的一次工具调用。写 Tool 在所有必需参数�
 | `RUNNING` | `COMPLETED` | Agent 返回最终结果 |
 | `RUNNING` | `FAILED` | 确定性不可恢复错误 |
 | `RUNNING` | `CANCELLED` | 取消信号生效且当前无不可中断提交 |
-| `WAITING_INPUT` | `QUEUED` | 合法回答写入并创建恢复 Job |
+| `WAITING_INPUT` | `QUEUED` | 合法回答写入，Run 重新入队 |
 | `WAITING_INPUT` | `FAILED` | 请求过期 |
 | `WAITING_INPUT` | `CANCELLED` | 用户取消 Run |
-| `WAITING_CONFIRMATION` | `QUEUED` | 接受或拒绝结果写入，恢复 Agent Loop |
+| `WAITING_CONFIRMATION` | `QUEUED` | 接受或拒绝结果写入，Run 重新入队 |
 | `WAITING_CONFIRMATION` | `FAILED` | 请求过期 |
 | `WAITING_CONFIRMATION` | `CANCELLED` | 用户取消 Run |
-| `WAITING_RECONCILIATION` | `QUEUED` | 回查得到 `APPLIED` 或确定 `NOT_APPLIED` 且允许继续 |
+| `WAITING_RECONCILIATION` | `QUEUED` | 回查得到 `APPLIED` 或确定 `NOT_APPLIED` 且允许继续；执行器随后推进同一 Run |
 | `WAITING_RECONCILIATION` | `FAILED` | 回查预算耗尽或 Adapter 无法消除不确定性 |
 
 终态 `COMPLETED`、`FAILED`、`CANCELLED` 不允许迁移。非法迁移返回冲突错误并记录审计事件。
@@ -114,18 +116,18 @@ ToolCall 是模型提出的一次工具调用。写 Tool 在所有必需参数�
 - `EXECUTING → SUCCEEDED / FAILED / UNKNOWN`；
 - `UNKNOWN → SUCCEEDED / FAILED / VALIDATING`；只有回查确定 `NOT_APPLIED` 且 Adapter 策略允许时才能回到 `VALIDATING`，并在重新通过完整 PreToolUse 后执行。
 
-### 4.3 RunJob 状态
+### 4.3 执行器调度指令 `RunNextStep`
 
-| 状态 | 含义 |
+首版没有 `RunJob` 表。执行器与驱动方之间只用两条指令通信：
+
+| 指令 | 含义 |
 |---|---|
-| `PENDING` | 可以领取，受 `available_at` 控制 |
-| `LEASED` | 被一个 Worker 持有 |
-| `DONE` | 本 Job 已成功推进到下一个持久边界 |
-| `DEAD` | 超过重试预算或错误不可重试 |
+| `ADVANCE` | 本次推进到达可继续的边界，Run 退回 `QUEUED` 交给下一轮推进（如 `NOT_APPLIED` 重试） |
+| `RECONCILE` | 存在不确定的外部写，必须先回查再决定是否继续 |
 
-暂时性错误不使用单独的 `RETRYABLE` 状态。Worker 将 Job 从 `LEASED` 改回 `PENDING`，递增 `attempt_count`，写入 `available_at` 和分类后的错误码。
+轮询不需要单独的指令：`QUEUED` Run 就是待办队列，执行器的兜底循环按 `created_at` 顺序扫描并 CAS 领取。
 
-每个 Run 同一时刻最多存在一个 `PENDING` 或 `LEASED` Job。
+失败预算由 `RunAttempt` 承担：同一 Run 连续 `max_attempts` 次推进失败后落 `FAILED`，不再自动重试。`RunAttempt` 行数因此同时是审计记录与预算计数依据。
 
 ### 4.4 Request 状态
 
@@ -133,7 +135,7 @@ Input Request：`PENDING / ANSWERED / EXPIRED / CANCELLED`。
 
 Confirmation Request：`PENDING / ACCEPTED / REJECTED / EXPIRED / CANCELLED`。
 
-两类 Request 不共用 `ACCEPTED/REJECTED` 语义。同一请求只能从 `PENDING` 处理一次；重复提交返回幂等结果，不重复创建 Job。
+两类 Request 不共用 `ACCEPTED/REJECTED` 语义。同一请求只能从 `PENDING` 处理一次；重复提交返回幂等结果，不产生第二次推进。
 
 ## 5. Input Request
 
@@ -207,20 +209,27 @@ supports_reconciliation: bool
 
 Runtime 不宣称任意外部系统上的 exactly-once。对支持幂等或可靠回查的 Adapter，目标是避免重复逻辑写入；对无法消除的不确定性，优先停止而不是猜测成功或重复执行。
 
-## 8. Worker 租约与并发控制
+## 8. 单执行器与并发控制
 
-RunJob 保存 `lease_owner`、随机 `lease_token`、`lease_expires_at`、`attempt_count` 和 `available_at`。Worker 领取 Job 时使用 PostgreSQL 行锁或条件更新，领取成功后创建 RunAttempt。
+首版只有一个 Run 执行器，与 API 同进程（ADR-003）。没有 Job 表、租约、心跳和 fencing token，并发控制只剩两层：
 
-所有状态提交必须同时满足：
+1. **`Run.state_version` CAS（每次推进）**。所有状态迁移都是
+   `UPDATE runs SET status = ?, state_version = state_version + 1
+   WHERE id = ? AND workspace_id = ? AND state_version = ? [AND status = ?]`。
+   零行更新表示有人先推进，本次结果必须丢弃。它保护的是进程内并发路径
+   （路由唤醒与兜底扫描同时命中、连续两次确认、恢复扫描与请求内推进重叠），
+   不是为多实例准备的。
+2. **进程级单写者锁（每次启动）**。`SingleWriterLock` 以 PostgreSQL advisory lock
+   断言同库只有一个执行器；获取失败直接拒绝启动，不降级为只读。它只在启动时
+   竞争一次，不参与任务调度，也不需要续期。
 
-```text
-job.lease_token == worker_lease_token
-run.state_version == expected_state_version
-```
+推进过程中不持有数据库长事务：AgentLoop 在模型调用与 Tool 调用前提交 checkpoint，
+`OperationService.begin` / `record_result` 各是一个短事务。因此"执行器是否仍持有
+执行资格"不再是一个需要续期的状态，需要保证的只是每个提交都带上正确的
+`state_version` 与"Run 仍可执行"的前置条件。
 
-更新成功后递增 `state_version`。条件不满足说明租约已丢失或状态被其他执行者推进，旧 Worker 必须丢弃本地结果。
-
-Worker 在模型调用和 Tool 外部调用期间不持有数据库长事务，并通过心跳续租。调用写 Tool 前再次检查租约；已经发出的网络请求无法被租约撤回，因此仍必须依赖稳定 `operation_id`、幂等和回查控制结果。
+已经发出的外部请求无法被撤回，因此写入正确性仍依赖稳定 `operation_id`、平台
+幂等键与回查（§7），与执行器数量无关。
 
 ## 9. AgentEvent 交付
 
@@ -282,21 +291,21 @@ Provider 可移植性只承诺共同能力集合内的行为一致，不承诺�
 
 - 用户取消将 Run 置为 `CANCELLED`，取消仍在等待的 Request 和未执行的 ToolCall；
 - 对已发出的外部写请求，取消不能伪装成“未执行”，必须先进入回查语义；
-- Worker 退出或租约过期由新 Attempt 接管同一个 Run；
+- 进程退出后由启动恢复扫描接管同一个 Run，新 Attempt 记录推进，遗留 Attempt 标为 `ABANDONED`；
 - Input/Confirmation 过期导致 Run `FAILED`，错误码分别为 `INPUT_EXPIRED` 或 `CONFIRMATION_EXPIRED`；
-- ToolCall `UNKNOWN` 时由 Reconciliation Job 回查；达到回查预算仍不确定时，Run `FAILED`，但 ToolCall 保留 `UNKNOWN` 作为权威事实。
+- 存在 `EXECUTING` / `UNKNOWN` Operation 时由执行器先回查再推进；达到回查预算仍不确定时，Run `FAILED`，但 ToolCall 保留 `UNKNOWN` 作为权威事实。
 
 ## 14. 验收用例
 
 以下确定性用例必须全部通过：
 
 1. 普通用户消息创建新 Run，结构化交互恢复原 Run；
-2. Worker 重启产生新 RunAttempt，但不改变 Run、ToolCall 和 operation ID；
+2. 进程重启产生新 RunAttempt，但不改变 Run、ToolCall 和 operation ID；
 3. 同一 Session 存在等待中 Run 时拒绝创建普通 Run；
 4. Input 回答只能修改获准字段，恢复后重新执行完整 PreToolUse；
 5. Confirmation 参数、资源版本或 Policy 变化后旧确认失效；
 6. 权限在确认后被撤销时，写操作被拒绝；
-7. 失去 fencing token 的 Worker 无法提交状态；
+7. 同一 Run 的第二个推进者被 `state_version` CAS 拒绝，无法提交状态；
 8. Tool 已写入但响应丢失时先回查，不直接重试；
 9. 不可幂等且不可回查的 Adapter 在 `UNKNOWN` 后不重试；
 10. Event 重复投递时客户端可按 event ID 去重，断线后可按 cursor 重放；
@@ -309,14 +318,17 @@ Provider 可移植性只承诺共同能力集合内的行为一致，不承诺�
 
 ## 15. 实现验证状态
 
-以下崩溃恢复目标已由 `tests/runtime/integration/test_crash_recovery.py`（计划 02 Task 10，crash_harness 故障注入 + 真实 Runtime 服务与真库）验证；本节仅为状态标记，不改变上述设计语义。
+以下崩溃恢复目标已由 `tests/runtime/integration/test_crash_recovery.py`（计划 02 Task 10，crash_harness 故障注入 + 真实 Runtime 服务与真库）按 ADR-003 的执行模型验证；本节仅为状态标记，不改变上述设计语义。
 
 | 已验证目标（对应本文小节/验收用例） | 验证测试 |
 |---|---|
-| 执行前 Worker 退出：租约被回收、Run 回 `QUEUED` 可重新领取、Attempt `ABANDONED`（§8、§13、验收 2） | `test_worker_exit_before_execution_requeues_run` |
-| Operation 已改 `EXECUTING` 后 Worker 退出：Attempt `ABANDONED`，恢复 Job 为 `RECONCILE_OPERATION`（§8、§13） | `test_executing_operation_exit_schedules_reconcile_job` |
+| 执行前进程崩溃：Run 停在 `RUNNING`，重启扫描收尾 `ABANDONED` 并推进到 `COMPLETED`（§6、§13、验收 2） | `test_interrupted_run_recovers_and_completes` |
+| `EXECUTING` Operation 在进程退出后先回查，再恢复推进（§6、§13） | `test_executing_operation_exit_reconciles_before_resuming` |
 | 外部写入生效但响应丢失：先回查 `APPLIED`，不直接重试、无二次写（§7、§13、验收 8） | `test_response_loss_reconciles_without_second_write` |
-| 回查 `UNKNOWN → APPLIED`：预算内继续调度，确认后 Run 恢复推进（§4.1、§7） | `test_reconcile_unknown_then_applied_resumes_run` |
-| 失去 fencing token 的旧 Worker 无法提交状态：`LeaseStaleError` / complete `False`，无二次写（§8、验收 7） | `test_stale_fencing_token_rejected_without_second_write` |
+| 回查 `UNKNOWN → APPLIED`：预算内继续回查，消除不确定性后推进同一 Run（§4.1、§7） | `test_reconcile_unknown_then_applied_resumes_run` |
+| 同一 Run 的第二个推进者被 `state_version` CAS 拒绝（§8、验收 7） | `test_second_advance_is_blocked_by_state_version_cas` |
 | ToolResult Schema 失败不清除已发生写入：`APPLIED` 保持、`INVALID_TOOL_RESULT`、`retry_allowed=False`、权威事实不改写（§7） | `test_schema_failure_keeps_applied_write_and_authoritative_fact` |
 | Context 压缩不丢 Protected Context：安全规则、当前用户消息、待确认 fingerprint 存活（Task 5 Protected 语义） | `test_compression_preserves_protected_context` |
+| 单写者锁拒绝第二个执行器（ADR-003 §5.2） | `test_single_writer.py::test_second_executor_is_rejected_while_lock_is_held` |
+
+恢复类评测用例（`eval/recovery_suite.py`）：`executor-exit-before-write`、`executor-restart-after-confirmation` 覆盖"先回查再推进"的顺序；`eval/runtime_suite.py` 的 `write-result-rejected-after-cancel` 覆盖"取消后迟到的写结果不得落库"。

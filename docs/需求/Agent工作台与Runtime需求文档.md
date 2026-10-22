@@ -84,7 +84,7 @@ Agent 工作台 / FastAPI
     Workspace、成员、权限、版本、Secret、配置
     ↓
 Runtime 执行内核
-    Session、Run、RunJob、状态机、恢复、Request、AgentEvent
+    Session、Run、RunAttempt、状态机、恢复、Request、AgentEvent
     └── Agent Harness
         Context、Prompt、AgentBackend、Agent Loop、Tool 暴露与结果回填
     ↓
@@ -129,8 +129,8 @@ Runtime 公共接口、Harness 和扩展协议以 `docs/架构/Runtime核心接�
 
 - Workspace 对应一个品牌或业务单元，管理渠道、多个淘宝/抖音店铺、业务规则、当前绑定的商品运营 Agent 版本与 Sources；产品入口不提供业务 Agent 选择或自动路由；
 - Session 管理一次持续对话的消息与上下文，可以包含多个 Run；
-- 一条普通用户消息创建一个新的逻辑 Run；Input Request、Confirmation Request、Worker 重启、失败重试和租约接管只恢复原 Run，不创建新 Run；
-- 每次 Worker 实际调度原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；
+- 一条普通用户消息创建一个新的逻辑 Run；Input Request、Confirmation Request、执行器重启、失败重试只恢复原 Run，不创建新 Run；
+- 执行器每次推进原 Run 都记录为独立 RunAttempt，通过递增的 `attempt_no` 区分；executor_id 只用于事后归因，不参与互斥；
 - 同一 Session 同一时刻最多存在一个活动 Run，避免并发执行污染上下文或重复产生副作用；
 - 不同 Session 的消息、确认和工具结果严格隔离；
 - 首版 Session 为创建者私有，其他成员不能读取、继续或处理其 Request；WorkspaceOwner 通过独立审计视图查看脱敏事件；
@@ -255,8 +255,8 @@ Runtime 使用统一 AgentEvent 表达：
 
 ## 8. 运行状态与恢复
 
-- Run、RunAttempt、ToolCall、RunJob、Input Request 和 Confirmation Request 分别维护状态，不能共用一套含糊状态；完整状态与合法迁移以 `docs/架构/Runtime执行状态与恢复设计.md` 为准；
-- `CANCELLED` 是不可恢复的终态；“中断恢复”指 Worker 退出、租约过期或外部调用结果待确认，不等于用户取消；
+- Run、RunAttempt、ToolCall、Operation、Input Request 和 Confirmation Request 分别维护状态，不能共用一套含糊状态；完整状态与合法迁移以 `docs/架构/Runtime执行状态与恢复设计.md` 为准；
+- `CANCELLED` 是不可恢复的终态；“中断恢复”指执行器进程退出或外部调用结果待确认，不等于用户取消；
 - `INPUT_REQUIRED` 和 `RUN_RESUMED` 是 AgentEvent，不是持久状态；`RESUMED` 只描述一次状态迁移；
 - Runtime 在模型决策、输入挂起、确认挂起、工具执行前后和任务结束时保存关键状态；
 - 恢复依据持久化 Session 和 ToolCall 状态，不依赖模型“记住”此前操作；
@@ -267,7 +267,7 @@ Runtime 使用统一 AgentEvent 表达：
 - 对既不支持幂等键、又无法可靠回查的 Adapter，`UNKNOWN` 后禁止自动重试写入，不宣称 exactly-once；
 - 非法状态迁移被拒绝，并生成可审计事件。
 
-API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job 表，Worker 通过数据库租约领取任务。租约必须携带 fencing token，Worker 提交状态时使用 token 与 `state_version` 做 CAS；失去租约的 Worker 不得继续提交。模型或 Tool 外部调用不得发生在长数据库事务内；租约、稳定 `operation_id`、幂等键和写后回查共同控制恢复时的重复写风险。
+首版不依赖 Redis，也不引入独立 Worker：数据库里 `QUEUED` 的 Run 本身就是待办，唯一 Runtime Executor 在 API 进程内以 `state_version` CAS 领取推进，进程启动时用 advisory lock 断言单写者。模型或 Tool 外部调用不得发生在长数据库事务内；稳定 `operation_id`、幂等键和写后回查共同控制恢复时的重复写风险。
 
 这些能力用于实现运行状态管理和任务中断后的会话恢复，不等同于用户取消后继续执行。
 
@@ -289,7 +289,7 @@ API 与 Worker 不依赖 Redis：待执行任务写入 PostgreSQL 的 Run Job �
 - 展示 ToolCall、ToolResult 和当前执行状态；
 - 展示 Input Request 并按 Schema 收集回答；
 - 展示 Confirmation Request，支持确认或拒绝写操作；
-- 支持取消活动 Run；Worker 异常、租约过期和待处理交互由 Runtime 按状态恢复；
+- 支持取消活动 Run；执行器异常退出和待处理交互由 Runtime 按持久状态恢复；
 - 展示异常原因和最终结果。
 
 ### 9.3 前端边界
@@ -421,8 +421,7 @@ adapters/
     langfuse/           # Trace 与 Eval 集成
 
 apps/
-    api/                # FastAPI 命令、查询与事件接口
-    worker/             # PostgreSQL Job Worker 与 Runtime
+    api/                # FastAPI 命令、查询与事件接口；进程内 Run 执行器随 lifespan 启停
     workbench/          # React + TypeScript Agent 工作台
 
 eval/
@@ -444,14 +443,14 @@ docs/
 ## 13. 技术选型
 
 - Runtime：Python 3.12、Pydantic v2、asyncio；
-- Runtime：FastAPI、WebSocket、独立 Runtime Worker；
+- Runtime：FastAPI、WebSocket，Run 执行器与 API 同进程（ADR-003）；
 - Agent 工作台：React、TypeScript；
 - 能力协议：MCP、本地 Python Tool；业务平台使用代码 Adapter；
 - 状态存储：PostgreSQL、SQLAlchemy 2、Alembic；
 - 长期记忆：Mem0 OSS、pgvector、`BAAI/bge-small-zh-v1.5`；
 - 知识库：WeKnora，通过 MCP 接入；
 - 可观测与实验：Langfuse；
-- 任务领取：PostgreSQL Run Job 与租约，不引入 Redis；
+- 任务领取：PostgreSQL 中的 QUEUED Run（进程内单执行器推进），不引入 Redis；
 - 测试：pytest；
 - Eval：独立 Scenario、Runner、Scorer 和 Report。
 
@@ -470,7 +469,7 @@ docs/
 9. 用户补充信息后必须重新执行完整校验，不能从 `WAITING_INPUT` 直接进入 Tool 执行；
 10. 对支持幂等或可靠回查的 Adapter，恢复不得产生重复逻辑写入；对无法消除不确定性的 Adapter，系统必须保持 `UNKNOWN` 并禁止盲目重试；
 11. Runtime Eval 与商品运营 Agent Eval 可以独立运行和报告；
-12. API 进程重启不丢失待执行 Run，Worker 可通过 PostgreSQL 租约继续领取任务；
+12. API 进程重启不丢失待执行 Run，启动扫描接管非终态 Run 并继续推进；
 13. Mem0、WeKnora 或 Langfuse 单独不可用时，不得破坏 Runtime 权威状态和安全边界；
 14. Runtime 确定性不变量、关键工作台 E2E 和故障恢复用例分别验证；Safety 报告危险尝试、拦截和实际危险副作用的计数及适用分母；
 15. 模型 Eval 固定模型、温度、Prompt/Skill/Tool 版本、初始数据、重复次数和 Scorer；Held-out 任务完成率在首次有效基线后写入版本化发布门槛，正式比较期间协议和基线保持不变；

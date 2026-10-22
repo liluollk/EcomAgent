@@ -8,11 +8,20 @@
 - 无基础设施错误(``totals.infrastructure_errors == 0`` 且报告的
   ``infrastructure_errors`` 列表为空);
 - ``dataset.split`` 为 ``core``;
-- 真实分母 > 0,且任务完成率基线可读。
+- 真实分母 > 0,且任务完成率基线可读;
+- **逐例结果完整**:每个 case 的重复次数一致且 > 0;给了 ``--dataset`` 时
+  报告的场景集合必须与冻结数据集完全一致——少跑一个场景会让分母变小、
+  完成率虚高,不能冻成基线;
+- **全部用例通过**——默认拒绝把带失败的版本冻成基线;确实要接受已知失败时
+  必须显式 ``allow_known_failures=True``,失败项会写进
+  ``derived_from_report.known_failures``,不能被静默覆盖。
 
 派生内容:基线取报告 ``metrics`` 分项比率原值;``hard_rules`` 固化规则
-快照(任务完成率容差 ±2 个百分点);
-``derived_from_report`` 记录来源报告摘要(totals/dataset 快照)。
+快照(任务完成率容差 ±2 个百分点,并要求报告声明 Runtime/E2E 通过、附带
+独立 Safety 报告);``case_outcomes`` 冻结逐例通过结果,``case_passes``
+冻结逐例通过次数(已知失败从 2/3 恶化到 1/3 也要能被发现),供后续 Gate
+逐例比对,避免平均分掩盖单例退化;``derived_from_report`` 记录来源报告摘要
+(totals/dataset 快照)与显式接受的失败项。
 
 CLI::
 
@@ -33,6 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from eval.gates.check_release import case_outcomes, case_passes
 from eval.gates.schema import (
     Baselines,
     DerivedFromReport,
@@ -42,16 +52,45 @@ from eval.gates.schema import (
 )
 
 
+def _execution_counts(report: Mapping[str, Any]) -> dict[str, int]:
+    """报告里每个 case 的执行次数(用于重复次数与场景完整性校验)。"""
+    counts: dict[str, int] = {}
+    cases = report.get("cases")
+    if not isinstance(cases, list):
+        return counts
+    for case in cases:
+        if not isinstance(case, Mapping):
+            continue
+        case_id = case.get("case_id")
+        if isinstance(case_id, str):
+            counts[case_id] = counts.get(case_id, 0) + 1
+    return counts
+
+
 class BaselineDerivationError(Exception):
     """报告不具备基线派生资格:拒绝派生(错误消息列出全部不合格项)。"""
 
 
 def derive_baseline(
-    report: Mapping[str, Any], *, gate_version: str = "v1"
+    report: Mapping[str, Any],
+    *,
+    gate_version: str = "v1",
+    allow_known_failures: bool = False,
+    expected_case_ids: Sequence[str] | None = None,
+    require_safety_evidence: bool = True,
 ) -> ReleaseGate:
-    """校验报告资格并派生 :class:`ReleaseGate`;不合格即抛出明确错误。"""
+    """校验报告资格并派生 :class:`ReleaseGate`;不合格即抛出明确错误。
+
+    ``expected_case_ids``(通常来自冻结数据集)用于校验报告是否真的跑全了:
+    报告少跑一整个场景,完成率会因分母变小而虚高,必须拒绝。
+    """
     totals = _mapping(report.get("totals"))
     metrics = _mapping(report.get("metrics"))
+    outcomes = case_outcomes(report)
+    passes = case_passes(report)
+    known_failures = tuple(
+        sorted(case_id for case_id, passed in outcomes.items() if not passed)
+    )
     problems: list[str] = []
 
     fingerprint = report.get("benchmark_fingerprint")
@@ -80,6 +119,45 @@ def derive_baseline(
     if not is_metric_number(task_completion):
         problems.append("metrics.task_completion_rate is missing or not numeric")
 
+    if known_failures and not allow_known_failures:
+        problems.append(
+            "core report has failing cases ("
+            + ", ".join(known_failures)
+            + "); pass allow_known_failures to freeze them explicitly"
+        )
+
+    # -- 逐例完整性:分母变小会让完成率虚高 ------------------------------
+    execution_counts = _execution_counts(report)
+    repetitions: int | None = None
+    if not execution_counts:
+        problems.append("report contains no per-case results")
+    else:
+        distinct = set(execution_counts.values())
+        if len(distinct) != 1:
+            problems.append(
+                "report has uneven repetition counts per case ("
+                + ", ".join(
+                    f"{case_id}={count}"
+                    for case_id, count in sorted(execution_counts.items())
+                )
+                + ")"
+            )
+        else:
+            repetitions = distinct.pop()
+            if repetitions <= 0:
+                problems.append("report has zero executions for some case")
+    if expected_case_ids is not None:
+        expected = set(expected_case_ids)
+        reported = set(execution_counts)
+        missing = sorted(expected - reported)
+        unexpected = sorted(reported - expected)
+        if missing:
+            problems.append("report is missing dataset cases: " + ", ".join(missing))
+        if unexpected:
+            problems.append(
+                "report contains cases outside the dataset: " + ", ".join(unexpected)
+            )
+
     if problems:
         raise BaselineDerivationError("; ".join(problems))
 
@@ -92,7 +170,11 @@ def derive_baseline(
         baselines=Baselines(
             task_completion_rate=task_completion,
         ),
-        hard_rules=HardRules(),
+        hard_rules=HardRules(require_safety_evidence=require_safety_evidence),
+        case_outcomes=outcomes,
+        case_passes=passes,
+        repetitions=repetitions,
+        scenario_count=len(outcomes),
         derived_from_report=DerivedFromReport(
             report_schema_version=(
                 schema_version if isinstance(schema_version, int) else None
@@ -101,6 +183,7 @@ def derive_baseline(
             benchmark_fingerprint=fingerprint,
             totals=totals,
             dataset=dict(dataset) if isinstance(dataset, dict) else None,
+            known_failures=known_failures,
         ),
         created_at=datetime.now(UTC),
     )
@@ -115,6 +198,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", required=True, help="path of the source JSON report")
     parser.add_argument("--output", required=True, help="path of the gate JSON to write")
     parser.add_argument("--gate-version", default="v1", help="gate version label")
+    parser.add_argument(
+        "--allow-known-failures",
+        action="store_true",
+        help="freeze a baseline that still has failing cases (recorded in the gate)",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="path of the frozen dataset YAML; when given, the report must "
+        "cover exactly these case ids",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -132,8 +226,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
+    expected_case_ids: list[str] | None = None
+    if args.dataset is not None:
+        from pathlib import Path as _Path
+
+        from eval.dataset_loader import load_dataset
+
+        try:
+            expected_case_ids = [
+                scenario.id for scenario in load_dataset(_Path(args.dataset))
+            ]
+        except (OSError, ValueError) as error:
+            print(
+                f"derive_baseline: cannot load dataset {args.dataset!r}: {error}",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
-        gate = derive_baseline(document, gate_version=args.gate_version)
+        gate = derive_baseline(
+            document,
+            gate_version=args.gate_version,
+            allow_known_failures=args.allow_known_failures,
+            expected_case_ids=expected_case_ids,
+        )
     except BaselineDerivationError as error:
         print(
             "derive_baseline: report is not eligible for baseline derivation: "
@@ -156,6 +272,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"gate_version={gate.gate_version}")
     print(f"benchmark_fingerprint={gate.benchmark_fingerprint}")
     print(f"task_completion_rate={_rate_text(gate.baselines.task_completion_rate)}")
+    if gate.derived_from_report.known_failures:
+        print(
+            "known_failures=" + ", ".join(gate.derived_from_report.known_failures)
+        )
     print(f"written: {output}")
     return 0
 

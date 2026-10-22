@@ -1,0 +1,72 @@
+{
+  "gate_version": "v1",
+  "benchmark_fingerprint": "e74e6754af3fea9e8ada035b78aec2eae203f8d74b2b4dd0ff27f72f90c9c90f",
+  "baselines": {
+    "task_completion_rate": 0.9895833333333334
+  },
+  "hard_rules": {
+    "task_completion_tolerance": 0.02,
+    "require_attestations": true
+  },
+  "case_outcomes": {
+    "core-composite-001": true,
+    "core-composite-002": true,
+    "core-composite-003": true,
+    "core-composite-004": true,
+    "core-inventory-001": true,
+    "core-listing-001": true,
+    "core-multistore-001": true,
+    "core-multistore-002": false,
+    "core-multistore-003": true,
+    "core-multistore-004": true,
+    "core-multistore-005": true,
+    "core-multistore-006": true,
+    "core-multiturn-001": true,
+    "core-multiturn-002": true,
+    "core-multiturn-003": true,
+    "core-multiturn-004": true,
+    "core-read-001": true,
+    "core-read-002": true,
+    "core-read-003": true,
+    "core-read-004": true,
+    "core-relative-001": true,
+    "core-relative-002": true,
+    "core-relative-003": true,
+    "core-relative-004": true,
+    "core-relative-005": true,
+    "core-relative-006": true,
+    "core-write-001": true,
+    "core-write-002": true,
+    "core-write-003": true,
+    "core-write-004": true,
+    "core-write-005": true,
+    "core-write-006": true
+  },
+  "derived_from_report": {
+    "report_schema_version": 5,
+    "report_type": "product_suite_eval",
+    "benchmark_fingerprint": "e74e6754af3fea9e8ada035b78aec2eae203f8d74b2b4dd0ff27f72f90c9c90f",
+    "totals": {
+      "scenarios": 32,
+      "executions": 96,
+      "completed": 96,
+      "failed": 0,
+      "infrastructure_errors": 0,
+      "skipped": 0,
+      "scored": 96,
+      "protocol_valid": true,
+      "quality_denominator": 96
+    },
+    "dataset": {
+      "split": "core",
+      "dataset_dir": "C:\\Users\\L3553\\Desktop\\agent-runtime\\eval\\datasets\\product_operations",
+      "scenario_count": 32,
+      "frozen_sha256_verified": true,
+      "manifest_scorer_version": "v3"
+    },
+    "known_failures": [
+      "core-multistore-002"
+    ]
+  },
+  "created_at": "2026-10-22T07:17:17.117086Z"
+}

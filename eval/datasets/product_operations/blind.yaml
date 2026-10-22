@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenarios:
 - id: blind-read-001
   category: read_only_query
@@ -20,6 +20,7 @@ scenarios:
   - {value: SKU-9102, source: tool_result}
   - {value: '47.00', source: final_state}
   - {value: '53.00', source: final_state}
+  forbidden_tool_calls: [set_listing_price, adjust_inventory_quantity, publish_listing, unpublish_listing]
 
 - id: blind-write-001
   category: direct_write
@@ -30,6 +31,8 @@ scenarios:
   messages: [{role: user, content: 保持上架状态，把 store-sigma 的 SKU-9111 售价更新成 126.66 元。}]
   expected_final_state: {listings: [{store_id: store-sigma, sku: SKU-9111, price: '126.66', status: PUBLISHED}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-sigma/SKU-9111}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '126.66', scope: all}
 
 - id: blind-relative-001
   category: relative_change
@@ -41,6 +44,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-tau, sku: SKU-9121, price: '148.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-tau/SKU-9121}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '148.00', scope: all}
 
 - id: blind-relative-002
   category: relative_change
@@ -52,6 +57,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-upsilon, sku: SKU-9131, price: '100.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-upsilon/SKU-9131}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '100.00', scope: all}
 
 - id: blind-multistore-001
   category: multi_store_decision
@@ -70,6 +77,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-chi/SKU-9141}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '114.00', scope: all}
 
 - id: blind-multistore-002
   category: multi_store_decision
@@ -88,6 +97,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-psi/SKU-9151}]
   tool_order_constraints: [{before: compare_listing_prices, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '195.00', scope: all}
 
 - id: blind-composite-001
   category: composite_task
@@ -99,6 +110,8 @@ scenarios:
   expected_final_state: {listings: [{store_id: store-rho, sku: SKU-9161, price: '99.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-rho/SKU-9161}]
   tool_order_constraints: [{before: get_listing, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '99.00', scope: all}
 
 - id: blind-composite-002
   category: composite_task
@@ -117,6 +130,8 @@ scenarios:
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-sigma/SKU-9171}]
   tool_order_constraints: [{before: search_products, after: set_listing_price}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '73.50', scope: all}
 
 - id: blind-multiturn-001
   category: multi_turn
@@ -136,6 +151,16 @@ scenarios:
     - {store_id: store-upsilon, sku: SKU-9181, price: '101.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-tau/SKU-9181}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '95.00', scope: all}
+  turn_expectations:
+  - after_message_index: 0
+    expected_facts:
+    - {value: '92.00', source: tool_result}
+    - {value: '101.00', source: tool_result}
+  - after_message_index: 1
+    expected_facts:
+    - {value: '95.00', source: final_state}
 
 - id: blind-multiturn-002
   category: multi_turn
@@ -155,3 +180,9 @@ scenarios:
     - {store_id: store-chi, sku: SKU-9192, price: '156.00'}
     max_logical_writes: 1
   allowed_side_effects: [{tool: set_listing_price, target: store-phi/SKU-9191}]
+  expected_tool_arguments:
+  - {tool: set_listing_price, field: target_price, value: '139.90', scope: all}
+  turn_expectations:
+  - after_message_index: 1
+    expected_facts:
+    - {value: '139.90', source: final_state}

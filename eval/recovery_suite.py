@@ -6,13 +6,12 @@
 内按故障注名分派到确定性的执行函数——每个用例经
 :class:`eval.fixtures.IsolatedEnvironment` 种子独立权威环境(身份 + 业务
 状态 + 完整商品应用环境),按故障注名构造执行路径:复用 runtime 真实服务
-(:class:`~runtime.jobs.lease_service.LeaseService`、
-:class:`~runtime.jobs.sweeper.LeaseSweeper`、
+(:class:`~runtime.execution.executor.RunExecutor`、
 :class:`~runtime.execution.operations.OperationService`、
 :class:`~runtime.execution.reconciliation.ReconciliationService`、
 ``adapters.commerce.faults.FaultInjector``、确定性 ScriptedBackend)与
-tests/runtime 集成测试的 crash-harness 模式(领取 → 受控退出 → 回收 →
-恢复推进)。每例断言权威最终状态与逻辑写数后报告该例通过与否。
+tests/runtime 集成测试的 crash-harness 模式(领取 → 进程中断 → 恢复扫描 →
+继续推进)。每例断言权威最终状态与逻辑写数后报告该例通过与否。
 
 全部用例确定性:无网络、无真实模型、无随机(行标识用 uuid,不参与断言),
 故障只由 ``FaultInjector.inject``/crash-harness 显式控制,重复运行产生相同
@@ -52,7 +51,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -87,27 +86,22 @@ from runtime.backend.protocol import (
     TextDelta,
     ToolCallCompleted,
 )
+from runtime.execution.executor import RecoveryReport, RunExecutor
 from runtime.execution.run_service import RunService
 from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interfaces.state import RunStatus
-from runtime.jobs.lease_service import Lease, LeaseService
-from runtime.jobs.sweeper import LeaseSweeper
 from runtime.persistence.base import (
     InputRequestStatus,
     RunAttemptStatus,
-    RunJobKind,
-    RunJobStatus,
 )
 from runtime.persistence.models.events import AgentEvent
 from runtime.persistence.models.execution import (
     Operation,
     Run,
     RunAttempt,
-    RunJob,
     ToolCall,
 )
 from runtime.persistence.models.interaction import ConfirmationRequest, InputRequest
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -119,9 +113,9 @@ RECOVERY_DATASET_PATH: Final[Path] = (
 REQUIRED_CASE_IDS: Final[frozenset[str]] = frozenset(
     {
         "model-timeout",
-        "worker-exit-before-write",
+        "executor-exit-before-write",
         "write-applied-response-lost",
-        "worker-restart-after-confirmation",
+        "executor-restart-after-confirmation",
         "platform-persistent-failure",
         "reconcile-temporarily-inconsistent",
         "duplicate-submit",
@@ -131,9 +125,9 @@ REQUIRED_CASE_IDS: Final[frozenset[str]] = frozenset(
 REQUIRED_FAULTS: Final[frozenset[str]] = frozenset(
     {
         "model_timeout",
-        "worker_exit_before_write",
+        "executor_exit_before_write",
         "response_lost_after_commit",
-        "worker_restart_after_confirmation",
+        "executor_restart_after_confirmation",
         "permanent_failure",
         "temporary_reconcile_unknown",
         "duplicate_submit",
@@ -142,9 +136,9 @@ REQUIRED_FAULTS: Final[frozenset[str]] = frozenset(
 
 FaultName = Literal[
     "model_timeout",
-    "worker_exit_before_write",
+    "executor_exit_before_write",
     "response_lost_after_commit",
-    "worker_restart_after_confirmation",
+    "executor_restart_after_confirmation",
     "permanent_failure",
     "temporary_reconcile_unknown",
     "duplicate_submit",
@@ -343,7 +337,7 @@ class RecoverySuiteReport(BaseModel):
 class _PriceWriteBackend:
     """确定性脚本模型:首个模型轮发 set_listing_price(缺店铺),其后一律收尾。
 
-    与 apps/worker/e2e.py 的脚本同形(eval 不 import apps)。"首个模型轮"
+    与 apps/scripted_e2e.py 的脚本同形(eval 不 import apps)。"首个模型轮"
     由后端状态计数:恢复推进(确认/回查后的重入)不重新提出 ToolCall,
     写结果回填后的模型轮回固定完成文本,Run 随之 COMPLETED。
     """
@@ -553,8 +547,8 @@ async def _accept_confirmation(
 ) -> None:
     """确认接受并重新排队(与 ProductApplication.confirm 同一事务语义,但不推进)。
 
-    这是"确认后 Worker 重启"的故障窗口:接受已提交、推进 Job 已就绪,
-    尚无 Worker 领取。
+    这是"确认后进程重启"的故障窗口:接受已提交、Run 已回 QUEUED,尚无执行器
+    领取。
     """
     session = AsyncSession(engine, expire_on_commit=False)
     try:
@@ -572,17 +566,12 @@ async def _accept_confirmation(
                 event_payload={"confirmation_id": str(pending.confirmation_id)},
                 expected_status=RunStatus.WAITING_CONFIRMATION,
             )
-            await JobRepository(session).create(
-                workspace_id=environment.workspace_id,
-                run_id=pending.run_id,
-                kind=RunJobKind.ADVANCE_RUN,
-            )
     finally:
         await session.close()
 
 
-async def _seed_run_and_job(engine: AsyncEngine, environment: IsolatedEnvironment) -> uuid.UUID:
-    """crash-harness 种子:经真实仓储创建 Session、Run(QUEUED)与 ADVANCE_RUN Job。"""
+async def _seed_run(engine: AsyncEngine, environment: IsolatedEnvironment) -> uuid.UUID:
+    """crash-harness 种子:经真实仓储创建 Session 与 Run(QUEUED)。"""
     capability = dict(environment.application.capability_ids)
     session = AsyncSession(engine, expire_on_commit=False)
     try:
@@ -604,93 +593,114 @@ async def _seed_run_and_job(engine: AsyncEngine, environment: IsolatedEnvironmen
                     str(capability["model_config_version_id"])
                 ),
             )
-            await JobRepository(session).create(
-                workspace_id=environment.workspace_id,
-                run_id=run.id,
-                kind=RunJobKind.ADVANCE_RUN,
-            )
             return run.id
     finally:
         await session.close()
 
 
-async def _claim_then_abandon(
+class _RestartDriver:
+    """重启后的推进驱动:从持久化重建"已回答字段"视图。
+
+    进程重启后门面内存里的回答视图为空;若直接推进,模型会重复追问已经回答
+    过的字段。这里在每次 advance 前从 InputRequest/ToolCall 重建,与 API
+    宿主的真实重启路径同语义。
+    """
+
+    def __init__(self, environment: IsolatedEnvironment) -> None:
+        self._environment = environment
+
+    async def advance(self, claim: Any, *, answered: Mapping[str, str] | None = None) -> Any:
+        del answered
+        rebuilt = await _answered_view(
+            self._environment.engine, self._environment, claim.run_id
+        )
+        return await self._environment.application.advance(
+            claim, answered=rebuilt or None
+        )
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        return await self._environment.application.reconcile(run_id, workspace_id)
+
+
+def _executor(
+    environment: IsolatedEnvironment, *, executor_id: str
+) -> RunExecutor:
+    """构造一个不取锁、不起后台循环的执行器(评测内手动驱动恢复扫描)。"""
+    return RunExecutor(
+        session_factory=lambda: AsyncSession(environment.engine, expire_on_commit=False),
+        driver=_RestartDriver(environment),
+        instance_id=executor_id,
+        lock=None,
+    )
+
+
+async def _recover(
+    environment: IsolatedEnvironment, *, executor_id: str
+) -> RecoveryReport:
+    """跑一次启动恢复扫描(进程重启后的唯一入口)。"""
+    return await _executor(environment, executor_id=executor_id).recover()
+
+
+async def _interrupt_run(
     engine: AsyncEngine,
     environment: IsolatedEnvironment,
     run_id: uuid.UUID,
     *,
-    worker_id: str,
-) -> int:
-    """crash-harness 故障注入:领取租约 → 回拨过期 → LeaseSweeper 回收。"""
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            lease: Lease | None = await LeaseService(session).claim(worker_id)
-    finally:
-        await session.close()
-    if lease is None:
-        raise CaseFailure("no ADVANCE_RUN job could be leased for this run")
-    await _expire_leases(engine, environment.workspace_id, run_id)
-    return await _sweep_expired(engine)
+    executor_id: str,
+) -> uuid.UUID:
+    """模拟"执行器已领取并开始推进、随后进程崩溃"。
 
-
-async def _expire_leases(
-    engine: AsyncEngine, workspace_id: uuid.UUID, run_id: uuid.UUID
-) -> None:
-    """把本 Run 活动租约的过期时间回拨到过去,模拟 Worker 失联。"""
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            await session.execute(
-                sa.update(RunJob)
-                .where(
-                    RunJob.workspace_id == workspace_id,
-                    RunJob.run_id == run_id,
-                    RunJob.status == RunJobStatus.LEASED,
-                )
-                .values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1))
-            )
-    finally:
-        await session.close()
-
-
-async def _sweep_expired(engine: AsyncEngine) -> int:
-    """LeaseSweeper 回收过期租约(独立短事务提交)。"""
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            return await LeaseSweeper(session).sweep_expired()
-    finally:
-        await session.close()
-
-
-async def _claim_and_advance(
-    environment: IsolatedEnvironment, *, worker_id: str
-) -> None:
-    """新 Worker 领取回收后的 Job 并推进(Worker 组合根语义)。
-
-    与 WorkerHost 同一模式:claim(短事务,Run QUEUED→RUNNING)→ 从持久化
-    状态重建"已回答字段"视图 → ``ProductApplication.advance_leased``(单事务
-    AgentLoop 推进)→ complete(短事务提交租约结果)。
+    对应 :meth:`RunExecutor._claim`:CAS QUEUED → RUNNING 并创建 RUNNING
+    Attempt。此后不再收尾——Run 与 Attempt 都停在 RUNNING,正是崩溃后的库内
+    形态。
     """
-    engine = environment.engine
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
-            lease: Lease | None = await LeaseService(session).claim(worker_id)
-    finally:
-        await session.close()
-    if lease is None:
-        raise CaseFailure("the recovery worker could not claim the reclaimed job")
-    answered = await _answered_view(engine, environment, lease.run_id)
-    outcome = await environment.application.advance_leased(lease, answered=answered)
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        async with session.begin():
-            if not await LeaseService(session).complete(
-                lease.job_id, lease.lease_token, outcome
-            ):
-                raise CaseFailure("the recovery worker could not complete the job")
+            run = (
+                await session.scalars(
+                    select(Run)
+                    .where(
+                        Run.workspace_id == environment.workspace_id,
+                        Run.id == run_id,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).one_or_none()
+            if run is None or run.status.value != RunStatus.QUEUED.value:
+                raise CaseFailure(
+                    "the crash harness can only interrupt a QUEUED run, got "
+                    f"{None if run is None else run.status.value}"
+                )
+            moved = await RunRepository(session).compare_and_set_status(
+                workspace_id=environment.workspace_id,
+                run_id=run_id,
+                expected_version=run.state_version,
+                new_status=RunStatus.RUNNING.value,
+                expected_status=RunStatus.QUEUED.value,
+            )
+            if not moved:
+                raise CaseFailure("the crash harness lost the CAS race")
+            attempt_no = (
+                await session.scalar(
+                    sa.select(sa.func.max(RunAttempt.attempt_no)).where(
+                        RunAttempt.run_id == run_id
+                    )
+                )
+                or 0
+            ) + 1
+            attempt = RunAttempt(
+                workspace_id=environment.workspace_id,
+                run_id=run_id,
+                attempt_no=attempt_no,
+                executor_id=executor_id,
+                status=RunAttemptStatus.RUNNING,
+                started_at=datetime.now(UTC),
+            )
+            session.add(attempt)
+            await session.flush()
+            return attempt.id
     finally:
         await session.close()
 
@@ -759,23 +769,6 @@ async def _read_run(
                 .execution_options(populate_existing=True)
             )
         ).one()
-    finally:
-        await session.close()
-
-
-async def _latest_job(
-    engine: AsyncEngine, workspace_id: uuid.UUID, run_id: uuid.UUID
-) -> RunJob | None:
-    session = AsyncSession(engine, expire_on_commit=False)
-    try:
-        return (
-            await session.scalars(
-                sa.select(RunJob)
-                .where(RunJob.workspace_id == workspace_id, RunJob.run_id == run_id)
-                .order_by(RunJob.created_at.desc())
-                .limit(1)
-            )
-        ).one_or_none()
     finally:
         await session.close()
 
@@ -1010,9 +1003,12 @@ async def _case_model_timeout(engine: AsyncEngine) -> _CaseObservation:
             raise CaseFailure(
                 f"failure code expected {_MODEL_TIMEOUT_CODE!r}, got {run.failure_code!r}"
             )
-        job = await _latest_job(engine, env.workspace_id, run_id)
-        if job is None or job.status.value != "DEAD":
-            raise CaseFailure("deterministic model timeout must dead-letter the job")
+        attempt = await _latest_attempt(engine, env.workspace_id, run_id)
+        if attempt is None or attempt.status is not RunAttemptStatus.FAILED:
+            raise CaseFailure(
+                "a deterministic model timeout must finish the attempt as FAILED, got "
+                f"{None if attempt is None else attempt.status.value}"
+            )
         if await _count_tool_calls(engine, env.workspace_id, run_id) != 0:
             raise CaseFailure("no ToolCall may be persisted for a model timeout")
         if await _count_operations(engine, env.workspace_id, run_id) != 0:
@@ -1030,85 +1026,131 @@ async def _case_model_timeout(engine: AsyncEngine) -> _CaseObservation:
         )
 
 
-async def _case_worker_exit_before_write(engine: AsyncEngine) -> _CaseObservation:
-    """b) worker-exit-before-write:Tool 调用前 Worker 退出 → Sweeper 回收,Run 回 QUEUED。"""
-    async with _isolated_environment(engine, "worker-exit-before-write", _PriceWriteBackend()) as env:
-        run_id = await _seed_run_and_job(engine, env)
-        swept = await _claim_then_abandon(
-            engine, env, run_id, worker_id="recovery-lost-worker"
+async def _case_executor_exit_before_write(engine: AsyncEngine) -> _CaseObservation:
+    """b) executor-exit-before-write:外部写前执行器崩溃 → 重启扫描接管并续推。
+
+    崩溃现场:Run 与 Attempt 都停在 RUNNING,尚无 ToolCall / Operation / 外部
+    写。重启扫描必须收尾遗留 Attempt(ABANDONED + EXECUTOR_RESTART)、把 Run
+    退回 QUEUED 并重新推进到下一个用户边界——恢复推进不得凭空跳过仍需用户
+    补充的输入,也不得产生任何外部写。
+    """
+    async with _isolated_environment(engine, "executor-exit-before-write", _PriceWriteBackend()) as env:
+        run_id = await _seed_run(engine, env)
+        attempt_id = await _interrupt_run(
+            engine, env, run_id, executor_id="recovery-lost-executor"
         )
-        if swept != 1:
-            raise CaseFailure(f"sweeper must reclaim the expired lease, reclaimed {swept}")
         run = await _read_run(engine, env.workspace_id, run_id)
-        if run.status.value != "QUEUED":
-            raise CaseFailure(f"run must return to QUEUED, got {run.status.value}")
-        job = await _latest_job(engine, env.workspace_id, run_id)
-        if job is None or job.status.value != "PENDING":
-            raise CaseFailure("reclaimed job must be immediately requeueable (PENDING)")
+        if run.status.value != "RUNNING":
+            raise CaseFailure(f"a crashed advance must stay RUNNING, got {run.status.value}")
         attempt = await _latest_attempt(engine, env.workspace_id, run_id)
-        if attempt is None or attempt.status is not RunAttemptStatus.ABANDONED:
-            raise CaseFailure("interrupted attempt must be ABANDONED")
+        if attempt is None or attempt.id != attempt_id:
+            raise CaseFailure("the interrupted attempt must be the latest attempt")
         if await _count_tool_calls(engine, env.workspace_id, run_id) != 0:
             raise CaseFailure("no ToolCall may exist before the write")
         if await _count_operations(engine, env.workspace_id, run_id) != 0:
             raise CaseFailure("no Operation may exist before the write")
         writes = await _logical_writes(env, run_id)
         if writes != 0:
-            raise CaseFailure(f"worker exit before write must not write, got {writes}")
+            raise CaseFailure(f"executor exit before write must not write, got {writes}")
         price = await _authoritative_price(env)
         if price != _INITIAL_PRICE:
             raise CaseFailure(
                 f"authoritative price must stay {_INITIAL_PRICE}, got {price}"
             )
+
+        report = await _recover(env, executor_id="recovery-restart-executor")
+        if run_id not in report.advanced:
+            raise CaseFailure(f"the restart scan must advance the interrupted run: {report}")
+        resumed = await _read_run(engine, env.workspace_id, run_id)
+        if resumed.status.value != "WAITING_INPUT":
+            raise CaseFailure(
+                "the restart must resume the run up to the next input boundary, got "
+                f"{resumed.status.value}"
+            )
+        stale = await _latest_attempt(engine, env.workspace_id, run_id)
+        if stale is None or stale.attempt_no != 2:
+            raise CaseFailure("the restart must open a second attempt")
+        session = AsyncSession(engine, expire_on_commit=False)
+        try:
+            abandoned = (
+                await session.scalars(
+                    select(RunAttempt)
+                    .where(RunAttempt.id == attempt_id)
+                    .execution_options(populate_existing=True)
+                )
+            ).one()
+        finally:
+            await session.close()
+        if abandoned.status is not RunAttemptStatus.ABANDONED:
+            raise CaseFailure(
+                "the crashed attempt must be closed as ABANDONED, got "
+                f"{abandoned.status.value}"
+            )
+        if abandoned.failure_code != "EXECUTOR_RESTART":
+            raise CaseFailure(
+                f"the crashed attempt must record EXECUTOR_RESTART, got {abandoned.failure_code!r}"
+            )
+        resumed_writes = await _logical_writes(env, run_id)
+        if resumed_writes != 0:
+            raise CaseFailure(
+                f"resuming before the write must not write, got {resumed_writes}"
+            )
+        if await _authoritative_price(env) != _INITIAL_PRICE:
+            raise CaseFailure("resuming before the write must not change the price")
         return _CaseObservation(
-            run_status=run.status.value, price=price, logical_writes=writes, reconcile_path=()
+            run_status=resumed.status.value,
+            price=_INITIAL_PRICE,
+            logical_writes=resumed_writes,
+            reconcile_path=(),
         )
 
 
 async def _case_write_applied_response_lost(engine: AsyncEngine) -> _CaseObservation:
-    """c) write-applied-response-lost:外部写生效响应丢失 → UNKNOWN → 回查 APPLIED。"""
+    """c) write-applied-response-lost:外部写生效响应丢失 → UNKNOWN → 回查 APPLIED。
+
+    首版由执行器在本次推进内完成回查:``confirm`` 返回时 Run 已按 APPLIED 续推
+    到终态,不再把 WAITING_RECONCILIATION 暴露给调用方。
+    """
     async with _isolated_environment(engine, "write-applied-response-lost", _PriceWriteBackend()) as env:
         env.commerce_write_observer.faults.inject(RESPONSE_LOST_AFTER_COMMIT)
         pending = await _drive_to_confirmation(env)
         view = await env.application.confirm(pending.confirmation_id)
-        if view.status is not RunStatus.WAITING_RECONCILIATION:
+        if view.status is not RunStatus.COMPLETED:
             raise CaseFailure(
-                "response loss must park the run in WAITING_RECONCILIATION, got "
+                "response loss must be reconciled inside the same advance, got "
                 f"{view.status.value}"
             )
         operation = await _single_operation(engine, env.workspace_id, pending.run_id)
-        if operation is None or operation.status.value != "UNKNOWN":
-            raise CaseFailure("operation must be UNKNOWN until the adapter is asked first")
-        recovered = await env.application.recover(pending.run_id)
-        if recovered.status is not RunStatus.COMPLETED:
+        if operation is None or operation.status.value != "APPLIED":
             raise CaseFailure(
-                f"run expected COMPLETED after recovery, got {recovered.status.value}"
+                "the in-line reconcile must settle the operation as APPLIED, got "
+                f"{None if operation is None else operation.status.value}"
             )
         return await _assert_completed_write(
             env, pending.run_id, expected_path=("UNKNOWN", "APPLIED")
         )
 
 
-async def _case_worker_restart_after_confirmation(engine: AsyncEngine) -> _CaseObservation:
-    """d) worker-restart-after-confirmation:确认接受后 Worker 退出 → 重启推进到 COMPLETED。"""
-    async with _isolated_environment(engine, "worker-restart-after-confirmation", _PriceWriteBackend()) as env:
+async def _case_executor_restart_after_confirmation(engine: AsyncEngine) -> _CaseObservation:
+    """d) executor-restart-after-confirmation:确认接受后执行器崩溃 → 重启推进到 COMPLETED。"""
+    async with _isolated_environment(engine, "executor-restart-after-confirmation", _PriceWriteBackend()) as env:
         pending = await _drive_to_confirmation(env)
         await _accept_confirmation(engine, env, pending)
-        swept = await _claim_then_abandon(
-            engine, env, pending.run_id, worker_id="recovery-lost-worker"
+        await _interrupt_run(
+            engine, env, pending.run_id, executor_id="recovery-lost-executor"
         )
-        if swept != 1:
-            raise CaseFailure(f"sweeper must reclaim the expired lease, reclaimed {swept}")
         run = await _read_run(engine, env.workspace_id, pending.run_id)
-        if run.status.value != "QUEUED":
-            raise CaseFailure(f"run must be requeued after the restart, got {run.status.value}")
+        if run.status.value != "RUNNING":
+            raise CaseFailure(f"the crash must leave the run RUNNING, got {run.status.value}")
         writes_before = await _logical_writes(env, pending.run_id)
         if writes_before != 0:
             raise CaseFailure(
                 f"no write may happen before the restart, got {writes_before}"
             )
-        # 新 Worker 领取被回收的 Job 并推进(真实 Worker 组合根语义)。
-        await _claim_and_advance(env, worker_id="recovery-restart-worker")
+        # 新进程启动:恢复扫描接管中断的 Run 并继续推进。
+        report = await _recover(env, executor_id="recovery-restart-executor")
+        if pending.run_id not in report.advanced:
+            raise CaseFailure(f"the restart scan must advance the run: {report}")
         run = await _read_run(engine, env.workspace_id, pending.run_id)
         if run.status.value != "COMPLETED":
             raise CaseFailure(
@@ -1198,7 +1240,11 @@ async def _case_platform_persistent_failure(engine: AsyncEngine) -> _CaseObserva
 
 
 async def _case_reconcile_temporarily_inconsistent(engine: AsyncEngine) -> _CaseObservation:
-    """f) reconcile-temporarily-inconsistent:首次回查 UNKNOWN,再次 APPLIED → COMPLETED。"""
+    """f) reconcile-temporarily-inconsistent:首次回查 UNKNOWN,再次 APPLIED → COMPLETED。
+
+    回查不确定时 Run 停在 WAITING_RECONCILIATION(不猜测结果);``recover`` 在
+    回查预算内重试,第二次拿到 APPLIED 后恢复推进到 COMPLETED。
+    """
     async with _isolated_environment(engine, "reconcile-temporarily-inconsistent", _PriceWriteBackend()) as env:
         faults = env.commerce_write_observer.faults
         faults.inject(RESPONSE_LOST_AFTER_COMMIT)
@@ -1207,22 +1253,16 @@ async def _case_reconcile_temporarily_inconsistent(engine: AsyncEngine) -> _Case
         view = await env.application.confirm(pending.confirmation_id)
         if view.status is not RunStatus.WAITING_RECONCILIATION:
             raise CaseFailure(
-                "response loss must park the run in WAITING_RECONCILIATION, got "
+                "an uncertain reconcile must park the run in WAITING_RECONCILIATION, got "
                 f"{view.status.value}"
-            )
-        first = await env.application.recover(pending.run_id)
-        if first.status is not RunStatus.WAITING_RECONCILIATION:
-            raise CaseFailure(
-                "first reconcile must stay WAITING_RECONCILIATION on UNKNOWN, got "
-                f"{first.status.value}"
             )
         operation = await _single_operation(engine, env.workspace_id, pending.run_id)
         if operation is None or operation.status.value != "UNKNOWN":
             raise CaseFailure("operation must stay UNKNOWN after an uncertain reconcile")
-        second = await env.application.recover(pending.run_id)
-        if second.status is not RunStatus.COMPLETED:
+        recovered = await env.application.recover(pending.run_id)
+        if recovered.status is not RunStatus.COMPLETED:
             raise CaseFailure(
-                f"run expected COMPLETED after the second reconcile, got {second.status.value}"
+                f"run expected COMPLETED after the retried reconcile, got {recovered.status.value}"
             )
         return await _assert_completed_write(
             env, pending.run_id, expected_path=("UNKNOWN", "UNKNOWN", "APPLIED")
@@ -1307,9 +1347,9 @@ FaultExecutor = Callable[[AsyncEngine], Awaitable[_CaseObservation]]
 
 _FAULT_EXECUTORS: Final[Mapping[str, FaultExecutor]] = {
     "model_timeout": _case_model_timeout,
-    "worker_exit_before_write": _case_worker_exit_before_write,
+    "executor_exit_before_write": _case_executor_exit_before_write,
     "response_lost_after_commit": _case_write_applied_response_lost,
-    "worker_restart_after_confirmation": _case_worker_restart_after_confirmation,
+    "executor_restart_after_confirmation": _case_executor_restart_after_confirmation,
     "permanent_failure": _case_platform_persistent_failure,
     "temporary_reconcile_unknown": _case_reconcile_temporarily_inconsistent,
     "duplicate_submit": _case_duplicate_submit,

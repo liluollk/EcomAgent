@@ -31,6 +31,7 @@ from runtime.backend.protocol import (
     ToolCallCompleted,
 )
 from runtime.execution.bindings import ToolExecutionProfile
+from runtime.execution.executor import AdvanceOutcome, RunClaim, RunExecutor
 from runtime.execution.pretool.decisions import (
     POLICY_DENIED,
     PreToolDecision,
@@ -52,7 +53,6 @@ from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interaction.input_service import InputService
 from runtime.interfaces.requests import ConfirmationSpec, InputRequirement
 from runtime.interfaces.state import RunStatus
-from runtime.jobs.lease_service import Lease, LeaseService
 from runtime.orchestration.agent_loop import AgentLoop, ToolPin
 from runtime.orchestration.context import ContextAssembler
 from runtime.orchestration.limits import RunLimits
@@ -64,7 +64,7 @@ from runtime.persistence.base import (
     MessageRole,
     MessageStatus,
     ModelBackendType,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
     ToolEffect,
 )
@@ -83,7 +83,6 @@ from runtime.persistence.models.execution import (
     Operation,
     Run,
     RunAttempt,
-    RunJob,
     ToolCall,
 )
 from runtime.persistence.models.identity import (
@@ -97,7 +96,6 @@ from runtime.persistence.models.interaction import (
     Message,
 )
 from runtime.persistence.repositories.events import EventRepository
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 
@@ -841,13 +839,12 @@ async def test_write_operations_use_each_pin_execution_profile(
             [BackendCompleted(finish_reason="stop")],
         ]
     )
-    lease = await _claim_advance_job(db_session, seeded_run)
 
     result = await make_agent_loop(
         backend=backend,
         pipeline=ScriptedPipeline([allow(), allow()]),
         tool_pins_override=pins,
-    ).advance(seeded_run.id, lease_token=lease.lease_token)
+    ).advance(seeded_run.id)
 
     assert result.run_status is RunStatus.COMPLETED
     operations = list(
@@ -874,7 +871,6 @@ async def test_missing_write_execution_profile_fails_deterministically(
     tool_pins: FakeToolPins,
 ) -> None:
     """写 Tool 缺执行 Profile:不执行外部调用,Run 以稳定失败码结束。"""
-    lease = await _claim_advance_job(db_session, seeded_run)
     write_handler = FakeWriteHandler()
     pins = FakeToolPins(
         pins={
@@ -891,7 +887,7 @@ async def test_missing_write_execution_profile_fails_deterministically(
         backend=SequencedBackend([_write_round()]),
         pipeline=ScriptedPipeline([allow()]),
         tool_pins_override=pins,
-    ).advance(seeded_run.id, lease_token=lease.lease_token)
+    ).advance(seeded_run.id)
 
     assert result.run_status is RunStatus.FAILED
     assert result.failure_code == "WRITE_EXECUTION_PROFILE_MISSING"
@@ -1004,10 +1000,6 @@ async def test_recovery_processes_pending_tool_call_before_remaining_ordinals(
         event_payload={"reason": "INPUT_ANSWERED"},
         expected_status=RunStatus.WAITING_INPUT,
     )
-    await JobRepository(db_session).create(
-        workspace_id=run.workspace_id, run_id=run.id, kind=RunJobKind.ADVANCE_RUN
-    )
-
     # -- advance 2:先重走挂起调用(ordinal 0),再处理剩余 ordinal 1,然后新模型轮次。
     read_handler = FakeReadHandler()
     second_pipeline = ScriptedPipeline([allow(), deny(POLICY_DENIED), allow()])
@@ -1058,15 +1050,6 @@ def fake_clock_now() -> datetime:
 # ---------------------------------------------------------------------------
 
 
-async def _claim_advance_job(db_session: AsyncSession, run: Run) -> Lease:
-    await JobRepository(db_session).create(
-        workspace_id=run.workspace_id, run_id=run.id, kind=RunJobKind.ADVANCE_RUN
-    )
-    lease = await LeaseService(db_session).claim(worker_id="loop-test-worker")
-    assert lease is not None
-    return lease
-
-
 def _write_round() -> list[BackendEvent]:
     return [
         ToolCallCompleted(
@@ -1082,17 +1065,16 @@ async def test_unknown_write_stops_loop_and_exposes_reconcile_job(
     db_session: AsyncSession,
 ) -> None:
     run = seeded_run
-    lease = await _claim_advance_job(db_session, run)
     loop = make_agent_loop(
         backend=SequencedBackend([_write_round()]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=FakeWriteHandler(fail=True),
     )
-    result = await loop.advance(run.id, lease_token=lease.lease_token)
+    result = await loop.advance(run.id)
 
     assert result.processed_ordinals == [0]
     assert result.run_status is RunStatus.WAITING_RECONCILIATION
-    assert result.next_job_kind is RunJobKind.RECONCILE_OPERATION
+    assert result.next_step is RunNextStep.RECONCILE
 
     persisted = await _load_run(db_session, run)
     assert persisted.status is PersistenceRunStatus.WAITING_RECONCILIATION
@@ -1110,12 +1092,11 @@ async def test_reconciliation_applied_recovery_completes_run(
     run_service: RunService,
 ) -> None:
     run = seeded_run
-    lease = await _claim_advance_job(db_session, run)
     first = await make_agent_loop(
         backend=SequencedBackend([_write_round()]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=FakeWriteHandler(fail=True),
-    ).advance(run.id, lease_token=lease.lease_token)
+    ).advance(run.id)
     assert first.run_status is RunStatus.WAITING_RECONCILIATION
 
     calls = await _load_tool_calls(db_session, run)
@@ -1128,41 +1109,27 @@ async def test_reconciliation_applied_recovery_completes_run(
         )
     ).one()
 
-    # 完成 ADVANCE_RUN Job,创建并领取 RECONCILE_OPERATION Job(活动 Job 唯一)。
-    assert await LeaseService(db_session).complete(lease.job_id, lease.lease_token)
-    reconcile_job = await JobRepository(db_session).create(
-        workspace_id=run.workspace_id, run_id=run.id, kind=RunJobKind.RECONCILE_OPERATION
-    )
-    reconcile_job_id = reconcile_job.id
-    reconcile_lease = await LeaseService(db_session).claim(worker_id="reconcile-worker")
-    assert reconcile_lease is not None
-
+    # 首版执行器直接回查(无 Job/租约):APPLIED 后 Run 回 QUEUED。
     reconciler = ReconciliationService(
         db_session,
         workspace_id=run.workspace_id,
         actor_id=seeded_workspace.user.id,
         run_id=run.id,
         operation_id=operation.operation_id,
-        lease_token=reconcile_lease.lease_token,
         expected_state_version=(await _load_run(db_session, run)).state_version,
         reconcile_budget=TEST_LIMITS.reconcile_budget,
         write_retry_budget=TEST_LIMITS.write_retry_budget,
     )
     outcome = await reconciler.apply_result(ReconcileResult.APPLIED)
     assert outcome.run_status is RunStatus.QUEUED
-    assert outcome.next_job_kind is RunJobKind.ADVANCE_RUN
+    assert outcome.next_step is RunNextStep.ADVANCE
 
-    # 回查 Job 完成后(活动 Job 唯一),再为恢复推进排队并领取。
-    assert await LeaseService(db_session).complete(
-        reconcile_job_id, reconcile_lease.lease_token
-    )
-    # 恢复:回查 APPLIED 后 Run 已 QUEUED,Loop 直接推进完成。
-    recovery_lease = await _claim_advance_job(db_session, run)
+    # 回查 APPLIED 后 Run 已 QUEUED,Loop 直接推进完成。
     second = await make_agent_loop(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([]),
         write_handler=FakeWriteHandler(),
-    ).advance(run.id, lease_token=recovery_lease.lease_token)
+    ).advance(run.id)
 
     assert second.run_status is RunStatus.COMPLETED
     assert second.processed_ordinals == []
@@ -1181,14 +1148,13 @@ async def test_require_confirmation_assigns_operation_id_and_resumes_after_accep
         normalized_arguments={"listing_id": "L1"},
         resource_versions={"listing": "v1"},
     )
-    lease = await _claim_advance_job(db_session, run)
     write_handler = FakeWriteHandler()
     first_loop = make_agent_loop(
         backend=SequencedBackend([_write_round()]),
         pipeline=ScriptedPipeline([require_confirmation(confirmation_spec=spec)]),
         write_handler=write_handler,
     )
-    first = await first_loop.advance(run.id, lease_token=lease.lease_token)
+    first = await first_loop.advance(run.id)
 
     assert first.processed_ordinals == [0]
     assert first.run_status is RunStatus.WAITING_CONFIRMATION
@@ -1212,7 +1178,6 @@ async def test_require_confirmation_assigns_operation_id_and_resumes_after_accep
     assert confirmation.fingerprint
 
     # 接受确认 → Run QUEUED + 恢复 Job;重入时重走 PreToolUse(ALLOW)并执行。
-    assert await LeaseService(db_session).complete(lease.job_id, lease.lease_token)
     confirmer = ConfirmationService(
         db_session, workspace_id=run.workspace_id, actor_id=seeded_workspace.user.id
     )
@@ -1225,13 +1190,12 @@ async def test_require_confirmation_assigns_operation_id_and_resumes_after_accep
         event_payload={"reason": "CONFIRMATION_ACCEPTED"},
         expected_status=RunStatus.WAITING_CONFIRMATION,
     )
-    recovery_lease = await _claim_advance_job(db_session, run)
 
     second = await make_agent_loop(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery_lease.lease_token)
+    ).advance(run.id)
 
     assert second.run_status is RunStatus.COMPLETED
     assert len(write_handler.calls) == 1
@@ -1247,19 +1211,18 @@ async def _drive_write_to_confirmation_and_accept(
     run_service: RunService,
     actor_id: uuid.UUID,
     write_handler: FakeWriteHandler,
-) -> Lease:
-    """驱动写 Tool 到人工确认并接受,返回恢复推进的租约。"""
+) -> None:
+    """驱动写 Tool 到人工确认并接受(Run 已回到 QUEUED)。"""
     spec = ConfirmationSpec(
         tool_name=WRITE_TOOL_KEY,
         normalized_arguments={"listing_id": "L1"},
         resource_versions={"listing": "v1"},
     )
-    lease = await _claim_advance_job(db_session, run)
     first = await make_agent_loop(
         backend=SequencedBackend([_write_round()]),
         pipeline=ScriptedPipeline([require_confirmation(confirmation_spec=spec)]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=lease.lease_token)
+    ).advance(run.id)
     assert first.run_status is RunStatus.WAITING_CONFIRMATION
 
     confirmation = (
@@ -1270,7 +1233,6 @@ async def _drive_write_to_confirmation_and_accept(
             )
         )
     ).one()
-    assert await LeaseService(db_session).complete(lease.job_id, lease.lease_token)
     accepted = await ConfirmationService(
         db_session, workspace_id=run.workspace_id, actor_id=actor_id
     ).accept(confirmation.id, now=fake_clock_now())
@@ -1282,7 +1244,6 @@ async def _drive_write_to_confirmation_and_accept(
         event_payload={"reason": "CONFIRMATION_ACCEPTED"},
         expected_status=RunStatus.WAITING_CONFIRMATION,
     )
-    return await _claim_advance_job(db_session, run)
 
 
 async def test_deterministic_rejection_is_executed_once_without_requeue(
@@ -1292,7 +1253,7 @@ async def test_deterministic_rejection_is_executed_once_without_requeue(
     seeded_workspace,
     run_service: RunService,
 ) -> None:
-    """确定性拒绝只执行一次:ToolCall 落 FAILED,不再产生 ADVANCE_RUN 重排队。
+    """确定性拒绝只执行一次:ToolCall 落 FAILED,不再重新入队。
 
     NOT_APPLIED 不等于"值得重试":把两者画等号会让同一个 ToolCall 反复经
     PreToolUse → prepare → 拒绝,永远走不到终态。
@@ -1303,7 +1264,7 @@ async def test_deterministic_rejection_is_executed_once_without_requeue(
             status="FAILED", error_code="RESOURCE_CHANGED", context={"listing_id": "L1"}
         )
     )
-    recovery = await _drive_write_to_confirmation_and_accept(
+    await _drive_write_to_confirmation_and_accept(
         make_agent_loop=make_agent_loop,
         db_session=db_session,
         run=run,
@@ -1315,11 +1276,11 @@ async def test_deterministic_rejection_is_executed_once_without_requeue(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
+    ).advance(run.id)
 
     # 模型拿到失败 Tool Result 后收尾:Run 直接完成,不重新排队。
     assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
+    assert second.next_step is None
     calls = await _load_tool_calls(db_session, run)
     assert calls[0].status is ToolCallStatus.FAILED
     assert calls[0].failure_code == "RESOURCE_CHANGED"
@@ -1334,12 +1295,12 @@ async def test_explicitly_retryable_write_failure_requeues_for_revalidation(
     seeded_workspace,
     run_service: RunService,
 ) -> None:
-    """回执显式声明可重试时才重排队:ToolCall 回 VALIDATING + ADVANCE_RUN。"""
+    """回执显式声明可重试时才重排队:ToolCall 回 VALIDATING 并重新入队。"""
     run = seeded_run
     write_handler = FakeWriteHandler(
         execution_status="FAILED", execution_retryable=True
     )
-    recovery = await _drive_write_to_confirmation_and_accept(
+    await _drive_write_to_confirmation_and_accept(
         make_agent_loop=make_agent_loop,
         db_session=db_session,
         run=run,
@@ -1351,10 +1312,10 @@ async def test_explicitly_retryable_write_failure_requeues_for_revalidation(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
+    ).advance(run.id)
 
     assert second.run_status is RunStatus.RUNNING
-    assert second.next_job_kind is RunJobKind.ADVANCE_RUN
+    assert second.next_step is RunNextStep.ADVANCE
     calls = await _load_tool_calls(db_session, run)
     assert calls[0].status is ToolCallStatus.VALIDATING
     assert len(write_handler.calls) == 1
@@ -1370,7 +1331,7 @@ async def test_deterministic_adapter_failure_is_not_requeued(
     """适配器确定失败且未声明可重试:ToolCall FAILED,Run 继续由模型收尾。"""
     run = seeded_run
     write_handler = FakeWriteHandler(execution_status="FAILED")
-    recovery = await _drive_write_to_confirmation_and_accept(
+    await _drive_write_to_confirmation_and_accept(
         make_agent_loop=make_agent_loop,
         db_session=db_session,
         run=run,
@@ -1382,10 +1343,10 @@ async def test_deterministic_adapter_failure_is_not_requeued(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
+    ).advance(run.id)
 
     assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
+    assert second.next_step is None
     calls = await _load_tool_calls(db_session, run)
     assert calls[0].status is ToolCallStatus.FAILED
     # 外部调用只发生过一次:不重排队就不会有第二次 Adapter 调用。
@@ -1411,7 +1372,7 @@ async def test_version_conflict_failure_is_terminal_and_returned_to_model(
     write_handler = FakeWriteHandler(
         execution_status="FAILED", execution_error_code="VERSION_CONFLICT"
     )
-    recovery = await _drive_write_to_confirmation_and_accept(
+    await _drive_write_to_confirmation_and_accept(
         make_agent_loop=make_agent_loop,
         db_session=db_session,
         run=run,
@@ -1423,10 +1384,10 @@ async def test_version_conflict_failure_is_terminal_and_returned_to_model(
         backend=SequencedBackend([]),
         pipeline=ScriptedPipeline([allow()]),
         write_handler=write_handler,
-    ).advance(run.id, lease_token=recovery.lease_token)
+    ).advance(run.id)
 
     assert second.run_status is RunStatus.COMPLETED
-    assert second.next_job_kind is None
+    assert second.next_step is None
     calls = await _load_tool_calls(db_session, run)
     assert calls[0].status is ToolCallStatus.FAILED
     assert calls[0].failure_code == "VERSION_CONFLICT"
@@ -1562,8 +1523,23 @@ async def test_backend_non_retryable_failure_fails_run(
 # ---------------------------------------------------------------------------
 
 
+class _RuntimeDriver:
+    """把 Runtime 适配成 RunDriver;回查在首版测试里不启用。"""
+
+    def __init__(self, runtime: Runtime) -> None:
+        self._runtime = runtime
+
+    async def advance(self, claim: RunClaim, *, answered=None) -> AdvanceOutcome:
+        del answered
+        return await self._runtime.advance(claim)
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        del run_id, workspace_id
+        return False
+
+
 async def _seed_committed_runtime_scenario(engine: AsyncEngine) -> dict[str, Any]:
-    """提交最小种子链 + 两个 Run(一个带 Job,一个无 Job)+ Tool 行。"""
+    """提交最小种子链 + 两个 QUEUED Run + Tool 行。"""
     session = AsyncSession(engine, expire_on_commit=False)
     try:
         async with session.begin():
@@ -1622,7 +1598,7 @@ async def _seed_committed_runtime_scenario(engine: AsyncEngine) -> dict[str, Any
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
             )
-            run_with_job = await RunRepository(session).create(
+            run_to_advance = await RunRepository(session).create(
                 workspace_id=workspace.id,
                 session_id=session_one.id,
                 created_by_actor_id=user.id,
@@ -1630,18 +1606,13 @@ async def _seed_committed_runtime_scenario(engine: AsyncEngine) -> dict[str, Any
                 agent_version_id=agent_version.id,
                 model_config_version_id=model_config_version.id,
             )
-            run_without_job = await RunRepository(session).create(
+            run_to_recover = await RunRepository(session).create(
                 workspace_id=workspace.id,
                 session_id=session_two.id,
                 created_by_actor_id=user.id,
                 created_by_membership_id=membership.id,
                 agent_version_id=agent_version.id,
                 model_config_version_id=model_config_version.id,
-            )
-            job = await JobRepository(session).create(
-                workspace_id=workspace.id,
-                run_id=run_with_job.id,
-                kind=RunJobKind.ADVANCE_RUN,
             )
             read_def, read_ver = _tool_rows(READ_TOOL_KEY, ToolEffect.READ)
             session.add_all([read_def, read_ver])
@@ -1653,9 +1624,8 @@ async def _seed_committed_runtime_scenario(engine: AsyncEngine) -> dict[str, Any
                 "agent_version_id": agent_version.id,
                 "model_connection_id": model_connection.id,
                 "model_config_version_id": model_config_version.id,
-                "run_with_job_id": run_with_job.id,
-                "run_without_job_id": run_without_job.id,
-                "job_id": job.id,
+                "run_to_advance_id": run_to_advance.id,
+                "run_to_recover_id": run_to_recover.id,
                 "tool_definition_id": read_def.id,
                 "tool_version_id": read_ver.id,
             }
@@ -1674,7 +1644,6 @@ async def _cleanup_runtime_scenario(engine: AsyncEngine, ids: Mapping[str, Any])
                 ("DELETE FROM operations WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
                 ("DELETE FROM tool_calls WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
                 ("DELETE FROM run_attempts WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
-                ("DELETE FROM run_jobs WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
                 ("DELETE FROM input_requests WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
                 ("DELETE FROM confirmation_requests WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
                 ("DELETE FROM messages WHERE workspace_id = :ws", {"ws": ids["workspace_id"]}),
@@ -1709,9 +1678,10 @@ async def _cleanup_runtime_scenario(engine: AsyncEngine, ids: Mapping[str, Any])
         await session.close()
 
 
-async def test_runtime_worker_advances_run_and_recover_requeues(
+async def test_executor_advances_run_and_recovers_interrupted_run(
     engine: AsyncEngine,
 ) -> None:
+    """执行器推进 QUEUED Run;RUNNING 残留由 recover 退回 QUEUED 后继续。"""
     ids = await _seed_committed_runtime_scenario(engine)
     try:
         pins = FakeToolPins(
@@ -1726,41 +1696,54 @@ async def test_runtime_worker_advances_run_and_recover_requeues(
         )
         runtime = Runtime(
             session_factory=lambda: AsyncSession(engine, expire_on_commit=False),
-            backend=SequencedBackend([[BackendCompleted(finish_reason="stop")]]),
+            backend=SequencedBackend(
+                [
+                    [BackendCompleted(finish_reason="stop")],
+                    [BackendCompleted(finish_reason="stop")],
+                ]
+            ),
             assembler=make_assembler(),
             limits=TEST_LIMITS,
             tool_pins=pins,
             pipeline_factory=lambda: ScriptedPipeline([]),
         )
+        executor = RunExecutor(
+            session_factory=lambda: AsyncSession(engine, expire_on_commit=False),
+            driver=_RuntimeDriver(runtime),
+            instance_id="test-executor",
+        )
 
-        # Worker 循环:claim → AgentLoop.advance → complete,回调真实 Loop。
-        assert await runtime.run_worker_once() is True
-        assert await runtime.run_worker_once() is False
-
+        # QUEUED → RUNNING(CAS)→ 推进到 COMPLETED。
+        assert await executor.advance_now(ids["run_to_advance_id"]) is not None
         session = AsyncSession(engine, expire_on_commit=False)
         try:
-            run = await session.get(Run, ids["run_with_job_id"])
-            assert run is not None and run.status is PersistenceRunStatus.COMPLETED
-            job = await session.get(RunJob, ids["job_id"])
-            assert job is not None and job.status.value == "DONE"
-        finally:
-            await session.close()
-
-        # recover:无 Job 的 QUEUED Run 重新排队并可被 Worker 推进。
-        assert await runtime.recover(ids["run_without_job_id"]) is True
-        assert await runtime.run_worker_once() is True
-        session = AsyncSession(engine, expire_on_commit=False)
-        try:
-            run = await session.get(Run, ids["run_without_job_id"])
+            run = await session.get(Run, ids["run_to_advance_id"])
             assert run is not None and run.status is PersistenceRunStatus.COMPLETED
         finally:
             await session.close()
 
-        # 终态 Run 不再恢复。
-        assert await runtime.recover(ids["run_with_job_id"]) is False
+        # 模拟上次进程中断:Run 停在 RUNNING,恢复扫描应退回 QUEUED 并推进。
+        session = AsyncSession(engine, expire_on_commit=False)
+        try:
+            async with session.begin():
+                await session.execute(
+                    sa.update(Run)
+                    .where(Run.id == ids["run_to_recover_id"])
+                    .values(status="RUNNING", state_version=Run.state_version + 1)
+                )
+        finally:
+            await session.close()
+        report = await executor.recover()
+        assert ids["run_to_recover_id"] in report.advanced
+        session = AsyncSession(engine, expire_on_commit=False)
+        try:
+            run = await session.get(Run, ids["run_to_recover_id"])
+            assert run is not None and run.status is PersistenceRunStatus.COMPLETED
+        finally:
+            await session.close()
 
-        # Sweeper 调度入口可调用。
-        assert await runtime.sweep() == 0
+        # 终态 Run 不在恢复范围内。
+        assert await executor.advance_now(ids["run_to_advance_id"]) is None
     finally:
         await _cleanup_runtime_scenario(engine, ids)
 
@@ -1798,12 +1781,17 @@ async def test_runtime_does_not_hold_database_transaction_while_backend_waits(
         tool_pins=FakeToolPins(pins={}),
         pipeline_factory=lambda: ScriptedPipeline([]),
     )
-    worker_task = asyncio.create_task(runtime.run_worker_once())
+    executor = RunExecutor(
+        session_factory=session_factory,
+        driver=_RuntimeDriver(runtime),
+        instance_id="test-executor",
+    )
+    worker_task = asyncio.create_task(executor.advance_now(ids["run_to_advance_id"]))
     try:
         await asyncio.wait_for(backend_started.wait(), timeout=2)
         assert yield_transaction_open == [False]
         release_backend.set()
-        assert await worker_task is True
+        assert await worker_task is not None
     finally:
         release_backend.set()
         if not worker_task.done():
