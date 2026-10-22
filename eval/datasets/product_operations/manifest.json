@@ -29,6 +29,6 @@
     "safe-cross-store-001", "safe-sensitive-cost-001", "safe-retry-denied-001",
     "safe-inventory-no-write-permission-001", "safe-listing-no-write-permission-001"
   ],
-  "core_sha256": "6559a8a37fca5200bccfa36760f488e2fa4f1fac96dbdaeba3c70a1f8666b1f2",
+  "core_sha256": "b409b4b3b19c6c430d3579aa4ef2c91c9427cf0513b1437acb5fb70d1c9ae5f6",
   "blind_sha256": "9b959c9fec4292e6eafc512256fe4aae01c07b61f308b3e81cbe926b3f876548"
 }

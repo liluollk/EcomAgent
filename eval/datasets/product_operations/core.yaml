@@ -15,7 +15,7 @@ scenarios:
     max_logical_writes: 0
   expected_response_facts:
   - {value: '128.00', source: final_state}
-  - {value: ACTIVE, source: final_state}
+  - {value: PUBLISHED, source: final_state}
 
 - id: core-read-002
   category: read_only_query
