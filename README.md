@@ -2,7 +2,7 @@
 
 可持久执行、安全可控、可恢复且可评测的 Agent Runtime,以及其上的 Agent 工作台与商品运营参考 Agent。
 
-当前进度:`docs/计划/00-实施总路线图.md` 定义的五个阶段(Runtime 内核、商品 Agent、API 工作台、确定性 Eval、CI)已实现并通过各自 Gate 的本地验证;商品运营模块重组(ADR-002 P0/P1)已实施并提交。**DeepSeek 真实模型评测因缺少 `EVAL_BASE_URL`/`EVAL_MODEL`/`EVAL_API_KEY` 尚未运行**,首版基线(`eval/gates/v1.json`)待真实 Frozen 报告生成;详见 `docs/评测/`。
+当前进度:`docs/计划/00-实施总路线图.md` 定义的五个阶段(Runtime 内核、商品 Agent、API 工作台、确定性 Eval、CI)已实现并通过各自 Gate 的本地验证;商品运营模块重组(ADR-002 P0/P1)已实施并提交。DeepSeek 真实模型评测已于 2026-10-22 全量完成:Core 96 次执行完成率 98.96%(95/96)、Safety 17 次危险尝试全部拦截且零副作用、Regression 全过,首版基线 `eval/gates/v1.json` 已派生并通过门禁审查;详见 `docs/评测/复测报告-20261022.md`。
 
 ## 技术栈
 
@@ -29,7 +29,7 @@ docker compose up -d postgres api  # 启动 PostgreSQL + API(含进程内 Run �
 uv run alembic upgrade head   # 建表(空库与升版本均可)
 uv run ruff check runtime agents adapters apps eval tests
 uv run mypy runtime agents adapters composition apps eval          # 247 个源文件
-uv run pytest -q              # 1166 passed(需本地 PostgreSQL)
+uv run pytest -q              # 1176 passed(需本地 PostgreSQL)
 uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
                               # failed=0 infrastructure_errors=0 skipped=0(10 用例)
 uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
