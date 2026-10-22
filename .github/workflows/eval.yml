@@ -5,11 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       split:
-        description: 选择商品 Agent 评测数据分区
+        description: release 跑完整发布验证(Core + Safety + Regression + 门禁);其余只跑单分区
         required: true
-        default: core
+        default: release
         type: choice
         options:
+          - release
           - core
           - blind
           - clarification
@@ -57,6 +58,7 @@ jobs:
       EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
       EVAL_MODEL: ${{ secrets.EVAL_MODEL }}
       EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}
+      CAPABILITY_MANIFEST: ${{ runner.temp }}/capability-manifest.json
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -72,29 +74,63 @@ jobs:
       - name: Prepare test database
         run: uv run alembic upgrade head
       - name: Build freeze-time capability manifest
-        run: uv run python -m eval.capability_manifest --output "$RUNNER_TEMP/capability-manifest.json"
+        run: |
+          uv run python -m eval.capability_manifest --output "$CAPABILITY_MANIFEST"
       # 报告里的 Runtime/E2E 通过声明由本 job 自己的执行结果决定,用于发布 Gate。
       - name: Deterministic Runtime and E2E attestations
         run: |
           uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
           uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
           uv run pytest tests/apps/api/test_e2e_product_flow.py -q
-      - name: Run product eval split
+      - name: Run core split
+        if: inputs.split == 'release' || inputs.split == 'core'
+        run: |
+          uv run python -m eval.product_suite \
+            --split core \
+            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --runtime-suite-result passed \
+            --e2e-result passed \
+            --output reports/core.json
+      # 发布结论必须带安全证据:Core 分区没有安全适用用例,只凭它无法证明
+      # 危险操作被拦住。release 模式固定一起跑 Safety 与 Regression。
+      - name: Run safety split
+        if: inputs.split == 'release' || inputs.split == 'safety'
+        run: |
+          uv run python -m eval.product_suite \
+            --split safety \
+            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --runtime-suite-result passed \
+            --e2e-result passed \
+            --output reports/safety.json
+      - name: Run regression split
+        if: inputs.split == 'release' || inputs.split == 'regression'
+        run: |
+          uv run python -m eval.product_suite \
+            --split regression \
+            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --runtime-suite-result passed \
+            --e2e-result passed \
+            --output reports/regression.json
+      - name: Run requested split
+        if: inputs.split != 'release' && inputs.split != 'core' && inputs.split != 'safety' && inputs.split != 'regression'
         run: |
           uv run python -m eval.product_suite \
             --split "${{ inputs.split }}" \
-            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
+            --capability-manifest "$CAPABILITY_MANIFEST" \
             --runtime-suite-result passed \
             --e2e-result passed \
             --output "reports/${{ inputs.split }}.json"
-      # 冻结门存在且本次是 core 报告时才做放行检查;没有基线不虚构结论。
-      - name: Release gate (core only, when a frozen gate exists)
-        if: inputs.split == 'core' && hashFiles('eval/gates/v*.json') != ''
+      # 冻结门存在且是 release 模式时才做放行检查:门禁需要 Core 与 Safety
+      # 两份报告,只跑单分区时不虚构放行结论。
+      - name: Release gate (core + safety)
+        if: inputs.split == 'release' && hashFiles('eval/gates/v*.json') != ''
         run: |
           gate=$(ls eval/gates/v*.json | sort -V | tail -1)
           uv run python -m eval.gates.check_release \
-            --gate "$gate" --report "reports/${{ inputs.split }}.json"
+            --gate "$gate" \
+            --report reports/core.json \
+            --safety-report reports/safety.json
       - uses: actions/upload-artifact@v4
         with:
           name: product-eval-${{ inputs.split }}-${{ github.run_id }}
-          path: reports/${{ inputs.split }}.json
+          path: reports/*.json

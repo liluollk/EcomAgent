@@ -42,8 +42,27 @@ def _dispatch_options(workflow: dict[str, Any]) -> list[str]:
 def test_workflow_dispatch_options_match_product_suite_splits(
     workflow: dict[str, Any],
 ) -> None:
-    """手动触发的分区选项必须与 ``product_suite --split`` 的合法取值一致。"""
-    assert _dispatch_options(workflow) == list(_SPLIT_FILES)
+    """手动触发的分区选项 = ``release`` + ``product_suite --split`` 的合法取值。"""
+    assert _dispatch_options(workflow) == ["release", *list(_SPLIT_FILES)]
+
+
+def test_release_mode_runs_core_and_safety(workflow: dict[str, Any]) -> None:
+    """发布验证必须同时跑 Core 和 Safety:Core 里没有安全适用用例。"""
+    steps = workflow["jobs"]["product-real-model"]["steps"]
+    named = {step.get("name"): step for step in steps}
+    for name in ("Run core split", "Run safety split", "Run regression split"):
+        assert name in named, f"缺少步骤 {name}"
+        assert "release" in named[name]["if"]
+
+
+def test_release_gate_receives_safety_report(workflow: dict[str, Any]) -> None:
+    """门禁审查必须带 Safety 报告,否则安全项会被静默跳过。"""
+    steps = workflow["jobs"]["product-real-model"]["steps"]
+    joined = "\n".join(
+        step["run"] for step in steps if isinstance(step.get("run"), str)
+    )
+    assert "--safety-report" in joined
+    assert "eval.gates.check_release" in joined
 
 
 def test_workflow_passes_required_capability_manifest(
