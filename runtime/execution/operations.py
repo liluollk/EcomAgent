@@ -25,15 +25,15 @@
 - **结果分类**:适配器回执状态 → :class:`OperationOutcome`(APPLIED /
   NOT_APPLIED / UNKNOWN)确定性分类(:func:`classify_receipt_status`);
 - **UNKNOWN 只能进 Reconciliation**:Run ``RUNNING → WAITING_RECONCILIATION``,
-  返回 ``next_job_kind=RECONCILE_OPERATION`` 供编排层调度;禁止盲目重试;
+  返回 ``next_step=RECONCILE`` 供执行器调度;禁止盲目重试;
 - **NOT_APPLIED 的终态由 ``retry_allowed`` 决定**:显式可重试时 ToolCall
   ``EXECUTING → VALIDATING``(必须重新通过完整 PreToolUse 才可再次执行);
   否则 ToolCall 直接 ``FAILED``——"确定未生效"与"值得重试"是两件事,混为一谈
   会让编排层对同一个 ToolCall 无限重排队;
-- **fencing 提交**:结果事务要求 ``job.lease_token == worker_lease_token`` 且
-  ``run.state_version == expected_state_version``;token 无效/过期抛
-  :class:`LeaseStaleError`,版本过期经 RunService CAS 抛
-  :class:`~runtime.execution.transitions.InvalidTransition`;
+- **执行前状态校验**:写操作进入执行边界前要求 Run 仍为 ``RUNNING``
+  (:func:`ensure_run_executable`);终态/挂起 Run 不得发起新的副作用。
+  并发写入由 ``run.state_version == expected_state_version`` 的 CAS 裁决,
+  版本过期抛 :class:`~runtime.execution.transitions.InvalidTransition`;
 - **审计**:写操作 allowed / denied / executed / reconciled / UNKNOWN 各写
   AuditEvent(幂等键、回执摘要等结构性元数据,不含参数值)。
 
@@ -65,10 +65,10 @@ from runtime.persistence.base import (
     OperationAttemptKind,
     OperationAttemptStatus,
     OperationStatus,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
 )
-from runtime.persistence.models.execution import Operation, OperationAttempt, RunJob, ToolCall
+from runtime.persistence.models.execution import Operation, OperationAttempt, Run, ToolCall
 from runtime.persistence.repositories.runs import RunRepository
 
 
@@ -141,10 +141,6 @@ def classify_receipt_status(status: str) -> OperationOutcome:
 
 class OperationConflictError(RuntimeError):
     """ToolCall/Operation 状态竞争或顺序错误(如未 begin 先 record_result)。"""
-
-
-class LeaseStaleError(RuntimeError):
-    """fencing 失败:lease token 与活动租约不匹配或租约已过期。"""
 
 
 # ---- Operation 状态机(执行边界前提) ----
@@ -248,40 +244,37 @@ class RecordResultOutcome:
     tool_call_status: ToolCallStatus
     retry_allowed: bool
     run_status: RunStatus
-    next_job_kind: RunJobKind | None
+    next_step: RunNextStep | None
     event: AppendedEvent
 
 
 # ---- fencing 与审计辅助 ----
 
 
-async def ensure_write_fencing(
-    session: AsyncSession, *, workspace_id: uuid.UUID, run_id: uuid.UUID, lease_token: uuid.UUID
-) -> RunJob:
-    """校验 run 上存在持有该 token 的活动(LEASED)租约,返回该 Job。
+async def ensure_run_executable(
+    session: AsyncSession, *, workspace_id: uuid.UUID, run_id: uuid.UUID
+) -> Run:
+    """校验 Run 仍可发起新的外部写。
 
-    架构文档 §8:状态提交必须同时满足 ``job.lease_token == worker_lease_token``
-    与 ``run.state_version == expected_state_version``;后者由 RunService 的 CAS
-    保证。token 不匹配或租约已过期即抛 :class:`LeaseStaleError`。
+    取代旧模型的 fencing token 校验:首版只有一个执行器,不存在"租约已被
+    别人接管"的场景,真正需要拒绝的是"Run 已经不在 RUNNING"——用户取消、
+    已终态或已挂起时不得再发起新的副作用。并发写入仍由 ``state_version``
+    CAS 保护(见 :meth:`OperationService.record_result` 的 ``transition_run``)。
     """
-    stmt = select(RunJob).where(
-        RunJob.workspace_id == workspace_id,
-        RunJob.run_id == run_id,
-        RunJob.status == "LEASED",
-        RunJob.lease_token == lease_token,
-    )
-    job = (await session.scalars(stmt)).one_or_none()
-    if job is None:
-        raise LeaseStaleError(
-            f"FENCING_TOKEN_INVALID: no active lease with token {lease_token} "
-            f"on run {run_id} in workspace {workspace_id}"
+    run = (
+        await session.scalars(
+            select(Run)
+            .where(Run.workspace_id == workspace_id, Run.id == run_id)
+            .execution_options(populate_existing=True)
         )
-    if job.lease_expires_at is not None and job.lease_expires_at <= datetime.now(UTC):
-        raise LeaseStaleError(
-            f"FENCING_LEASE_EXPIRED: lease {job.id} on run {run_id} expired "
-            f"at {job.lease_expires_at.isoformat()}"
+    ).one_or_none()
+    if run is None:
+        raise OperationConflictError(f"run {run_id} not found in workspace {workspace_id}")
+    if run.status.value != RunStatus.RUNNING.value:
+        raise OperationConflictError(
+            f"run {run_id} is {run.status.value}; write execution requires RUNNING"
         )
-    return job
+    return run
 
 
 async def audit_write_decision(
@@ -365,8 +358,8 @@ def _require_same_execution_contract(
 class OperationService:
     """单个 Run 的写操作登记与结果提交;在调用方事务内执行,只 flush 不 commit。
 
-    构造即绑定一次执行边界:fencing 凭据(lease_token)与读取 Run 时的
-    ``state_version``;结果事务的 Run CAS 以该版本提交,过期即失败。
+    构造即绑定一次执行边界:读取 Run 时的 ``state_version``;结果事务的
+    Run CAS 以该版本提交,过期即失败(这是首版唯一的并发写保护)。
     """
 
     def __init__(
@@ -376,25 +369,18 @@ class OperationService:
         workspace_id: uuid.UUID,
         actor_id: uuid.UUID,
         run_id: uuid.UUID,
-        lease_token: uuid.UUID,
         expected_state_version: int,
     ) -> None:
         self._session = session
         self._workspace_id = workspace_id
         self._actor_id = actor_id
         self._run_id = run_id
-        self._lease_token = lease_token
         self._expected_state_version = expected_state_version
         self._runs = RunService(
             session=session, workspace_id=workspace_id
         )
         self._writer = AgentEventWriter(session=session, workspace_id=workspace_id)
         self._audit = AuditService(session, workspace_id=workspace_id, actor_id=actor_id)
-
-    @property
-    def lease_token(self) -> uuid.UUID:
-        """绑定的 fencing token(测试与编排层读取)。"""
-        return self._lease_token
 
     async def begin(
         self,
@@ -423,11 +409,10 @@ class OperationService:
         - ToolCall ``VALIDATING → EXECUTING``(条件更新,竞争抛冲突);
         - 同时写 TOOL_WRITE_ALLOWED 审计(到达执行边界即已获准执行)。
         """
-        await ensure_write_fencing(
+        await ensure_run_executable(
             self._session,
             workspace_id=self._workspace_id,
             run_id=self._run_id,
-            lease_token=self._lease_token,
         )
         tool_call = await self._load_tool_call(tool_call_id)
         # 只读前提检查:ToolCall 必须处于可执行状态;失败时不留任何状态改动。
@@ -516,17 +501,10 @@ class OperationService:
           (必须重走完整 PreToolUse,不得直接重执行);
         - NOT_APPLIED 且不可重试 → ToolCall FAILED:确定失败落终态,不再重排队;
         - UNKNOWN → Operation/ToolCall UNKNOWN,Run ``RUNNING →
-          WAITING_RECONCILIATION``,``next_job_kind=RECONCILE_OPERATION``,
-          禁止盲目重试;
-        - fencing:lease token 与 state_version 任一失效即抛明确错误。
+          WAITING_RECONCILIATION``,``next_step=RECONCILE``,禁止盲目重试;
+        - 结果事务不校验 Run 是否仍 RUNNING:外部调用可能已经发生,回执必须
+          落库;Run 状态竞争由 ``transition_run`` 的 ``state_version`` CAS 裁决。
         """
-        job = await ensure_write_fencing(
-            self._session,
-            workspace_id=self._workspace_id,
-            run_id=self._run_id,
-            lease_token=self._lease_token,
-        )
-        del job  # fencing 已验证;Job 完成由编排层在提交后执行
         tool_call = await self._load_tool_call(result.tool_call_id)
         if tool_call.operation_id is None:
             raise OperationConflictError(
@@ -592,7 +570,7 @@ class OperationService:
                 run_id=self._run_id,
                 tool_call_id=result.tool_call_id,
             )
-            next_job_kind: RunJobKind | None = RunJobKind.RECONCILE_OPERATION
+            next_step: RunNextStep | None = RunNextStep.RECONCILE
             event = transition.event
         else:
             event = await self._writer.append(
@@ -618,7 +596,7 @@ class OperationService:
                 run_id=self._run_id,
                 tool_call_id=result.tool_call_id,
             )
-            next_job_kind = None
+            next_step = None
         return RecordResultOutcome(
             tool_call_id=result.tool_call_id,
             operation_id=operation_row.operation_id,
@@ -626,7 +604,7 @@ class OperationService:
             tool_call_status=tool_call_status,
             retry_allowed=result.retry_allowed,
             run_status=run_status,
-            next_job_kind=next_job_kind,
+            next_step=next_step,
             event=event,
         )
 
@@ -662,11 +640,10 @@ class OperationService:
           走到同一拒绝);暂时性基础设施故障走独立的 retryable 回执契约;
         - Run 状态不变,不产生 RECONCILE Job。
         """
-        await ensure_write_fencing(
+        await ensure_run_executable(
             self._session,
             workspace_id=self._workspace_id,
             run_id=self._run_id,
-            lease_token=self._lease_token,
         )
         tool_call = await self._load_tool_call(tool_call_id)
         receipt = {
@@ -773,7 +750,7 @@ class OperationService:
             tool_call_status=tool_call_status,
             retry_allowed=False,
             run_status=await self._load_run_status(),
-            next_job_kind=None,
+            next_step=None,
             event=event,
         )
 

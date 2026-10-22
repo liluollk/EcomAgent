@@ -16,7 +16,7 @@ def main() -> None:
         raise SystemExit(f"wheel not found: {wheel_path}")
 
     sys.path.insert(0, str(wheel_path))
-    for module_name in ("apps.worker.assembly", "composition.product_operations"):
+    for module_name in ("apps.assembly", "composition.product_operations"):
         module = importlib.import_module(module_name)
         module_path = str(Path(module.__file__).resolve())
         if not module_path.startswith(str(wheel_path)):

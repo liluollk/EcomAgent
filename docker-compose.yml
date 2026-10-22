@@ -23,7 +23,8 @@ services:
              exec .venv/bin/uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
     environment:
       RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
-      # E2E 装配开关:API 注册 /api/e2e/seed 种子端点(阶段 4 Gate)。
+      # E2E 装配开关:API 注册 /api/e2e/seed 种子端点,并在进程内装配
+      # Run 执行器(阶段 4 Gate;首版为单 API 进程执行模型)。
       RUNTIME_E2E: "1"
     ports:
       - "8000:8000"
@@ -36,20 +37,6 @@ services:
       timeout: 5s
       retries: 24
       start_period: 30s
-
-  worker:
-    build: .
-    # RUNTIME_E2E=1:Worker 用 E2E 装配开关推进 Job(ScriptedBackend +
-    # Mock 平台),无真实模型依赖;依赖 api healthy 以确保迁移已应用。
-    command: .venv/bin/python -m apps.worker
-    environment:
-      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
-      RUNTIME_E2E: "1"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      api:
-        condition: service_healthy
 
 volumes:
   postgres_data:

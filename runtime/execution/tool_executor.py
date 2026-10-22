@@ -20,8 +20,8 @@
    猜测结果);
 4. **PostToolUse**::class:`~runtime.execution.tool_result_processor.ToolResultProcessor`
    固定管线处理回执(协议校验、分类、Output Schema、脱敏、大小限制、投影);
-5. **结果事务**::meth:`OperationService.record_result` 以 lease token +
-   state_version fencing 提交状态、脱敏结果与 AgentEvent。
+5. **结果事务**::meth:`OperationService.record_result` 以 ``state_version`` CAS
+   与"Run 仍可执行"的前置校验提交状态、脱敏结果与 AgentEvent。
 
 事务边界:begin 与 record_result 都在调用方事务内 flush,提交由编排层持有;
 两段之间不持有数据库事务(架构文档 §8:外部调用期间不持有长事务)。
@@ -165,7 +165,6 @@ class ToolExecutor:
         workspace_id: uuid.UUID,
         actor_id: uuid.UUID,
         run_id: uuid.UUID,
-        lease_token: uuid.UUID,
         expected_state_version: int,
         handler: WriteToolHandler,
         processor: ToolResultProcessor,
@@ -178,7 +177,6 @@ class ToolExecutor:
             workspace_id=workspace_id,
             actor_id=actor_id,
             run_id=run_id,
-            lease_token=lease_token,
             expected_state_version=expected_state_version,
         )
         self._handler = handler

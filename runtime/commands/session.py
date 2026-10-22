@@ -1,6 +1,6 @@
 """Runtime 的 Session/Run/Request 通用命令服务。
 
-本模块位于 ``runtime.commands``，因为它同时编排 Session、Run、Job、
+本模块位于 ``runtime.commands``，因为它同时编排 Session、Run、
 Input Request 与 Confirmation Request，不属于 Workspace 配置子域。
 
 命令语义(架构文档):
@@ -13,7 +13,7 @@ Input Request 与 Confirmation Request，不属于 Workspace 配置子域。
   条件更新(PENDING → 目标状态),重复提交以 ``REQUEST_NOT_PENDING``(409)拒绝,
   未声明字段以 ``UNDECLARED_FIELD``(422)拒绝;
 - 恢复推进的最小事务:回答/裁决成功后把 Run 从 WAITING_* 经 transitions 合法
-  路径迁回 QUEUED 并创建 ADVANCE_RUN Job,由 Worker 领取推进——本服务不调用
+  路径迁回 QUEUED,提交后由调用方唤醒执行器推进——本服务不调用
   Backend/ToolHandler/Runtime 推进循环;
 - 取消 Run 经 ``RunService.transition_run`` 的 CAS + 合法迁移表进入 CANCELLED,
   并尽力取消仍在等待的 Input/Confirmation Request。
@@ -23,7 +23,7 @@ Input Request 与 Confirmation Request，不属于 Workspace 配置子域。
 进程内 Registry 组装的 :class:`~runtime.capabilities.assembly.RuntimeAssembly`;
 API 创建 Session 时依据 Workspace 当前生效的 Agent 绑定固定 AgentVersion,
 之后每次提交消息都从 Session 读取该版本创建 QUEUED Run;ModelConfigVersion
-仍按 Workspace 当前配置解析。Worker 组装执行上下文时再写入 run_*_versions
+仍按 Workspace 当前配置解析。执行器组装执行上下文时再写入 run_*_versions
 快照。
 
 事务边界:与调用方共享同一 AsyncSession,只 flush 不 commit;命令短事务由
@@ -51,17 +51,15 @@ from runtime.interaction.confirmation_service import (
 from runtime.interaction.input_service import InputAnswerRejected, InputRequestError, InputService
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
-    ACTIVE_JOB_STATUS_VALUES,
     ACTIVE_RUN_STATUS_VALUES,
     AccountStatus,
     ConfirmationRequestStatus,
     InputRequestStatus,
     MessageRole,
     MessageStatus,
-    RunJobKind,
 )
 from runtime.persistence.models.configuration import ModelConfigVersion
-from runtime.persistence.models.execution import Run, RunJob, ToolCall
+from runtime.persistence.models.execution import Run, ToolCall
 from runtime.persistence.models.identity import WorkspaceMembership
 from runtime.persistence.models.interaction import (
     ConfirmationRequest,
@@ -70,7 +68,6 @@ from runtime.persistence.models.interaction import (
     Session,
 )
 from runtime.persistence.repositories.events import EventRepository
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
 from runtime.workspace.agent_binding import (
@@ -151,7 +148,6 @@ class SessionCommandService:
         self._actor_id = actor_id
         self._sessions = SessionRepository(session)
         self._runs = RunRepository(session)
-        self._jobs = JobRepository(session)
         self._events = EventRepository(session)
 
     # ---- Session 命令 ----
@@ -233,7 +229,7 @@ class SessionCommandService:
         content: str,
         model_config_version_id: uuid.UUID | None = None,
     ) -> DispatchedMessage:
-        """提交用户消息:消息先落库,再创建 QUEUED Run 与 ADVANCE_RUN Job。
+        """提交用户消息:消息先落库,再创建 QUEUED Run。
 
         活动 Run 已存在时返回 409 ``ACTIVE_RUN_EXISTS``;并发撞上
         ``uq_active_run_per_session`` 部分唯一索引时同样翻译为 409。
@@ -288,11 +284,6 @@ class SessionCommandService:
             )
             message.run_id = run.id
             await self._session.flush()
-            await self._jobs.create(
-                workspace_id=session_row.workspace_id,
-                run_id=run.id,
-                kind=RunJobKind.ADVANCE_RUN,
-            )
         except sa.exc.IntegrityError as error:
             if "uq_active_run_per_session" in str(error):
                 raise SessionCommandError(
@@ -550,10 +541,10 @@ class SessionCommandService:
         expected_status: RunStatus,
         payload: dict[str, Any],
     ) -> None:
-        """恢复推进的最小事务:WAITING_* → QUEUED + ADVANCE_RUN Job。
+        """恢复推进的最小事务:WAITING_* → QUEUED。
 
-        不调用 Backend/ToolHandler/Runtime 推进循环;Worker 领取 Job 后
-        从 Tool Resolution 重走完整 PreToolUse(架构文档 §5、§6)。
+        不调用 Backend/ToolHandler/Runtime 推进循环;回到 QUEUED 后由进程内
+        执行器重新推进,从 Tool Resolution 重走完整 PreToolUse(§5、§6)。
         """
         try:
             await self._run_service(workspace_id).transition_run(
@@ -571,29 +562,6 @@ class SessionCommandService:
             raise SessionCommandError(
                 status_code=404, code=RUN_NOT_FOUND, message=str(error)
             ) from error
-        await self._ensure_advance_job(workspace_id, run_id)
-
-    async def _ensure_advance_job(self, workspace_id: uuid.UUID, run_id: uuid.UUID) -> None:
-        """确保该 Run 恰有一个活动 ADVANCE_RUN Job(uq_active_job_per_run)。
-
-        上一轮 Job 仍在 PENDING/LEASED 时复用,不重复创建;已被 Worker 消费
-        (DONE/DEAD)才创建新 Job。重复提交 Request 的幂等语义据此保持
-        "不重复创建 Job"(架构文档 §4.4)。
-        """
-        active_job_id = await self._session.scalar(
-            select(RunJob.id)
-            .where(
-                RunJob.workspace_id == workspace_id,
-                RunJob.run_id == run_id,
-                RunJob.status.in_(ACTIVE_JOB_STATUS_VALUES),
-            )
-            .limit(1)
-        )
-        if active_job_id is not None:
-            return
-        await self._jobs.create(
-            workspace_id=workspace_id, run_id=run_id, kind=RunJobKind.ADVANCE_RUN
-        )
 
     async def _cancel_pending_requests(self, run: Run) -> None:
         """尽力取消仍在等待的 Input/Confirmation Request(取消 Run 的从属动作)。"""

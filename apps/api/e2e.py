@@ -38,7 +38,7 @@ from agents.product_operations.persistence.models import (
     Store,
 )
 from apps.api.dependencies import SessionDep
-from apps.worker.e2e import E2E_PRICE_CONFIG
+from apps.scripted_e2e import E2E_PRICE_CONFIG
 from composition.provisioning.product_operations import (
     ModelConnectionProvisioningSpec,
     ProductOperationsProvisioner,
@@ -355,7 +355,6 @@ async def _reset_workspace_runtime_rows(session: Any, workspace_id: uuid.UUID) -
         "DELETE FROM operations WHERE workspace_id = :ws",
         "DELETE FROM tool_calls WHERE workspace_id = :ws",
         "DELETE FROM run_attempts WHERE workspace_id = :ws",
-        "DELETE FROM run_jobs WHERE workspace_id = :ws",
         "UPDATE messages SET run_id = NULL WHERE workspace_id = :ws",
         "UPDATE runs SET trigger_message_id = NULL WHERE workspace_id = :ws",
         "DELETE FROM messages WHERE workspace_id = :ws",

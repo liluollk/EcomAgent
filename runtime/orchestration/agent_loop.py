@@ -18,9 +18,9 @@
   ConfirmationService 创建 Request,Run 迁移 WAITING_INPUT /
   WAITING_CONFIRMATION,停止后续调用;
 - 执行结果 ``UNKNOWN``:Run 已由 OperationService 迁移 WAITING_RECONCILIATION,
-  Loop 停止后续并把 ``next_job_kind=RECONCILE_OPERATION`` 暴露在结果里;
+  Loop 停止后续并把 ``next_step=RECONCILE`` 暴露在结果里;
   ``NOT_APPLIED`` 且回执显式声明可重试时 ToolCall 回 VALIDATING,Loop 停止并把
-  ``next_job_kind=ADVANCE_RUN`` 暴露给编排层重新排队,恢复后重走 PreToolUse;
+  ``next_step=ADVANCE`` 暴露给编排层重新排队,恢复后重走 PreToolUse;
   不可重试的确定失败(含 prepare 阶段拒绝)ToolCall 直接 FAILED,ToolResult
   回填后由模型决定下一步,不再重排队。
 
@@ -94,7 +94,7 @@ from runtime.persistence.base import (
     MessageStatus,
     OperationStatus,
     RunAttemptStatus,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
     ToolEffect,
 )
@@ -189,7 +189,7 @@ class AdvanceResult:
     persisted_ordinals: list[int] = field(default_factory=list)
     processed_ordinals: list[int] = field(default_factory=list)
     failure_code: str | None = None
-    next_job_kind: RunJobKind | None = None
+    next_step: RunNextStep | None = None
 
 
 @dataclass(frozen=True)
@@ -198,7 +198,7 @@ class _Stop:
 
     run_status: RunStatus
     failure_code: str | None = None
-    next_job_kind: RunJobKind | None = None
+    next_step: RunNextStep | None = None
 
 
 @dataclass(frozen=True)
@@ -282,12 +282,11 @@ class AgentLoop:
         self,
         run_id: uuid.UUID,
         workspace_id: uuid.UUID | None = None,
-        lease_token: uuid.UUID | None = None,
     ) -> AdvanceResult:
         """推进一个 Run 直到新的持久边界(终态/挂起/预算超限)。
 
-        ``lease_token`` 是写 Tool 执行的 fencing 凭据;直接调用(测试、
-        recover 路径)在 Run QUEUED 时会先完成 QUEUED→RUNNING 迁移。
+        调用方(进程内 ``RunExecutor``)已通过 state_version CAS 把 Run 置为
+        RUNNING;直接调用时若 Run 仍是 QUEUED,这里会补一次 QUEUED→RUNNING。
         """
         if workspace_id is not None and workspace_id != self._workspace_id:
             raise ValueError("workspace_id mismatch with loop binding")
@@ -323,7 +322,6 @@ class AgentLoop:
                 run=run,
                 call=call,
                 budget=budget,
-                lease_token=lease_token,
                 processed=processed,
                 record_budget=False,
             )
@@ -351,7 +349,6 @@ class AgentLoop:
                     run=run,
                     call=call,
                     budget=budget,
-                    lease_token=lease_token,
                     processed=processed,
                     record_budget=True,
                 )
@@ -385,7 +382,7 @@ class AgentLoop:
             run_status=stop.run_status,
             persisted_ordinals=list(persisted),
             processed_ordinals=list(processed),
-            next_job_kind=stop.next_job_kind,
+            next_step=stop.next_step,
         )
 
     # -- 预算与计数 -----------------------------------------------------
@@ -483,8 +480,15 @@ class AgentLoop:
     async def _stream_with_retries(
         self, request: BackendRequest, budget: LoopBudget, run: Run
     ) -> AsyncIterator[BackendEvent]:
-        """可重试 BackendFailed:重启流并创建新 RunAttempt;不可重试原样透出。"""
+        """可重试 BackendFailed:重启流并创建新 RunAttempt;不可重试原样透出。
+
+        每次模型重试都以独立的 RunAttempt 记账,因此该 Attempt 必须随本次
+        模型调用一起收尾:成功记 SUCCEEDED,重试预算耗尽记 FAILED + 错误码。
+        否则审计视图会留下永久 RUNNING 的孤儿 Attempt,并在进程重启时被
+        恢复扫描误判为崩溃遗留。
+        """
         attempts = 0
+        retry_attempt: RunAttempt | None = None
         while True:
             failed: BackendFailed | None = None
             async for event in self._backend.stream(request, self._cancellation):
@@ -493,29 +497,48 @@ class AgentLoop:
                     break
                 yield event
             if failed is None:
+                await self._finish_retry_attempt(retry_attempt, error_code=None)
                 return
             if failed.retryable and attempts < budget.backend_retries:
+                await self._finish_retry_attempt(
+                    retry_attempt, error_code=failed.error_code
+                )
                 attempts += 1
-                await self._create_retry_attempt(run)
+                retry_attempt = await self._create_retry_attempt(run)
                 continue
+            await self._finish_retry_attempt(retry_attempt, error_code=failed.error_code)
             yield failed
             return
 
-    async def _create_retry_attempt(self, run: Run) -> None:
+    async def _create_retry_attempt(self, run: Run) -> RunAttempt:
         """可重试 Provider 错误:创建新 RunAttempt 后重试本次模型调用。"""
         attempt_no = await self._session.scalar(
             select(func.max(RunAttempt.attempt_no)).where(RunAttempt.run_id == run.id)
         )
         next_no = 1 if attempt_no is None else int(attempt_no) + 1
-        self._session.add(
-            RunAttempt(
-                workspace_id=self._workspace_id,
-                run_id=run.id,
-                attempt_no=next_no,
-                status=RunAttemptStatus.RUNNING,
-                started_at=self._clock(),
-            )
+        attempt = RunAttempt(
+            workspace_id=self._workspace_id,
+            run_id=run.id,
+            attempt_no=next_no,
+            status=RunAttemptStatus.RUNNING,
+            started_at=self._clock(),
         )
+        self._session.add(attempt)
+        await self._session.flush()
+        await self._checkpoint()
+        return attempt
+
+    async def _finish_retry_attempt(
+        self, attempt: RunAttempt | None, *, error_code: str | None
+    ) -> None:
+        """收尾模型重试 Attempt(无重试发生时为空操作)。"""
+        if attempt is None:
+            return
+        attempt.status = (
+            RunAttemptStatus.SUCCEEDED if error_code is None else RunAttemptStatus.FAILED
+        )
+        attempt.failure_code = error_code
+        attempt.finished_at = self._clock()
         await self._session.flush()
         await self._checkpoint()
 
@@ -624,7 +647,6 @@ class AgentLoop:
         run: Run,
         call: ToolCall,
         budget: LoopBudget,
-        lease_token: uuid.UUID | None,
         processed: list[int],
         record_budget: bool,
     ) -> _Stop | None:
@@ -637,9 +659,7 @@ class AgentLoop:
                 return _Stop(RunStatus.RUNNING, failure_code=limit.failure_code)
         processed.append(call.ordinal)
         try:
-            return await self._process_tool_call(
-                run=run, call=call, budget=budget, lease_token=lease_token
-            )
+            return await self._process_tool_call(run=run, call=call, budget=budget)
         except LoopLimitExceeded as limit:
             return _Stop(RunStatus.RUNNING, failure_code=limit.failure_code)
 
@@ -649,7 +669,6 @@ class AgentLoop:
         run: Run,
         call: ToolCall,
         budget: LoopBudget,
-        lease_token: uuid.UUID | None,
     ) -> _Stop | None:
         """单个 ToolCall:PreToolUse 决策分流(架构文档 §8、§9)。"""
         pin = self._require_pin(call)
@@ -678,7 +697,7 @@ class AgentLoop:
             return await self._handle_require_input(run, call, pin, decision)
         if decision.kind == "REQUIRE_CONFIRMATION":
             return await self._handle_require_confirmation(run, call, pin, decision)
-        return await self._handle_allow(run, call, pin, budget, lease_token)
+        return await self._handle_allow(run, call, pin, budget)
 
     @staticmethod
     def _base_arguments(call: ToolCall) -> dict[str, Any]:
@@ -815,16 +834,13 @@ class AgentLoop:
         call: ToolCall,
         pin: ToolPin,
         budget: LoopBudget,
-        lease_token: uuid.UUID | None,
     ) -> _Stop | None:
         """ALLOW:读 Tool 直接执行;写 Tool 走两阶段 ToolExecutor。"""
         if pin.effect is ToolEffect.READ:
             return await self._execute_read(
                 run, call, pin, budget, self._base_arguments(call)
             )
-        return await self._execute_write(
-            run, call, pin, lease_token, self._base_arguments(call)
-        )
+        return await self._execute_write(run, call, pin, self._base_arguments(call))
 
     async def _execute_read(
         self,
@@ -905,10 +921,9 @@ class AgentLoop:
         run: Run,
         call: ToolCall,
         pin: ToolPin,
-        lease_token: uuid.UUID | None,
         arguments: dict[str, Any],
     ) -> _Stop | None:
-        """写 Tool:begin → 外部调用 → PostToolUse → 结果事务(含 fencing)。"""
+        """写 Tool:begin → 外部调用 → PostToolUse → 结果事务。"""
         handler = pin.handler
         if handler is None or not callable(getattr(handler, "execute_prepared", None)):
             return _Stop(RunStatus.RUNNING, failure_code=TOOL_HANDLER_MISSING)
@@ -917,17 +932,12 @@ class AgentLoop:
             return _Stop(
                 RunStatus.RUNNING, failure_code=WRITE_EXECUTION_PROFILE_MISSING
             )
-        if lease_token is None:
-            raise RuntimeError(
-                "write tool execution requires an active lease_token for fencing"
-            )
         fresh = await self._require_run(run.id)
         executor = ToolExecutor(
             self._session,
             workspace_id=self._workspace_id,
             actor_id=run.created_by_actor_id,
             run_id=run.id,
-            lease_token=lease_token,
             expected_state_version=fresh.state_version,
             handler=handler,
             processor=self._processor,
@@ -941,14 +951,14 @@ class AgentLoop:
         recorded = executed.recorded
         if recorded.operation_outcome is OperationOutcome.UNKNOWN:
             # Run 已被 OperationService 迁移 WAITING_RECONCILIATION;停止后续并把
-            # Task 8 的 next_job_kind 指令暴露给编排层。
+            # 回查指令暴露给执行器。
             return _Stop(
                 RunStatus.WAITING_RECONCILIATION,
-                next_job_kind=recorded.next_job_kind,
+                next_step=recorded.next_step,
             )
         if recorded.tool_call_status is ToolCallStatus.VALIDATING:
             # NOT_APPLIED + retry_allowed:重新排队,恢复后重走完整 PreToolUse。
-            return _Stop(RunStatus.RUNNING, next_job_kind=RunJobKind.ADVANCE_RUN)
+            return _Stop(RunStatus.RUNNING, next_step=RunNextStep.ADVANCE)
         # APPLIED 与不可重试的确定失败都回填 Tool Result 让模型决定下一步:
         # NOT_APPLIED 且 retry_allowed=False 时 ToolCall 已是 FAILED 终态,
         # 不会再次进入 PreToolUse(确定性拒绝只执行一次)。

@@ -20,11 +20,9 @@ from agents.product_operations.pricing.reconciliation import PriceReconciler
 from agents.product_operations.pricing.service import OPERATION_TYPE as PRICING_OPERATION
 from agents.product_operations.shared.reconciliation import OperationReconcilerRegistry
 from runtime.execution.reconciliation import ReconciliationService
-from runtime.jobs.lease_service import LeaseService
 from runtime.orchestration.limits import RunLimits
-from runtime.persistence.base import OperationStatus, RunJobKind, RunStatus
+from runtime.persistence.base import OperationStatus, RunNextStep, RunStatus
 from runtime.persistence.models.execution import Operation, ToolCall
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.runs import RunRepository
 
 
@@ -90,17 +88,11 @@ class ProductOperationsRecovery:
         self._before_external_call = before_external_call
 
     async def reconcile_once(self, run_id: uuid.UUID) -> bool:
-        """完成一次回查；返回是否应调度 ``ADVANCE_RUN``。"""
+        """完成一次回查;返回是否需要继续推进该 Run。"""
         loaded = await self._load_unknown_operation(run_id)
         if loaded is None:
             return False
-        (
-            job_id,
-            lease_token,
-            operation_id,
-            expected_state,
-            expected_state_version,
-        ) = loaded
+        operation_id, expected_state, expected_state_version = loaded
         operation_type = expected_state.get("operation_type")
         if not isinstance(operation_type, str):
             raise TypeError("UNKNOWN operation expected_state has no operation_type")
@@ -124,61 +116,53 @@ class ProductOperationsRecovery:
                     actor_id=self._actor_id,
                     run_id=run_id,
                     operation_id=operation_id,
-                    lease_token=lease_token,
                     expected_state_version=expected_state_version,
                     reconcile_budget=self._run_limits.reconcile_budget,
                     write_retry_budget=self._run_limits.write_retry_budget,
                 ).apply_result(verdict)
-                await LeaseService(session).complete(job_id, lease_token)
-                return outcome.next_job_kind is RunJobKind.ADVANCE_RUN
+                return outcome.next_step is RunNextStep.ADVANCE
         finally:
             await session.close()
 
     async def _load_unknown_operation(
         self, run_id: uuid.UUID
-    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, Mapping[str, Any], int] | None:
+    ) -> tuple[uuid.UUID, Mapping[str, Any], int] | None:
+        """读取该 Run 唯一的不确定 Operation 与 Run 的当前 state_version。
+
+        ``EXECUTING`` 与 ``UNKNOWN`` 都算不确定:进程可能在外部调用期间退出,
+        此时 Operation 停在 EXECUTING,但外部写入是否生效同样未知。
+        """
         session = self._session_factory()
         try:
-            async with session.begin():
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.RECONCILE_OPERATION,
-                )
-                lease = await LeaseService(session).claim("product-reconciler")
-                if lease is None:
-                    return None
-                if lease.run_id != run_id or lease.workspace_id != self._workspace_id:
-                    return None
-                run = await RunRepository(session).get(self._workspace_id, run_id)
-                if run is None or run.status is not RunStatus.WAITING_RECONCILIATION:
-                    return None
-                operations = (
-                    await session.scalars(
-                        select(Operation)
-                        .join(ToolCall, ToolCall.id == Operation.tool_call_id)
-                        .where(
-                            Operation.workspace_id == self._workspace_id,
-                            ToolCall.workspace_id == self._workspace_id,
-                            ToolCall.run_id == run_id,
-                            Operation.status == OperationStatus.UNKNOWN,
-                        )
+            run = await RunRepository(session).get(self._workspace_id, run_id)
+            if run is None or run.status is not RunStatus.WAITING_RECONCILIATION:
+                return None
+            operations = (
+                await session.scalars(
+                    select(Operation)
+                    .join(ToolCall, ToolCall.id == Operation.tool_call_id)
+                    .where(
+                        Operation.workspace_id == self._workspace_id,
+                        ToolCall.workspace_id == self._workspace_id,
+                        ToolCall.run_id == run_id,
+                        Operation.status.in_(
+                            (OperationStatus.EXECUTING, OperationStatus.UNKNOWN)
+                        ),
                     )
-                ).all()
-                if len(operations) != 1:
-                    return None
-                operation = operations[0]
-                if operation.expected_state is None:
-                    raise ValueError(
-                        f"UNKNOWN operation {operation.operation_id} has no expected_state"
-                    )
-                return (
-                    lease.job_id,
-                    lease.lease_token,
-                    operation.operation_id,
-                    dict(operation.expected_state),
-                    run.state_version,
                 )
+            ).all()
+            if len(operations) != 1:
+                return None
+            operation = operations[0]
+            if operation.expected_state is None:
+                raise ValueError(
+                    f"UNKNOWN operation {operation.operation_id} has no expected_state"
+                )
+            return (
+                operation.operation_id,
+                dict(operation.expected_state),
+                run.state_version,
+            )
         finally:
             await session.close()
 

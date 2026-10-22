@@ -216,24 +216,15 @@ class OperationAttemptStatus(str, enum.Enum):
     ABANDONED = "ABANDONED"
 
 
-class RunJobKind(str, enum.Enum):
-    """RunJob 类型(数据模型文档 §9)。"""
+class RunNextStep(str, enum.Enum):
+    """一次推进结束后的下一步动作(进程内执行器调度指令)。
 
-    ADVANCE_RUN = "ADVANCE_RUN"
-    RECONCILE_OPERATION = "RECONCILE_OPERATION"
+    取代原 ``RunJobKind``:执行器不再创建/领取 Job,而是按该指令决定
+    "继续推进同一 Run"还是"先回查不确定的外部写"。
+    """
 
-
-class RunJobStatus(str, enum.Enum):
-    """RunJob 租约状态(执行状态文档 §4.3)。"""
-
-    PENDING = "PENDING"
-    LEASED = "LEASED"
-    DONE = "DONE"
-    DEAD = "DEAD"
-
-
-ACTIVE_JOB_STATUS_VALUES = ("PENDING", "LEASED")
-"""允许占用 Run 活动 Job 位的 Job 状态(部分唯一索引过滤条件)。"""
+    ADVANCE = "ADVANCE"
+    RECONCILE = "RECONCILE"
 
 
 class InputRequestStatus(str, enum.Enum):
@@ -290,7 +281,6 @@ class OutboxStatus(str, enum.Enum):
 
 
 __all__ = [
-    "ACTIVE_JOB_STATUS_VALUES",
     "ACTIVE_RUN_STATUS_VALUES",
     "AccountStatus",
     "Base",
@@ -313,8 +303,7 @@ __all__ = [
     "OutboxStatus",
     "ResourceScopeMode",
     "RunAttemptStatus",
-    "RunJobKind",
-    "RunJobStatus",
+    "RunNextStep",
     "RunStatus",
     "SessionStatus",
     "TimestampMixin",

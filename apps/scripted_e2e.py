@@ -47,7 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.policy.models import PricePolicyConfig
-from apps.worker.assembly import (
+from apps.assembly import (
     ProductApplication,
     build_product_application,
 )
@@ -64,15 +64,9 @@ from runtime.backend.protocol import (
     TextDelta,
     ToolCallCompleted,
 )
-from runtime.jobs.lease_service import Lease, LeaseOutcome
-from runtime.persistence.base import (
-    AccountStatus,
-    InputRequestStatus,
-    ModelBackendType,
-    RunJobKind,
-)
-from runtime.persistence.models.execution import Run, RunJob, ToolCall
-from runtime.persistence.models.identity import WorkspaceMembership
+from runtime.execution.executor import AdvanceOutcome, RunClaim
+from runtime.persistence.base import InputRequestStatus, ModelBackendType
+from runtime.persistence.models.execution import Run, ToolCall
 from runtime.persistence.models.interaction import InputRequest
 
 
@@ -318,7 +312,7 @@ async def build_e2e_application(
     workspace_id: uuid.UUID,
     actor_id: uuid.UUID,
     membership_id: uuid.UUID,
-    worker_id: str = "e2e-worker",
+    executor_id: str = "e2e-executor",
 ) -> ProductApplication:
     """E2E 组合根:ScriptedBackend + Mock Commerce Adapter 的完整商品应用环境。
 
@@ -341,7 +335,7 @@ async def build_e2e_application(
         workspace_id=workspace_id,
         actor_id=actor_id,
         membership_id=membership_id,
-        worker_id=worker_id,
+        executor_id=executor_id,
     )
 
 
@@ -386,118 +380,89 @@ async def rebuild_answered_view(
     return answered
 
 
-class E2EJobHandler:
-    """``RUNTIME_E2E=1`` 的 Worker Job 回调:按租约推进已存在的 Run。
+class ProductDriverRegistry:
+    """进程内执行器的商品域 driver:按 ``(workspace, actor)`` 懒组装并缓存。
 
-    每个 ``(workspace, actor)`` 懒组装并缓存一个 ProductApplication(能力版本
-    落库幂等);推进经 ``ProductApplication.advance_leased`` 复用 Runtime 的
-    单事务 AgentLoop 语义,WorkerHost 负责外层 claim/heartbeat/complete。
+    执行器只认 ``RunDriver`` 协议;本类负责把 RunClaim 路由到对应工作区的
+    :class:`ProductApplication`,并在每次推进前从持久化状态重建"已回答字段"
+    视图(进程重启后门面的内存视图为空)。
     """
 
-    def __init__(self, engine: AsyncEngine, *, worker_id: str = "e2e-worker") -> None:
+    def __init__(self, engine: AsyncEngine, *, executor_id: str = "api-executor") -> None:
         self._engine = engine
-        self._worker_id = worker_id
-        self._applications: dict[
-            tuple[uuid.UUID, uuid.UUID], ProductApplication
-        ] = {}
+        self._executor_id = executor_id
+        self._applications: dict[tuple[uuid.UUID, uuid.UUID], ProductApplication] = {}
 
     @property
-    def applications(
-        self,
-    ) -> Mapping[tuple[uuid.UUID, uuid.UUID], ProductApplication]:
+    def applications(self) -> Mapping[tuple[uuid.UUID, uuid.UUID], ProductApplication]:
         return self._applications
 
     async def aclose(self) -> None:
-        """关闭全部缓存商品应用的 Adapter Session(进程退出路径)。"""
+        """关闭全部缓存商品的 Adapter Session(进程退出路径)。"""
         for application in self._applications.values():
             await application.aclose()
         self._applications.clear()
 
-    async def __call__(self, lease: Lease) -> LeaseOutcome:
+    async def advance(
+        self, claim: RunClaim, *, answered: Mapping[str, str] | None = None
+    ) -> AdvanceOutcome:
+        if answered is None:
+            session = AsyncSession(self._engine, expire_on_commit=False)
+            try:
+                answered = await rebuild_answered_view(
+                    session, claim.workspace_id, claim.run_id
+                )
+            finally:
+                await session.close()
+        application = await self._application_for(
+            claim.workspace_id, claim.actor_id, claim.membership_id
+        )
+        return await application.advance(claim, answered=answered)
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
         session = AsyncSession(self._engine, expire_on_commit=False)
         try:
-            context = await self._load_context(session, lease)
+            run = (
+                await session.scalars(
+                    select(Run).where(
+                        Run.workspace_id == workspace_id, Run.id == run_id
+                    )
+                )
+            ).one_or_none()
+            if run is None:
+                return False
+            application = await self._application_for(
+                workspace_id, run.created_by_actor_id, run.created_by_membership_id
+            )
         finally:
             await session.close()
-        if isinstance(context, LeaseOutcome):
-            return context
-        application = await self._application_for(context)
-        return await application.advance_leased(lease, answered=context.answered)
+        return await application.reconcile(run_id, workspace_id)
 
     async def _application_for(
-        self, context: _LeaseContext
+        self,
+        workspace_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        membership_id: uuid.UUID,
     ) -> ProductApplication:
-        key = (context.workspace_id, context.actor_id)
+        key = (workspace_id, actor_id)
         application = self._applications.get(key)
         if application is None:
             application = await build_e2e_application(
                 self._engine,
-                workspace_id=context.workspace_id,
-                actor_id=context.actor_id,
-                membership_id=context.membership_id,
-                worker_id=self._worker_id,
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+                membership_id=membership_id,
+                executor_id=self._executor_id,
             )
             self._applications[key] = application
         return application
 
-    async def _load_context(
-        self, session: AsyncSession, lease: Lease
-    ) -> _LeaseContext | LeaseOutcome:
-        """加载租约上下文;不可推进时直接返回确定性结果(不抛暂时性错误)。"""
-        job = (
-            await session.scalars(select(RunJob).where(RunJob.id == lease.job_id))
-        ).one_or_none()
-        if job is None:
-            return LeaseOutcome(failure_code="JOB_NOT_FOUND")
-        if job.kind is RunJobKind.RECONCILE_OPERATION:
-            # E2E 流程无故障注入,不产生 UNKNOWN 回执;显式拒绝而非静默跳过。
-            return LeaseOutcome(failure_code="E2E_RECONCILE_UNSUPPORTED")
-        run = (
-            await session.scalars(
-                select(Run).where(
-                    Run.workspace_id == lease.workspace_id, Run.id == lease.run_id
-                )
-            )
-        ).one_or_none()
-        if run is None:
-            return LeaseOutcome(failure_code="RUN_NOT_FOUND")
-        membership_id = (
-            await session.scalars(
-                select(WorkspaceMembership.id).where(
-                    WorkspaceMembership.workspace_id == lease.workspace_id,
-                    WorkspaceMembership.user_id == run.created_by_actor_id,
-                    WorkspaceMembership.status == AccountStatus.ACTIVE,
-                )
-            )
-        ).one_or_none()
-        if membership_id is None:
-            return LeaseOutcome(failure_code="MEMBERSHIP_NOT_FOUND")
-        answered = await rebuild_answered_view(
-            session, lease.workspace_id, lease.run_id
-        )
-        return _LeaseContext(
-            workspace_id=lease.workspace_id,
-            actor_id=run.created_by_actor_id,
-            membership_id=membership_id,
-            answered=answered,
-        )
-
-
-@dataclass(frozen=True)
-class _LeaseContext:
-    """一次租约推进所需的上下文(租约本身不含 actor/回答视图)。"""
-
-    workspace_id: uuid.UUID
-    actor_id: uuid.UUID
-    membership_id: uuid.UUID
-    answered: dict[str, str]
-
 
 __all__ = [
     "E2E_PRICE_CONFIG",
-    "E2EJobHandler",
     "E2EScriptedBackend",
     "ParsedPriceTask",
+    "ProductDriverRegistry",
     "ScriptedStep",
     "ScriptedTask",
     "build_e2e_application",

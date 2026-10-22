@@ -1,25 +1,25 @@
-"""ReconciliationService:RECONCILE_OPERATION 回查(计划 02 Task 8;架构文档 §4.1、§4.2、§7)。
+"""ReconciliationService:不确定外部写的回查(计划 02 Task 8;架构文档 §4.1、§4.2、§7)。
 
 权威语义(计划 Step 3 逐条):
 
-- 按 Run 领取 ``RECONCILE_OPERATION`` Job(租约由 LeaseService 颁发),回查结果
-  经 :meth:`ReconciliationService.apply_result` 提交,fencing 与结果事务一致:
-  ``job.lease_token`` 校验 + Run ``state_version`` CAS;
+- 由 RunExecutor 在恢复扫描或 ``next_step=RECONCILE`` 时调用;回查结果经
+  :meth:`ReconciliationService.apply_result` 提交,与 Run ``state_version``
+  CAS 同一事务;
 - **APPLIED** → Operation APPLIED、ToolCall ``UNKNOWN → SUCCEEDED``、Run
-  ``WAITING_RECONCILIATION → QUEUED``(返回 ``next_job_kind=ADVANCE_RUN`` 指令,
-  编排层据此调度恢复 Job);
+  ``WAITING_RECONCILIATION → QUEUED``(返回 ``next_step=ADVANCE`` 指令,
+  执行器据此继续推进同一 Run);
 - **NOT_APPLIED** → Operation NOT_APPLIED;ToolCall 由**写入重试预算**裁决:该
   Operation 已持久化的 ``EXECUTE`` Attempt 数 < ``write_retry_budget`` 时回
   ``VALIDATING``(必须重走完整 PreToolUse),否则落 ``FAILED`` 终态并写
   ``failure_code=WRITE_RETRY_BUDGET_EXCEEDED``、不再产生可重排入口;两种情况 Run
-  均回 QUEUED(``next_job_kind=ADVANCE_RUN``)让模型据失败结果收尾;
+  均回 QUEUED(``next_step=ADVANCE``)让模型据失败结果收尾;
   ``direct_execute`` 恒为 False——绝不直接重执行;
 - **终态回填模型可见结果**:APPLIED 与终态 NOT_APPLIED 都必须在同一事务内落一条
   与原 assistant tool call 配对的 TOOL 消息(``call_id`` 即 ``ToolCall.id``)。
   否则下一轮真实模型会看到"有 tool call 却缺 tool result"的非法历史,Provider
   可能直接拒绝,模型也无法据结果收尾;重复恢复不得重复写该消息;
 - **UNKNOWN(仍不确定)** → Operation/ToolCall 保持 UNKNOWN 作为权威事实;
-  预算内 Run 保持 WAITING_RECONCILIATION 并再次返回 RECONCILE_OPERATION 指令;
+  预算内 Run 保持 WAITING_RECONCILIATION 并再次返回 ``next_step=RECONCILE``;
   超过回查预算(注入值)Run ``FAILED``(``RECONCILE_BUDGET_EXCEEDED``),但
   ToolCall/Operation 保留 UNKNOWN;
 - 每次回查写一条 RECONCILE OperationAttempt(次数计数依据)、刷新
@@ -50,11 +50,10 @@ from runtime.events.writer import AgentEventWriter, AppendedEvent
 from runtime.execution.operations import (
     RECEIPT_STAGE_RECONCILIATION,
     TOOL_WRITE_RECONCILED,
-    LeaseStaleError,
     OperationOutcome,
-    ensure_write_fencing,
 )
 from runtime.execution.run_service import RunService
+from runtime.execution.transitions import InvalidTransition
 from runtime.interfaces.state import RunStatus
 from runtime.persistence.base import (
     MessageRole,
@@ -62,7 +61,7 @@ from runtime.persistence.base import (
     OperationAttemptKind,
     OperationAttemptStatus,
     OperationStatus,
-    RunJobKind,
+    RunNextStep,
     ToolCallStatus,
 )
 from runtime.persistence.models.configuration import ToolDefinition, ToolVersion
@@ -109,7 +108,7 @@ class ReconcileOutcome:
     tool_call_status: ToolCallStatus
     run_status: RunStatus
     direct_execute: bool
-    next_job_kind: RunJobKind | None
+    next_step: RunNextStep | None
     reconcile_count: int
     budget_exhausted: bool
     event: AppendedEvent
@@ -126,7 +125,6 @@ class ReconciliationService:
         actor_id: uuid.UUID,
         run_id: uuid.UUID,
         operation_id: uuid.UUID,
-        lease_token: uuid.UUID,
         expected_state_version: int,
         reconcile_budget: int,
         write_retry_budget: int,
@@ -136,7 +134,6 @@ class ReconciliationService:
         self._actor_id = actor_id
         self._run_id = run_id
         self._operation_id = operation_id
-        self._lease_token = lease_token
         self._expected_state_version = expected_state_version
         self._reconcile_budget = reconcile_budget
         self._write_retry_budget = write_retry_budget
@@ -146,13 +143,12 @@ class ReconciliationService:
 
     async def apply_result(self, result: ReconcileResult) -> ReconcileOutcome:
         """提交一次回查结论;状态迁移、事件与审计在同一事务内完成。"""
-        await ensure_write_fencing(
-            self._session,
-            workspace_id=self._workspace_id,
-            run_id=self._run_id,
-            lease_token=self._lease_token,
-        )
         operation_row = await self._load_operation()
+        # 版本校验必须在任何写入之前:UNKNOWN 分支没有 Run 迁移,若把校验留到
+        # 末尾的 CAS,过期版本的 UNKNOWN 结论会被静默接受;而 APPLIED/NOT_APPLIED
+        # 的 CAS 失败时,已 flush 的 Operation/ToolCall 改动也会留在调用方会话里
+        # (调用方若不整体回滚,就会出现"记为 APPLIED 但 Run 未恢复")。
+        await self._ensure_state_version_matches()
         tool_call = await self._load_tool_call(operation_row.tool_call_id)
         # 预算计数按 RECONCILE kind;行唯一性(uq_operation_attempts_operation_attempt
         # 覆盖全部 kind)则按该 Operation 的全局 max(attempt_no)+1,避免与
@@ -235,7 +231,7 @@ class ReconciliationService:
                 tool_call_id=tool_call.id,
             )
             run_status = RunStatus.WAITING_RECONCILIATION
-            next_job_kind: RunJobKind | None = RunJobKind.RECONCILE_OPERATION
+            next_step: RunNextStep | None = RunNextStep.RECONCILE
         else:
             transition = await self._runs.transition_run(
                 run_id=self._run_id,
@@ -261,7 +257,7 @@ class ReconciliationService:
                 tool_call_id=tool_call.id,
             )
             run_status = transition.target_status
-            next_job_kind = RunJobKind.ADVANCE_RUN
+            next_step = RunNextStep.ADVANCE
             if tool_call_status in (ToolCallStatus.SUCCEEDED, ToolCallStatus.FAILED):
                 # 终态才回填模型可见结果:VALIDATING 仍在飞行中,重执行由
                 # AgentLoop 的正常写路径补 tool result,这里不得抢先写。
@@ -292,7 +288,7 @@ class ReconciliationService:
             run_status=run_status,
             # 不变量:任何回查结论都不允许绕过 PreToolUse 直接重执行。
             direct_execute=False,
-            next_job_kind=next_job_kind,
+            next_step=next_step,
             reconcile_count=reconcile_count,
             budget_exhausted=False,
             event=event,
@@ -353,11 +349,34 @@ class ReconciliationService:
             tool_call_status=ToolCallStatus.UNKNOWN,
             run_status=transition.target_status,
             direct_execute=False,
-            next_job_kind=None,
+            next_step=None,
             reconcile_count=reconcile_count,
             budget_exhausted=True,
             event=transition.event,
         )
+
+    async def _ensure_state_version_matches(self) -> None:
+        """回查结论的 stale 检查:版本不符则整笔拒绝,不改动任何行。"""
+        run = (
+            await self._session.scalars(
+                select(Run)
+                .where(Run.workspace_id == self._workspace_id, Run.id == self._run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if run is None:
+            raise LookupError(
+                f"run {self._run_id} not found in workspace {self._workspace_id}"
+            )
+        if run.state_version != self._expected_state_version:
+            raise InvalidTransition(
+                current=RunStatus(run.status.value),
+                target=RunStatus.QUEUED,
+                reason=(
+                    "stale reconcile result: state_version "
+                    f"{self._expected_state_version} != {run.state_version}"
+                ),
+            )
 
     async def _load_operation(self) -> Operation:
         stmt = select(Operation).where(
@@ -610,7 +629,6 @@ def _reconciliation_tool_content(
 __all__ = [
     "RECONCILE_BUDGET_EXCEEDED",
     "WRITE_RETRY_BUDGET_EXCEEDED",
-    "LeaseStaleError",
     "OperationNotFoundError",
     "ReconcileOutcome",
     "ReconcileResult",

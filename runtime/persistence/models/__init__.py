@@ -36,7 +36,6 @@ from runtime.persistence.models.execution import (  # noqa: F401
     OperationAttempt,
     Run,
     RunAttempt,
-    RunJob,
     RunPolicySnapshot,
     RunSkillVersion,
     RunSourceVersion,
