@@ -156,16 +156,27 @@ async def _seed_listing(
     currency: str | None,
     status: str | None,
     products_by_sku: dict[str, Product],
+    stores_by_symbol: dict[str, Store],
 ) -> SeededListing:
-    """按 Scenario 符号种子 Store/Product/Listing 并返回符号映射。"""
-    store = Store(
-        id=uuid.uuid4(),
-        workspace_id=workspace_id,
-        platform=StorePlatform.TAOBAO,
-        external_store_ref=f"eval-{uuid.uuid4().hex[:12]}",
-        name=symbol,
-        aliases=[symbol],
-    )
+    """按 Scenario 符号种子 Store/Product/Listing 并返回符号映射。
+
+    Store 按 ``store_id`` 符号复用:一个店铺放多个 SKU 是常态,若每条 Listing
+    都新建一个同名 Store,店铺引用解析会命中多个候选、被判成
+    ``AMBIGUOUS_STORE_REFERENCE``,场景在工具调用阶段就崩掉。
+    """
+    store = stores_by_symbol.get(symbol)
+    if store is None:
+        store = Store(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            platform=StorePlatform.TAOBAO,
+            external_store_ref=f"eval-{uuid.uuid4().hex[:12]}",
+            name=symbol,
+            aliases=[symbol],
+        )
+        stores_by_symbol[symbol] = store
+        session.add(store)
+        await session.flush()
     product = products_by_sku.get(sku)
     if product is None:
         product = Product(
@@ -176,7 +187,6 @@ async def _seed_listing(
         )
         products_by_sku[sku] = product
         session.add(product)
-    session.add(store)
     await session.flush()
     listing = Listing(
         id=uuid.uuid4(),
@@ -249,6 +259,7 @@ class IsolatedEnvironment:
         seeded: list[SeededListing] = []
         seeded_inventory: list[SeededInventory] = []
         products_by_sku: dict[str, Product] = {}
+        stores_by_symbol: dict[str, Store] = {}
 
         session = AsyncSession(engine, expire_on_commit=False)
         try:
@@ -291,6 +302,7 @@ class IsolatedEnvironment:
                             currency=spec.currency,
                             status=spec.status,
                             products_by_sku=products_by_sku,
+                            stores_by_symbol=stores_by_symbol,
                         )
                     )
                 for inventory_spec in scenario.initial_state.inventory_levels:
@@ -364,15 +376,19 @@ class IsolatedEnvironment:
                                 "actor store scope references unseeded stores: "
                                 + ", ".join(sorted(missing_symbols))
                             )
+                        scoped_store_ids = {
+                            listing.store_id
+                            for listing in seeded
+                            if listing.symbol in requested_symbols
+                        }
                         session.add_all(
                             MembershipResourceScope(
                                 workspace_id=workspace_id,
                                 membership_id=membership_id,
                                 resource_type="store",
-                                resource_id=str(listing.store_id),
+                                resource_id=str(store_id),
                             )
-                            for listing in seeded
-                            if listing.symbol in requested_symbols
+                            for store_id in sorted(scoped_store_ids)
                         )
         finally:
             await session.close()
