@@ -1,7 +1,7 @@
-"""Run、执行尝试、Tool 执行与 Job 表(数据模型文档 §5、§6、§7、§9)。
+"""Run、执行尝试与 Tool 执行表(数据模型文档 §5、§6、§7)。
 
 - 部分唯一索引 ``uq_active_run_per_session`` 保证同一 Session 最多一个活动 Run;
-- 部分唯一索引 ``uq_active_job_per_run`` 保证同一 Run 最多一个活动 Job;
+- Run 执行由进程内 ``RunExecutor`` 推进(见 ADR-003),不再持久化 Job 与租约;
 - Run 配置快照表固定当次运行使用的 Skill/Tool/Source/Policy 版本;
 - Workspace 资源关系使用包含 ``workspace_id`` 的复合外键。可被 GLOBAL 作用域
   版本(skill/tool)引用的关系退化为单列外键,因为全局版本 ``workspace_id`` 为空。
@@ -12,20 +12,17 @@ from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Uuid, func
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from runtime.persistence.base import (
-    ACTIVE_JOB_STATUS_VALUES,
     ACTIVE_RUN_STATUS_VALUES,
     Base,
     OperationAttemptKind,
     OperationAttemptStatus,
     OperationStatus,
     RunAttemptStatus,
-    RunJobKind,
-    RunJobStatus,
     RunStatus,
     TimestampMixin,
     ToolCallStatus,
@@ -35,7 +32,6 @@ from runtime.persistence.base import (
 
 
 _ACTIVE_RUN_WHERE = "status IN ('{}')".format("', '".join(ACTIVE_RUN_STATUS_VALUES))
-_ACTIVE_JOB_WHERE = "status IN ('{}')".format("', '".join(ACTIVE_JOB_STATUS_VALUES))
 
 
 class Run(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -92,7 +88,7 @@ class Run(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["model_config_versions.workspace_id", "model_config_versions.id"],
             name="fk_runs_model_config_version",
         ),
-        # 供 messages/tool_calls/run_jobs/agent_events 等按 (workspace_id, run_id) 复合外键引用。
+        # 供 messages/tool_calls/agent_events 等按 (workspace_id, run_id) 复合外键引用。
         sa.UniqueConstraint("workspace_id", "id", name="uq_runs_workspace_id"),
         sa.Index(
             "uq_active_run_per_session",
@@ -105,7 +101,13 @@ class Run(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 
 class RunAttempt(Base, UUIDPrimaryKeyMixin):
-    """Run 的单次执行尝试;Job 领取与租约回收都会创建新 Attempt。"""
+    """Run 的单次执行尝试;执行器每推进一次创建一个 Attempt。
+
+    与旧模型的区别:Attempt 不再表示"领取了一个 Job",而是表示
+    "某个执行器实例对同一 Run 的一次推进"。``executor_id`` 只用于事后
+    归因(崩溃后判断上一次推进由谁发起),不参与互斥——互斥由
+    ``Run.state_version`` CAS 与进程级单写者锁保证。
+    """
 
     __tablename__ = "run_attempts"
 
@@ -114,7 +116,7 @@ class RunAttempt(Base, UUIDPrimaryKeyMixin):
     )
     run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     attempt_no: Mapped[int] = mapped_column(sa.Integer, nullable=False)
-    worker_id: Mapped[str | None] = mapped_column(sa.String(255))
+    executor_id: Mapped[str | None] = mapped_column(sa.String(255))
     status: Mapped[RunAttemptStatus] = mapped_column(
         db_enum(RunAttemptStatus, "ck_run_attempts_status"),
         nullable=False,
@@ -357,51 +359,14 @@ class OperationAttempt(Base, UUIDPrimaryKeyMixin):
     )
 
 
-class RunJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """Run 执行 Job;短租约驱动 ADVANCE_RUN 与 RECONCILE_OPERATION。"""
-
-    __tablename__ = "run_jobs"
-
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("workspaces.id", name="fk_run_jobs_workspace_id"), nullable=False
-    )
-    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    kind: Mapped[RunJobKind] = mapped_column(
-        db_enum(RunJobKind, "ck_run_jobs_kind"), nullable=False
-    )
-    status: Mapped[RunJobStatus] = mapped_column(
-        db_enum(RunJobStatus, "ck_run_jobs_status"), nullable=False, server_default="PENDING"
-    )
-    available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    attempt_count: Mapped[int] = mapped_column(
-        sa.Integer, nullable=False, server_default=sa.text("0")
-    )
-    max_attempts: Mapped[int] = mapped_column(
-        sa.Integer, nullable=False, server_default=sa.text("3")
-    )
-    lease_owner: Mapped[str | None] = mapped_column(sa.String(255))
-    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error_code: Mapped[str | None] = mapped_column(sa.String(64))
-
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["workspace_id", "run_id"],
-            ["runs.workspace_id", "runs.id"],
-            name="fk_run_jobs_run",
-        ),
-        sa.Index(
-            "uq_active_job_per_run",
-            "run_id",
-            unique=True,
-            postgresql_where=sa.text(_ACTIVE_JOB_WHERE),
-        ),
-        sa.Index("ix_run_jobs_status_available_at", "status", "available_at"),
-        sa.Index(
-            "ix_run_jobs_lease_expires_at",
-            "lease_expires_at",
-            postgresql_where=sa.text("status = 'LEASED'"),
-        ),
-    )
+__all__ = [
+    "Operation",
+    "OperationAttempt",
+    "Run",
+    "RunAttempt",
+    "RunPolicySnapshot",
+    "RunSkillVersion",
+    "RunSourceVersion",
+    "RunToolVersion",
+    "ToolCall",
+]

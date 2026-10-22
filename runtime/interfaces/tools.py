@@ -2,7 +2,7 @@
 
 ToolDefinition 只包含模型可见且可持久化的数据与版本,不包含回调、闭包、
 客户端对象、数据库 Session 或凭证;Handler 由启动时组装的 ToolBinding
-(Worker 进程内,架构文档 §3.3)连接。
+(装配进程内,架构文档 §3.3)连接。
 """
 
 from enum import Enum

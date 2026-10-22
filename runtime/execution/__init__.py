@@ -8,5 +8,5 @@
 - ``tool_result_processor``:固定 PostToolUse 管线(协议/分类/Schema/脱敏/投影);
 - ``context_projection``:模型投影构建器(确定性裁剪 + content_hash);
 - ``tool_executor``:两阶段执行编排(begin → handler → record_result);
-- ``reconciliation``:RECONCILE_OPERATION 回查(NOT_APPLIED 只能回 VALIDATING)。
+- ``reconciliation``:不确定外部写的回查(NOT_APPLIED 只能回 VALIDATING)。
 """

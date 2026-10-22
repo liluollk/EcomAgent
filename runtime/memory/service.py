@@ -260,7 +260,7 @@ class MemoryService:
     async def expire_due(self, *, now: datetime | None = None) -> int:
         """把已到期的 ACTIVE 记录置为 EXPIRED;返回受影响行数。
 
-        由 Worker 维护任务调用;``now`` 供测试注入。
+        由维护任务调用;``now`` 供测试注入。
         """
         cutoff = now if now is not None else self._now()
         stmt = (

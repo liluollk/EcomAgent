@@ -28,7 +28,7 @@ from runtime.persistence.models.integrations import IntegrationOutbox
 
 
 DEFAULT_LEASE_DURATION = timedelta(seconds=30)
-"""领取的默认短租约时长(与 RunJob 租约同型)。"""
+"""领取的默认短租约时长(Outbox 自己的租约,与 Run 执行无关)。"""
 
 DEFAULT_MAX_ATTEMPTS = 3
 """默认 attempt 预算:超过即置 DEAD。"""

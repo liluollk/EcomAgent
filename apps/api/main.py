@@ -28,6 +28,7 @@ from apps.api.errors import (
     VALIDATION_ERROR,
     ApiError,
 )
+from apps.api.executor_host import ExecutorHost, build_executor_host
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
 from apps.api.routes.events import router as events_router
@@ -118,16 +119,29 @@ class RequestContextMiddleware:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动时确保引擎与会话工厂就绪;自行创建的引擎在关闭时释放。"""
+    """启动时确保引擎与会话工厂就绪,并按需启动进程内 Run 执行器。
+
+    执行器在 ``RUNTIME_E2E=1`` 时装配(见 :mod:`apps.api.executor_host`):
+    启动时获取单写者锁并接管上次进程遗留的非终态 Run。
+    """
     engine: AsyncEngine | None = getattr(app.state, "engine", None)
     owns_engine = engine is None
     if engine is None:
         engine = create_engine(get_database_url())
         app.state.engine = engine
         app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    host: ExecutorHost | None = None
     try:
+        if getattr(app.state, "executor", None) is None:
+            host = build_executor_host(engine)
+            if host is not None:
+                await host.start()
+                app.state.executor = host.executor
         yield
     finally:
+        if host is not None:
+            await host.aclose()
+            app.state.executor = None
         if owns_engine:
             await engine.dispose()
 

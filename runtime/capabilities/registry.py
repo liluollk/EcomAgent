@@ -4,7 +4,7 @@
 - 数据由装配方从数据库读出后注册,Registry 本身不查库;
 - 重复注册与版本冲突在启动期(注册时)确定性拒绝,不以运行时猜测修复。
 
-ToolBinding 只存在于 Worker 进程(架构文档 §3.3),连接数据定义与可执行
+ToolBinding 只存在于装配进程内(架构文档 §3.3),连接数据定义与可执行
 实现;Handler 侧其余字段(input_normalizer 等)由 PreToolUse 任务补充。
 """
 
@@ -107,7 +107,7 @@ class SourceVersionRecord(VersionedRecord):
 
 
 class ToolBinding(BaseModel):
-    """Worker 进程内 Tool 与可执行实现的连接(架构文档 §3.3)。
+    """装配进程内 Tool 与可执行实现的连接(架构文档 §3.3)。
 
     以 ``definition.stable_key`` 关联 Local Tool。PreToolUse 扩展不再由组合根
     按 ``stable_key`` 全局注入,而是由 ``pretool_registration`` 为每个 Tool
@@ -208,7 +208,7 @@ class ToolRegistry(_VersionedRegistry[ToolVersionRecord]):
 
     ToolBinding 按 ``tool_version_id`` 绑定:同一 stable key 的当前版本与兼容
     版本各自带自己的 Handler、PreToolProfile 与执行 Profile,新 Run 与旧 Run
-    恢复因此可以共存于同一 Worker 进程。
+    恢复因此可以共存于同一装配进程。
     """
 
     def __init__(self) -> None:

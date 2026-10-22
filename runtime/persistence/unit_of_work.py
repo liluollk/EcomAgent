@@ -1,7 +1,7 @@
 """事务所有权:UnitOfWork Protocol 与 SQLAlchemy 实现(计划 01 Task 4、架构文档 §13)。
 
 语义:
-- ``__aenter__`` 创建 ``AsyncSession`` 并装配六个 Repository;
+- ``__aenter__`` 创建 ``AsyncSession`` 并装配五个 Repository;
 - 正常退出**不自动提交**;异常退出执行 rollback 并关闭 Session;
 - ``commit()``/``rollback()`` 为显式方法,应用服务拥有事务边界;
 - Repository 只调用 flush,绝不调用 commit。
@@ -13,7 +13,6 @@ from typing import Protocol, Self
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from runtime.persistence.repositories.events import EventRepository
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.requests import RequestRepository
 from runtime.persistence.repositories.runs import RunRepository
 from runtime.persistence.repositories.sessions import SessionRepository
@@ -21,12 +20,11 @@ from runtime.persistence.repositories.workspaces import WorkspaceRepository
 
 
 class UnitOfWork(Protocol):
-    """应用服务通过 UoW 获得共享同一事务的六个 Repository。"""
+    """应用服务通过 UoW 获得共享同一事务的五个 Repository。"""
 
     workspaces: WorkspaceRepository
     sessions: SessionRepository
     runs: RunRepository
-    jobs: JobRepository
     requests: RequestRepository
     events: EventRepository
 
@@ -57,7 +55,6 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.workspaces = WorkspaceRepository(session)
         self.sessions = SessionRepository(session)
         self.runs = RunRepository(session)
-        self.jobs = JobRepository(session)
         self.requests = RequestRepository(session)
         self.events = EventRepository(session)
         return self

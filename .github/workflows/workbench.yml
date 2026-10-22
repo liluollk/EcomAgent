@@ -5,7 +5,7 @@ on:
 
 jobs:
   # PR 快速反馈:lint、Vitest 单测(含 EventReducer 重复/乱序/缺口/快照/终态
-  # 不变量)与 build。E2E 需要 postgres + api + worker,拆到下面的 e2e job。
+  # 不变量)与 build。E2E 需要 postgres + api(Run 执行器随 API 启动),拆到下面的 e2e job。
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -22,7 +22,7 @@ jobs:
 
   # 完整 E2E(不设 continue-on-error):ScriptedBackend E2E 装配无真实模型
   # 依赖,在 ubuntu runner 上确定性复现 docker compose 的 postgres + api +
-  # worker 装配(RUNTIME_E2E=1:api 注册 /api/e2e/seed,worker 推进 Job)。
+  # E2E 装配(RUNTIME_E2E=1:api 注册 /api/e2e/seed,进程内执行器推进 Run)。
   e2e:
     runs-on: ubuntu-latest
     services:
@@ -47,13 +47,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - run: uv run alembic upgrade head
-      # 等价于 compose 的 api/worker 服务:先迁移,再后台常驻 uvicorn 与
-      # Worker(RUNTIME_E2E=1);api 健康检查通过才继续。任一进程意外退出
-      # 都会导致 E2E 断言失败,因此这里只做健康等待,不做额外兜底。
-      - name: Start api and worker in background
+      # 等价于 compose 的 api 服务:先迁移,再后台常驻 uvicorn
+      # (RUNTIME_E2E=1,Run 执行器随 API lifespan 启动);健康检查通过才继续。
+      # 进程意外退出会导致 E2E 断言失败,因此这里只做健康等待,不做额外兜底。
+      - name: Start api in background
         run: |
           uv run uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 &
-          uv run python -m apps.worker &
           sleep 5
           curl --fail --retry 24 --retry-delay 5 --retry-connrefused http://127.0.0.1:8000/api/health
         shell: bash

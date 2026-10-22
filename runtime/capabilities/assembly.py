@@ -1,6 +1,6 @@
 """RuntimeAssembly:聚合注册表并执行启动校验(计划 02 Task 2;架构文档 §4)。
 
-Worker 组合根显式构造本对象;``validate()`` 执行架构文档 §4 的启动校验,
+装配组合根显式构造本对象;``validate()`` 执行架构文档 §4 的启动校验,
 ``resolve()`` 给定 Agent 稳定 Key 解析出钉住的精确 Version ID 集合。
 """
 

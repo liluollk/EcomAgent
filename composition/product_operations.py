@@ -13,18 +13,18 @@
 - 平台桥接:把 :class:`~agents.product_operations.tools.update_price.UpdatePriceGateway`
   实现到 :class:`~adapters.commerce.mock_adapter.MockCommerceAdapter`。
 
-模块归属:本组合核心同时被 apps/worker(生产组合根)与 eval(Eval Runner,
-计划 05 Task 2)复用,而 eval 不得 import apps(方向:eval → runtime/
-agents/adapters)。本模块原本位于 apps/worker/assembly.py;由于 runtime 不
-import agents/adapters、agents 不 import adapters(架构文档 §2),而
+模块归属:本组合核心同时被 API 宿主(:mod:`apps.api.executor_host`)与
+eval(Eval Runner,计划 05 Task 2)复用,而 eval 不得 import apps(方向:
+eval → runtime/agents/adapters)。本模块原本位于 Worker 组合根;由于 runtime
+不 import agents/adapters、agents 不 import adapters(架构文档 §2),而
 adapters 已依赖 agents(:mod:`adapters.commerce.mock_adapter` 先例),故
-下沉到本模块作为单一事实源;``apps/worker/assembly.py`` 保留为兼容导出。
+下沉到本模块作为单一事实源;:mod:`apps.assembly` 保留为兼容导出。
 
-``ProductApplication`` 门面供驱动方(Worker、测试、CLI、Eval)使用:``start``
-包装 RunFactory → ADVANCE_RUN Job → Runtime Worker 推进;``answer`` /
-``confirm`` 用 Input/Confirmation 服务处理挂起请求后恢复推进;``recover``
-对响应丢失的写操作调度 reconcile 回查后恢复推进。Worker 进程按 Run 亲和
-持有已回答字段的内存视图(真实部署中应由输入请求持久化重建)。
+``ProductApplication`` 门面供驱动方(执行器宿主、测试、CLI、Eval)使用:
+``start`` 落 Run(QUEUED)后唤醒执行器推进;``answer`` / ``confirm`` 用
+Input/Confirmation 服务处理挂起请求后恢复推进;``recover`` 对响应丢失的写
+操作回查后恢复推进。``advance`` / ``reconcile`` 实现执行器的 ``RunDriver``
+协议;进程重启后的"已回答字段"由调用方从 InputRequest 持久化重建后传入。
 """
 
 from __future__ import annotations
@@ -108,6 +108,7 @@ from runtime.capabilities.registry import (
 from runtime.capabilities.run_factory import RunFactory
 from runtime.capabilities.validation import compute_schema_hash
 from runtime.commands.session import SessionCommandService
+from runtime.execution.executor import AdvanceOutcome, RunClaim, RunExecutor
 from runtime.execution.pretool.decisions import (
     ExecutionModeDecision,
     PreToolDecision,
@@ -126,7 +127,6 @@ from runtime.execution.tool_registry import RuntimeToolRegistry
 from runtime.interaction.confirmation_service import ConfirmationService
 from runtime.interfaces.state import RunStatus
 from runtime.interfaces.tools import ToolEffect as ToolEffectKind
-from runtime.jobs.lease_service import Lease, LeaseOutcome
 from runtime.orchestration.agent_loop import ToolCallEvaluator, ToolPin
 from runtime.orchestration.context import ContextAssembler, SkillCatalogEntry
 from runtime.orchestration.limits import RunLimits
@@ -138,7 +138,6 @@ from runtime.persistence.base import (
     ConfirmationRequestStatus,
     ExecutionMode,
     InputRequestStatus,
-    RunJobKind,
     ToolEffect,
 )
 from runtime.persistence.models.execution import ToolCall
@@ -148,7 +147,6 @@ from runtime.persistence.models.interaction import (
     InputRequest,
     Message,
 )
-from runtime.persistence.repositories.jobs import JobRepository
 from runtime.persistence.repositories.run_snapshots import PolicySnapshotPin
 from runtime.persistence.repositories.runs import RunRepository
 
@@ -159,6 +157,10 @@ BACKEND_KEY: Final = "product-scripted"
 _WRITE_ADAPTER_CAPABILITIES: Final[frozenset[str]] = frozenset({"operation", "reconciliation"})
 
 _MAX_RECONCILE_ROUNDS: Final = 5
+
+_MAX_ADVANCE_STEPS: Final = 8
+"""请求内推进的步数上限:回查消除不确定性、NOT_APPLIED 重试都会把 Run 退回
+QUEUED 再续推,单次请求最多连续推进这么多轮,避免病态场景占满请求。"""
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +429,7 @@ class ProductApplication:
         actor_id: uuid.UUID,
         membership_id: uuid.UUID,
         capabilities: ProductOperationsCapabilities,
-        worker_id: str,
+        executor_id: str,
     ) -> None:
         self._engine = engine
         self._assembly = assembly
@@ -486,7 +488,15 @@ class ProductApplication:
                 tool_registry=tool_registry,
                 scope=self._scope,
             ),
-            worker_id=worker_id,
+        )
+        self._executor_id = executor_id
+        # 门面自用的同步推进器:不 start()(不取单写者锁、不起后台循环),
+        # 只复用 RunExecutor 的 CAS 领取与 Attempt 记账,供请求内同步推进使用。
+        self._executor = RunExecutor(
+            session_factory=self._session_factory,
+            driver=self,
+            instance_id=executor_id,
+            lock=None,
         )
         # 测试接缝:脚本模型与种子标识由夹具注入/读取。
         self.scripted_backend: Any = backend
@@ -539,7 +549,7 @@ class ProductApplication:
     # -- 驱动入口 ---------------------------------------------------------
 
     async def start(self, message: str) -> RunView:
-        """创建 Run、落用户消息与 ADVANCE_RUN Job,并推进到新持久边界。"""
+        """创建 Run、落用户消息,并推进到新持久边界。"""
         run_id: uuid.UUID | None = None
         session = self._session_factory()
         try:
@@ -567,11 +577,6 @@ class ProductApplication:
                     run_id=pinned.id,
                     sequence_no=sequence,
                     content=message,
-                )
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=pinned.id,
-                    kind=RunJobKind.ADVANCE_RUN,
                 )
         finally:
             await session.close()
@@ -647,33 +652,39 @@ class ProductApplication:
                 break
         view = await self.run_view(run_id)
         if view.status is RunStatus.QUEUED:
-            await self._ensure_advance_job(run_id)
             await self._push(run_id)
         return await self.run_view(run_id)
 
-    async def advance_leased(
-        self, lease: Lease, *, answered: Mapping[str, str] | None = None
-    ) -> LeaseOutcome:
-        """推进一个已被外层 Worker 领取的租约(Worker 组合根入口)。
+    # -- RunDriver(进程内执行器注入的推进实现)--------------------------
 
-        与 :meth:`_push` 的区别:不再次领取 Job——外层 WorkerHost 已完成
-        claim(含 QUEUED→RUNNING 迁移),本方法直接以该租约驱动
-        ``Runtime.handle_lease``(单事务 AgentLoop 推进),并把"已回答
-        字段"视图注入本次推进的 PreToolUse 管线。LeaseOutcome 交由外层
-        Worker complete;异常向上冒泡按暂时性错误释放重试。
+    async def advance(
+        self,
+        claim: RunClaim,
+        *,
+        answered: Mapping[str, str] | None = None,
+    ) -> AdvanceOutcome:
+        """执行器已把 Run 置为 RUNNING;在本次调用内推进到下一个边界。
+
+        ``answered`` 由调用方按持久化状态重建(进程重启后内存视图为空);
+        未提供时回落到本次门面生命周期内累计的回答。
         """
         self._scope.begin(
             _ScopeContext(
-                workspace_id=lease.workspace_id,
-                run_id=lease.run_id,
+                workspace_id=claim.workspace_id,
+                run_id=claim.run_id,
                 actor_id=self._actor_id,
-                answered=dict(answered or {}),
+                answered=dict(answered if answered is not None else self._answered),
             )
         )
         try:
-            return await self._runtime.handle_lease(lease)
+            return await self._runtime.advance(claim)
         finally:
             self._scope.end()
+
+    async def reconcile(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        """回查该 Run 的不确定 Operation;返回是否可以继续推进。"""
+        del workspace_id  # 门面已绑定工作区
+        return await self._recovery.reconcile_once(run_id)
 
     # -- 断言辅助 ---------------------------------------------------------
 
@@ -766,37 +777,20 @@ class ProductApplication:
     # -- 内部:推进与回查 -------------------------------------------------
 
     async def _push(self, run_id: uuid.UUID) -> None:
-        """设置推进上下文并驱动一轮 Worker(claim → advance → complete)。"""
-        self._scope.begin(
-            _ScopeContext(
-                workspace_id=self._workspace_id,
-                run_id=run_id,
-                actor_id=self._actor_id,
-                answered=dict(self._answered),
-            )
-        )
-        try:
-            processed = await self._runtime.run_worker_once()
-        finally:
-            self._scope.end()
-        if not processed:
-            raise RuntimeError(f"no job was claimed while advancing run {run_id}")
+        """请求内同步推进一个 Run(CAS 领取 → AgentLoop → 下一个边界)。
+
+        写入 UNKNOWN 后的回查、NOT_APPLIED 重试都会把 Run 退回 QUEUED;这类
+        续推必须在本请求内完成,否则调用方只能看到中途的 QUEUED,而真正推进
+        依赖后台循环的下一次扫描。步数上限防止病态场景把请求占满。
+        """
+        for _ in range(_MAX_ADVANCE_STEPS):
+            outcome = await self._executor.advance_now(run_id)
+            if outcome is None or outcome.next_step is None:
+                return
 
     async def _reconcile_once(self, run_id: uuid.UUID) -> bool:
-        """委托模块化恢复服务；主组合根不解释领域 ``expected_state``。"""
+        """委托模块化恢复服务;主组合根不解释领域 ``expected_state``。"""
         return await self._recovery.reconcile_once(run_id)
-
-    async def _ensure_advance_job(self, run_id: uuid.UUID) -> None:
-        session = self._session_factory()
-        try:
-            async with session.begin():
-                await JobRepository(session).create(
-                    workspace_id=self._workspace_id,
-                    run_id=run_id,
-                    kind=RunJobKind.ADVANCE_RUN,
-                )
-        finally:
-            await session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +806,7 @@ async def build_product_application(
     workspace_id: uuid.UUID,
     actor_id: uuid.UUID,
     membership_id: uuid.UUID,
-    worker_id: str = "product-worker",
+    executor_id: str = "product-executor",
     commerce_adapter: CommerceAdapter | None = None,
     adapter_key: str = ADAPTER_KEY,
 ) -> ProductApplication:
@@ -976,7 +970,7 @@ async def build_product_application(
         actor_id=actor_id,
         membership_id=membership_id,
         capabilities=capabilities,
-        worker_id=worker_id,
+        executor_id=executor_id,
     )
 
 

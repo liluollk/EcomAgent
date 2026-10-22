@@ -5,7 +5,7 @@
   快照附带 PENDING Input/Confirmation Request(阶段 4 Gate:等待事件
   payload 只有 tool_call_id,Request 详情由快照提供,供工作台渲染);
 - POST /api/sessions/{id}/messages:提交用户消息,创建 QUEUED Run 与
-  ADVANCE_RUN Job;活动 Run 已存在时 409 ACTIVE_RUN_EXISTS。
+  由进程内执行器推进;活动 Run 已存在时 409 ACTIVE_RUN_EXISTS。
 
 命令为短事务:服务只 flush,路由返回前统一 commit;本模块不调用
 Backend/ToolHandler/Runtime 推进循环。
@@ -28,6 +28,7 @@ from apps.api.dependencies import (
     get_request_id,
     get_workspace_actor_context,
 )
+from apps.api.executor_host import notify_run
 from apps.api.schemas.sessions import (
     AppendMessageRequest,
     CreateSessionRequest,
@@ -267,10 +268,11 @@ async def _store_options(
 async def append_message(
     session_id: UUID,
     payload: AppendMessageRequest,
+    request: Request,
     actor: ActorDep,
     session: SessionDep,
 ) -> RunDispatchView:
-    """提交用户消息:创建 QUEUED Run 与 ADVANCE_RUN Job;活动 Run 存在即 409。"""
+    """提交用户消息:创建 QUEUED Run 并唤醒执行器;活动 Run 存在即 409。"""
     with translated_commands():
         dispatched = await SessionCommandService(
             session, actor_id=actor.actor_id
@@ -280,6 +282,7 @@ async def append_message(
             model_config_version_id=payload.model_config_version_id,
         )
     await session.commit()
+    notify_run(request.app, dispatched.run.id)
     return RunDispatchView(
         message_id=dispatched.message.id,
         run_id=dispatched.run.id,
