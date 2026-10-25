@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 scenarios:
 - id: blind-read-001
   category: read_only_query

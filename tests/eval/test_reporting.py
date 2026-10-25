@@ -40,9 +40,11 @@ from eval.results import (
     CaseResult,
     EventCapture,
     FinalState,
+    MessageCapture,
     ToolCallCapture,
 )
 from eval.schema import SCHEMA_VERSION
+from eval.scorers.clarification import ClarificationScore
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.contract import ContractScore
 from eval.scorers.decision import DecisionScore
@@ -71,6 +73,7 @@ REQUIRED_REPORT_METRIC_FIELDS = REQUIRED_METRIC_KEYS | {
     "process",
     "grounding",
     "contract",
+    "clarification",
 }
 
 
@@ -86,6 +89,7 @@ def _case_result(
     error: str | None = None,
     events: tuple[EventCapture, ...] = (),
     tool_calls: tuple[ToolCallCapture, ...] = (),
+    messages: tuple[MessageCapture, ...] = (),
     run_id: uuid.UUID | None = None,
 ) -> CaseResult:
     return CaseResult(
@@ -98,6 +102,7 @@ def _case_result(
         error=error,
         events=events,
         tool_calls=tool_calls,
+        conversation_messages=messages,
         final_state=(
             FinalState(listings=(), logical_writes=1) if status == "COMPLETED" else None
         ),
@@ -135,6 +140,7 @@ def _scored(
             final_logical_writes=1,
             max_logical_writes=1,
         ),
+        clarification=ClarificationScore(applicable=False, passed=None),
         contract=ContractScore(
             applicable=contract_applicable,
             passed=(contract_passed if contract_applicable else None),
@@ -270,6 +276,13 @@ def test_report_keeps_dimensions_separate(report_builder: ReportBuilder) -> None
         "arguments",
         "forbidden_calls",
         "turns",
+    }
+    assert set(report["metrics"]["clarification"]) == {
+        "applicable_executions",
+        "passed_executions",
+        "pass_rate",
+        "no_ask_before_supply",
+        "write_before_supply",
     }
     assert set(report["metrics"]["recovery"]) == {
         "applicable_cases",
@@ -864,3 +877,55 @@ def test_assertion_coverage_is_reported() -> None:
     assert len(coverage["cases_without_response_facts"]) == (
         coverage["scenarios"] - declared["response_facts"]["scenarios"]
     )
+
+
+def test_trace_keeps_answers_but_truncates_and_redacts(
+    report_builder: ReportBuilder,
+) -> None:
+    """答复原文进报告:能读、能截断、仍然脱敏。"""
+    long_answer = "已把 store-1 的 SKU-001 改成 99.00 元。" + "补充说明" * 400
+    case = _case_result(
+        "case-answers",
+        messages=(
+            MessageCapture(
+                run_id=None,
+                sequence_no=1,
+                role="USER",
+                content="把 SKU-001 改成 99.00 元",
+            ),
+            MessageCapture(
+                run_id=None,
+                sequence_no=2,
+                role="ASSISTANT",
+                content="调用失败:sk-live-0123456789abcdef 无效",
+            ),
+            MessageCapture(
+                run_id=None,
+                sequence_no=3,
+                role="ASSISTANT",
+                content=long_answer,
+            ),
+            MessageCapture(
+                run_id=None,
+                sequence_no=4,
+                role="SYSTEM",
+                content="不应出现在报告里的系统提示",
+            ),
+        ),
+    )
+
+    report = report_builder.build([case, _scored("case-answers")])
+    trace = report["cases"][0]["trace"]
+
+    assert [item["role"] for item in trace["messages"]] == [
+        "USER",
+        "ASSISTANT",
+        "ASSISTANT",
+    ]
+    assert trace["messages"][0]["content"] == "把 SKU-001 改成 99.00 元"
+    assert trace["messages"][1]["truncated"] is False
+    assert trace["messages"][2]["truncated"] is True
+    assert len(trace["messages"][2]["content"]) == 1000
+    dumped = json.dumps(report, ensure_ascii=False)
+    assert "sk-live-0123456789abcdef" not in dumped
+    assert "不应出现在报告里的系统提示" not in dumped

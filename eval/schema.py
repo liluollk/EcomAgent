@@ -24,13 +24,17 @@ from eval.capability_manifest import EvalCapabilityManifest
 from eval.config import EvalConfig
 
 
-SCHEMA_VERSION: Final[int] = 3
+SCHEMA_VERSION: Final[int] = 4
 """场景协议版本。
 
 v3:补上行为合同——``expected_tool_arguments``(工具实际入参)、
 ``forbidden_tool_calls``(连尝试都不允许)、``turn_expectations``(逐轮答复),
 使"最终状态对"与"过程对"可以分开判。v2 及以前的场景没有这些字段,
 它们的指纹因此全部失效:同一题目在新旧协议下不可比。
+
+v4:补上 ``clarification``——缺信息场景不再只认"结构化 Input Request",
+口头追问同样可判,判据是"补全前追问过、补全前没写过"。v3 的 Clarification
+分区 18 次执行全部被判成协议失败,原因是协议只有一种通过路径。
 """
 
 
@@ -225,6 +229,28 @@ class TurnExpectation(BaseModel):
         return self
 
 
+class ClarificationRequirement(BaseModel):
+    """缺信息场景的判分声明:先追问、后写入。
+
+    两类澄清路径都必须能通过:
+
+    - **结构化追问**:Runtime 抛出 Input Request,Runner 按 ``interactions``
+      声明的值应答(原来的唯一路径);
+    - **口头追问**:模型直接用自然语言问缺哪个字段,不产生 Input Request。
+      这条路径此前被判成"unconsumed user interaction"整例失败——它不是模型
+      缺陷,而是协议只有一种表达方式。
+
+    判分不看"问得像不像",只看两条顺序事实:补全前必须有一条带问号的答复,
+    补全前不得有任何写入。``missing_fields`` 只用于报告与覆盖矩阵,不参与
+    文本匹配(避免把同义写法判失败)。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    missing_fields: tuple[str, ...] = Field(min_length=1)
+    allow_natural_language: bool = True
+
+
 class Scenario(BaseModel):
     """版本化 Eval 场景:一次评测的最小完整定义。
 
@@ -253,6 +279,7 @@ class Scenario(BaseModel):
     expected_tool_arguments: tuple[ToolArgumentExpectation, ...] = ()
     forbidden_tool_calls: tuple[str, ...] = ()
     turn_expectations: tuple[TurnExpectation, ...] = ()
+    clarification: ClarificationRequirement | None = None
 
     @model_validator(mode="after")
     def validate_interaction_message_indexes(self) -> Scenario:
@@ -290,6 +317,25 @@ class Scenario(BaseModel):
             )
         if self.turn_expectations and len(self.messages) < 2:
             raise ValueError("turn expectations require a multi-message scenario")
+        return self
+
+    @model_validator(mode="after")
+    def validate_clarification(self) -> Scenario:
+        """缺信息场景必须真的有第二轮用户补充,且交互只能是供值。"""
+        if self.clarification is None:
+            return self
+        user_indexes = [
+            index for index, message in enumerate(self.messages) if message.role == "user"
+        ]
+        if len(user_indexes) < 2:
+            raise ValueError("clarification requires at least two user messages")
+        for interaction in self.interactions:
+            if interaction.kind != "input":
+                raise ValueError("clarification scenarios only accept input interactions")
+            if interaction.message_index == user_indexes[0]:
+                raise ValueError(
+                    "clarification interaction must supply a later user message"
+                )
         return self
 
 

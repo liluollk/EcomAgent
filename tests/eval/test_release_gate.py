@@ -16,12 +16,14 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from eval.gates.check_release import FAIL_SYSTEM_FINGERPRINT_MISMATCH
 from eval.gates.check_release import main as check_release_main
 from eval.gates.derive_baseline import BaselineDerivationError, derive_baseline
 from eval.gates.derive_baseline import main as derive_baseline_main
 from eval.gates.schema import Baselines, GateResult, HardRules, ReleaseGate
 from eval.reporting.json_report import ReportBuilder
 from eval.results import CaseResult, FinalState
+from eval.scorers.clarification import ClarificationScore
 from eval.scorers.composite_result import ScoredCaseResult
 from eval.scorers.contract import ContractScore
 from eval.scorers.decision import DecisionScore
@@ -93,6 +95,7 @@ def _scored(
             final_logical_writes=1,
             max_logical_writes=1,
         ),
+        clarification=ClarificationScore(applicable=False, passed=None),
         contract=ContractScore(
             applicable=contract_applicable,
             passed=(contract_passed if contract_applicable else None),
@@ -811,3 +814,31 @@ def test_check_cli_missing_gate_file(
     )
     assert code == 2
     assert "missing.json" in capsys.readouterr().err
+
+
+def test_derive_baseline_freezes_system_fingerprint() -> None:
+    """基线冻结被测系统指纹:能力清单改了就必须重派生,不能拿旧证据过门。"""
+    gate = derive_baseline(report_with_completion(100, 100))
+    assert gate.system_fingerprint == "system-under-test"
+
+
+def test_gate_rejects_report_from_a_different_system() -> None:
+    """两份报告彼此一致、但不是当前这套系统:按指纹不一致拒绝。"""
+    gate = derive_baseline(report_with_completion(100, 100))
+    candidate = report_with_completion(100, 100)
+    candidate["system_fingerprint"] = "another-capability-manifest"
+
+    result = gate.check(candidate)
+
+    assert result.passed is False
+    assert FAIL_SYSTEM_FINGERPRINT_MISMATCH in result.failures
+
+
+def test_gate_without_frozen_fingerprint_still_checks_reports() -> None:
+    """历史门没有该字段时退化为只做报告间一致性检查,不假装验过当前系统。"""
+    gate = derive_baseline(report_with_completion(100, 100))
+    legacy = gate.model_copy(update={"system_fingerprint": None})
+    candidate = report_with_completion(100, 100)
+    candidate["system_fingerprint"] = "whatever"
+
+    assert legacy.check(candidate).passed is True

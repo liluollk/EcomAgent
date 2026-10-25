@@ -40,7 +40,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -121,6 +121,9 @@ class _DriveState:
     session_id: uuid.UUID | None = None
     current_message_index: int | None = None
     observed: _ObservingBackend | None = None
+    #: 已由结构化 Input Request 供过值的用户消息下标;这些消息不能再以普通
+    #: 追加的方式重发一次。未进入该集合的补充消息按普通用户轮次投递。
+    answered_message_indexes: set[int] = field(default_factory=set)
 
 
 class _ObservingBackend:
@@ -320,17 +323,18 @@ class EvalRunner:
     async def _drive(
         self, environment: IsolatedEnvironment, case: Scenario, state: _DriveState
     ) -> None:
-        """驱动一次完整确认链路;异常向上冒泡由 run_one 分类。"""
+        """驱动一次完整确认链路;异常向上冒泡由 run_one 分类。
+
+        补充信息的投递按**实际消费**决定:声明的结构化交互只有在模型真的
+        抛出 Input Request 时才会消耗对应的用户消息;模型改用自然语言追问时,
+        那条补充消息仍然要作为下一轮用户输入投递,否则"口头追问"路径永远
+        走不到第二轮,任务必然失败。
+        """
         application: ProductApplication = environment.application
-        consumed_message_indexes = {
-            interaction.message_index
-            for interaction in case.interactions
-            if interaction.message_index is not None
-        }
         user_turns = [
             (index, message.content)
             for index, message in enumerate(case.messages)
-            if message.role == "user" and index not in consumed_message_indexes
+            if message.role == "user"
         ]
         if not user_turns:
             raise RuntimeError(f"scenario {case.id} has no user message to start a run")
@@ -344,6 +348,9 @@ class EvalRunner:
             application, environment, case, state, view, interaction_index
         )
         for message_index, user_message in user_turns[1:]:
+            if message_index in state.answered_message_indexes:
+                # 已通过结构化 Input Request 供过值,不再重复追加。
+                continue
             assert state.session_id is not None
             state.current_message_index = message_index
             view = await application.append_message(state.session_id, user_message)
@@ -353,11 +360,27 @@ class EvalRunner:
             view, interaction_index = await self._drive_current_run(
                 application, environment, case, state, view, interaction_index
             )
-        if interaction_index != len(case.interactions):
+        unconsumed = case.interactions[interaction_index:]
+        if unconsumed and not self._natural_language_clarification(case, unconsumed):
             raise RuntimeError(
-                f"scenario {case.id} has {len(case.interactions) - interaction_index} "
+                f"scenario {case.id} has {len(unconsumed)} "
                 "unconsumed user interaction(s)"
             )
+
+    @staticmethod
+    def _natural_language_clarification(
+        case: Scenario, unconsumed: Sequence[UserInteraction]
+    ) -> bool:
+        """口头追问路径:声明了 clarification 且未消费的只有供值类交互。
+
+        模型没用结构化 Input Request,而是把缺哪个字段直接问出来——这条路径
+        由 ClarificationScorer 判"追问在前、写入在后",不该在驱动层判失败。
+        确认类交互不在豁免范围:放弃确认必须显式声明 reject。
+        """
+        requirement = case.clarification
+        if requirement is None or not requirement.allow_natural_language:
+            return False
+        return all(interaction.kind == "input" for interaction in unconsumed)
 
     async def _drive_current_run(
         self,
@@ -378,6 +401,7 @@ class EvalRunner:
                 interaction_index += 1
                 if interaction.message_index is not None:
                     state.current_message_index = interaction.message_index
+                    state.answered_message_indexes.add(interaction.message_index)
                 values = await self._input_values(
                     environment, view.pending_input_id, interaction.values
                 )
@@ -474,6 +498,12 @@ class EvalRunner:
         current_message_index: int | None,
     ) -> UserInteraction:
         if index >= len(case.interactions):
+            if expected_kind == "input" and case.clarification is not None:
+                raise RuntimeError(
+                    f"scenario {case.id} requested more input than the scenario "
+                    "supplies: the user message that carries the missing field was "
+                    "already delivered"
+                )
             raise RuntimeError(
                 f"scenario {case.id} requires a {expected_kind} interaction but none was declared"
             )
@@ -497,6 +527,16 @@ class EvalRunner:
             interaction.message_index is not None
             and interaction.message_index != next_user_index
         ):
+            if (
+                current_message_index is not None
+                and interaction.message_index <= current_message_index
+            ):
+                # 供值消息已经作为普通用户轮次投递过,模型仍在要输入:这是
+                # 模型没用上已给出的信息,不是协议缺字段。
+                raise RuntimeError(
+                    f"scenario {case.id} requested input for a user message that "
+                    f"was already delivered (message_index={interaction.message_index})"
+                )
             raise RuntimeError(
                 f"scenario {case.id} interaction at message_index="
                 f"{interaction.message_index} is not the next user turn "

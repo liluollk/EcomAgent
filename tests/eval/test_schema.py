@@ -140,7 +140,8 @@ def test_fingerprint_is_sensitive_to_config_changes(
         "model": "deepseek-reasoner",
         "temperature": 0.7,
         "repetitions": 5,
-        "scorer_version": "v4",
+        # 相对当前版本取值:写死版本号会在下次升版时变成"没改动"而假绿。
+        "scorer_version": f"{base_config.scorer_version}-next",
     }
     for field, value in variants.items():
         changed = base_config.model_copy(update={field: value})

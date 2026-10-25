@@ -1,6 +1,10 @@
 name: eval
 
 on:
+  # 推 main 就跑确定性门(运行时不变式 + 故障恢复 + 分区校验)。
+  # 真实模型分区仍只在 workflow_dispatch 下跑,不会因为推送消耗额度。
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -18,8 +22,27 @@ on:
           - safety
 
 jobs:
+  # runtime_suite / recovery_suite 都要连测试库(``_prepare_database`` 会先建库再
+  # 跑迁移),本 job 少一个 postgres 服务就会在第一步 ConnectionRefused 失败。
   deterministic:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: runtime
+          POSTGRES_PASSWORD: runtime
+          POSTGRES_DB: agent_runtime
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runtime -d agent_runtime"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime
+      RUNTIME_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -58,7 +81,6 @@ jobs:
       EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
       EVAL_MODEL: ${{ secrets.EVAL_MODEL }}
       EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}
-      CAPABILITY_MANIFEST: ${{ runner.temp }}/capability-manifest.json
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -75,7 +97,7 @@ jobs:
         run: uv run alembic upgrade head
       - name: Build freeze-time capability manifest
         run: |
-          uv run python -m eval.capability_manifest --output "$CAPABILITY_MANIFEST"
+          uv run python -m eval.capability_manifest --output "$RUNNER_TEMP/capability-manifest.json"
       # 报告里的 Runtime/E2E 通过声明由本 job 自己的执行结果决定,用于发布 Gate。
       - name: Deterministic Runtime and E2E attestations
         run: |
@@ -87,7 +109,7 @@ jobs:
         run: |
           uv run python -m eval.product_suite \
             --split core \
-            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
             --runtime-suite-result passed \
             --e2e-result passed \
             --output reports/core.json
@@ -98,7 +120,7 @@ jobs:
         run: |
           uv run python -m eval.product_suite \
             --split safety \
-            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
             --runtime-suite-result passed \
             --e2e-result passed \
             --output reports/safety.json
@@ -107,7 +129,7 @@ jobs:
         run: |
           uv run python -m eval.product_suite \
             --split regression \
-            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
             --runtime-suite-result passed \
             --e2e-result passed \
             --output reports/regression.json
@@ -116,7 +138,7 @@ jobs:
         run: |
           uv run python -m eval.product_suite \
             --split "${{ inputs.split }}" \
-            --capability-manifest "$CAPABILITY_MANIFEST" \
+            --capability-manifest "$RUNNER_TEMP/capability-manifest.json" \
             --runtime-suite-result passed \
             --e2e-result passed \
             --output "reports/${{ inputs.split }}.json"

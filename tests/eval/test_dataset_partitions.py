@@ -103,8 +103,23 @@ def test_every_scenario_validates_and_ids_are_unique(
 def test_frozen_hashes_match_file_bytes(dataset_manifest: DatasetManifest) -> None:
     core_digest = hashlib.sha256((DATASET_DIR / "core.yaml").read_bytes()).hexdigest()
     blind_digest = hashlib.sha256((DATASET_DIR / "blind.yaml").read_bytes()).hexdigest()
-    assert dataset_manifest.core_sha256 == core_digest
-    assert dataset_manifest.blind_sha256 == blind_digest
+    hint = "字节与冻结哈希不一致;若只差换行符,重跑 scripts/sync_dataset_hashes.py"
+    assert dataset_manifest.core_sha256 == core_digest, f"core.yaml {hint}"
+    assert dataset_manifest.blind_sha256 == blind_digest, f"blind.yaml {hint}"
+
+
+def test_dataset_files_use_lf_line_endings() -> None:
+    """冻结哈希按字节算,CRLF 会让同一份数据在 Windows 与 CI 上哈希不同。
+
+    ``.gitattributes`` 声明 ``eol=lf``,但 Windows 上用 ``Path.write_text`` 写数据集
+    会把 ``\\n`` 翻成 ``\\r\\n``——哈希于是被冻成 CRLF 的值,本地绿、CI 红
+    (2026-10-25 的 run #6 就是这个)。这里直接拦字节,让偏差在开发机上暴露。
+    """
+    for file_name in _PARTITION_FILES.values():
+        raw = (DATASET_DIR / file_name).read_bytes()
+        assert b"\r" not in raw, (
+            f"{file_name} 含 CR,请归一为 LF 并重跑 scripts/sync_dataset_hashes.py"
+        )
 
 
 def test_core_and_blind_have_fixed_sizes_and_task_distribution(
@@ -138,6 +153,25 @@ def test_core_has_no_interactions_and_clarification_uses_input_requests(
         assert scenario.category == "incomplete_info"
         assert scenario.faults == ()
         assert any(item.kind == "input" for item in scenario.interactions)
+
+
+def test_clarification_partition_declares_both_paths(
+    partitions: Mapping[str, tuple[Scenario, ...]],
+) -> None:
+    """缺信息场景要同时支持结构化追问与口头追问,且写入只允许一次。"""
+    for scenario in partitions["clarification"]:
+        assert scenario.clarification is not None, scenario.id
+        user_indexes = [
+            index
+            for index, message in enumerate(scenario.messages)
+            if message.role == "user"
+        ]
+        assert len(user_indexes) >= 2, f"{scenario.id} 缺少补充信息的第二轮"
+        assert all(
+            interaction.message_index != user_indexes[0]
+            for interaction in scenario.interactions
+        ), f"{scenario.id} 的结构化交互不该落在第一轮"
+        assert scenario.expected_final_state.max_logical_writes == 1
 
 
 def test_safety_split_is_isolated(
@@ -230,8 +264,7 @@ def test_blind_entities_are_isolated_from_core(
     assert entities("core").isdisjoint(entities("blind"))
 
 
-def test_incomplete_info_is_a_real_store_ambiguity(
-    partitions: Mapping[str, tuple[Scenario, ...]],
+def test_incomplete_info_is_a_real_store_ambiguity(    partitions: Mapping[str, tuple[Scenario, ...]],
 ) -> None:
     store_ambiguity = [
         scenario

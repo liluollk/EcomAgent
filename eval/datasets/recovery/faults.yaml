@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 # 故障恢复数据集(计划 05 Task 6):数据声明期望,代码执行验证。
 #
 # 每例声明:id / category / risk_level / fault(故障注名,执行分派键)/

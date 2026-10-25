@@ -799,6 +799,17 @@ def test_normalize_arguments_trims_fields_and_converts_amounts() -> None:
     assert normalize_amount("abc") is None
 
 
+def test_normalize_amount_accepts_json_numbers() -> None:
+    """模型写 JSON 数字是接口常见形态:按 str 转十进制,不因浮点误差拒绝。"""
+    assert normalize_amount(52.35) == Decimal("52.35")
+    assert normalize_amount(88.0) == Decimal("88.00")
+    assert normalize_amount(0.1) == Decimal("0.10")
+    # 仍不静默舍入:三位小数照旧拒绝
+    assert normalize_amount(52.355) is None
+    assert normalize_amount(float("nan")) is None
+    assert normalize_amount(float("inf")) is None
+
+
 # ---- PreToolUse 注入协议适配(计划 02 Task 6) ----
 
 

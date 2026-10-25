@@ -106,6 +106,14 @@ class ReleaseGate(BaseModel):
     scenario_count: int | None = None
     """基线报告的场景数(逐例结果完整性校验用)。"""
 
+    system_fingerprint: str | None = None
+    """派生时被测系统的指纹(能力清单 + 评测端点)。
+
+    冻结它才能拦住"不同能力清单的证据混着过门":报告之间的指纹互相一致,
+    并不代表它们描述的是**当前**这套系统。缺失时为 ``None``,门禁退化为
+    只做报告间一致性检查(历史门 v1/v2 没有该字段)。
+    """
+
     derived_from_report: DerivedFromReport
     created_at: datetime
 

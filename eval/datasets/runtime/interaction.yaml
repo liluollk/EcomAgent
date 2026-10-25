@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 cases:
   - id: input-resume-revalidates
     category: interaction_input

@@ -36,7 +36,7 @@ from eval.scorers.composite_result import ScoredCaseResult
 from runtime.observability.redaction import TraceRedactor
 
 
-REPORT_SCHEMA_VERSION: int = 7
+REPORT_SCHEMA_VERSION: int = 8
 """报告结构版本:字段语义或结构变化时递增。
 
 v5:新增 ``metrics.decision`` / ``metrics.recovery`` 顶层分项、安全披露与未决
@@ -52,7 +52,15 @@ v7:行为合同进报告——``metrics.contract``(入参/禁止调用/逐轮答
 维度,并计入任务完成的口径;``cases[].scores.contract`` 之外,轨迹里的
 ToolCall 带出**脱敏后的实际入参**,使"改价原因码写错"这类缺陷可从报告直接
 看出,不必回捞数据库。
+v8:答复原文进报告——``trace.messages`` 按序号给出 USER/ASSISTANT 文本
+(ToolResult 仅留开头)并标注是否截断,同时 ``metrics.clarification`` 独立
+报告"缺信息场景是否先追问后写"。此前"答复依据未命中"只能记成"0 命中",
+无法区分答错内容与答对但没用断言选的那个词。
 """
+
+_EXCERPT_ROLES = frozenset({"USER", "ASSISTANT", "TOOL"})
+_MESSAGE_EXCERPT_LIMIT: int = 1000
+_TOOL_EXCERPT_LIMIT: int = 400
 
 
 class ReportBuilder:
@@ -179,6 +187,10 @@ class ReportBuilder:
         contract_passed = sum(
             1 for s in contract_applicable if s.contract.passed is True
         )
+        clarify_applicable = [s for s in contributing if s.clarification.applicable]
+        clarify_passed = sum(
+            1 for s in clarify_applicable if s.clarification.passed is True
+        )
         decision_applicable = [s for s in contributing if s.decision.total_decisions > 0]
         decision_correct = sum(
             1 for s in decision_applicable if s.decision.decision_accuracy is True
@@ -277,6 +289,21 @@ class ReportBuilder:
                     ),
                 },
             },
+            "clarification": {
+                "applicable_executions": len(clarify_applicable),
+                "passed_executions": clarify_passed,
+                "pass_rate": _rate(clarify_passed, len(clarify_applicable)),
+                "no_ask_before_supply": sum(
+                    1
+                    for s in clarify_applicable
+                    if s.clarification.asked_before_supply is False
+                ),
+                "write_before_supply": sum(
+                    1
+                    for s in clarify_applicable
+                    if s.clarification.write_before_supply is True
+                ),
+            },
             "recovery": {
                 "applicable_cases": len(recovery_applicable),
                 "recovery_success_rate": _rate(
@@ -335,6 +362,7 @@ class ReportBuilder:
                 "grounding_applicable_cases": len(grounding_applicable),
                 "process_applicable_cases": len(process_applicable),
                 "contract_applicable_cases": len(contract_applicable),
+                "clarification_applicable_cases": len(clarify_applicable),
                 "legal_write_decisions": legal_write_decisions,
                 "forbidden_write_decisions": forbidden_write_decisions,
             },
@@ -381,6 +409,7 @@ class ReportBuilder:
             entry["scores"] = {
                 "task": s.task.model_dump(mode="json"),
                 "contract": s.contract.model_dump(mode="json"),
+                "clarification": s.clarification.model_dump(mode="json"),
                 "decision": s.decision.model_dump(mode="json"),
                 "process": s.process.model_dump(mode="json"),
                 "grounding": s.grounding.model_dump(mode="json"),
@@ -409,10 +438,11 @@ class ReportBuilder:
 
 
 def _trace(result: CaseResult) -> dict[str, Any]:
-    """单例脱敏轨迹引用:run_id + 事件摘要 + ToolCall/Operation 结论。"""
+    """单例脱敏轨迹引用:run_id + 事件摘要 + 会话消息 + ToolCall/Operation 结论。"""
     return {
         "run_id": str(result.run_id) if result.run_id is not None else None,
         "event_count": len(result.events),
+        "messages": _message_excerpts(result),
         "events": [
             {
                 "sequence_no": event.sequence_no,
@@ -452,6 +482,31 @@ def _trace(result: CaseResult) -> dict[str, Any]:
     }
 
 
+def _message_excerpts(result: CaseResult) -> list[dict[str, Any]]:
+    """按序号输出会话消息摘要(脱敏后截断)。
+
+    答复原文是失败归因的必要证据:没有它,"答复依据未命中"只能记成"0 命中",
+    无法区分"答错了内容"和"答对了但没提到断言选的那个词"。ToolResult 通常
+    是整段 JSON,只保留开头用于核对,避免报告体积随工具输出膨胀。
+    """
+    excerpts: list[dict[str, Any]] = []
+    for message in sorted(result.conversation_messages, key=lambda item: item.sequence_no):
+        role = message.role.upper()
+        if role not in _EXCERPT_ROLES:
+            continue
+        limit = _TOOL_EXCERPT_LIMIT if role == "TOOL" else _MESSAGE_EXCERPT_LIMIT
+        content = message.content
+        excerpts.append(
+            {
+                "sequence_no": message.sequence_no,
+                "role": role,
+                "content": content[:limit],
+                "truncated": len(content) > limit,
+            }
+        )
+    return excerpts
+
+
 def _rate(numerator: int, denominator: int) -> float | None:
     """真实分母比率;分母为 0 时返回 ``None``(不虚增、不猜测)。"""
     if denominator == 0:
@@ -466,6 +521,7 @@ def _product_task_passed(score: ScoredCaseResult) -> bool:
         and score.process.passed is not False
         and score.grounding.passed is not False
         and score.contract.passed is not False
+        and score.clarification.passed is not False
     )
 
 

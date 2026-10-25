@@ -175,6 +175,11 @@ def derive_baseline(
         case_passes=passes,
         repetitions=repetitions,
         scenario_count=len(outcomes),
+        system_fingerprint=(
+            report.get("system_fingerprint")
+            if isinstance(report.get("system_fingerprint"), str)
+            else None
+        ),
         derived_from_report=DerivedFromReport(
             report_schema_version=(
                 schema_version if isinstance(schema_version, int) else None

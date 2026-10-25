@@ -14,8 +14,9 @@
    报错(逐个列出变量名)并以非零码退出;`EVAL_BASE_URL`/`EVAL_MODEL` 还须
    与随库固定 Provider 配置(``eval/providers/deepseek.json``)一致——偏离即
    协议漂移,拒绝运行;API Key 只留在内存,绝不写入文件/日志/报告;
-3. **Provider 连通性探测**:轻量请求(``GET /models``,零 token 消耗),失败
-   → INFRASTRUCTURE_ERROR 报告(仍写出 JSON)并以非零码退出;
+3. **Provider 连通性探测**:发一次 ``max_tokens=16`` 的最小对话请求(几 token),
+   失败 → INFRASTRUCTURE_ERROR 报告(仍写出 JSON)并以非零码退出。只探
+   ``GET /models`` 不够——额度耗尽时模型列表照常返回 200,对话请求才回 402;
 4. **运行**:按 :class:`eval.config.EvalConfig` 固定 repetition(3)用
    :class:`eval.runner.EvalRunner` + 真实
    :class:`adapters.model_backends.openai_backend.OpenAIBackend` 跑完整集合
@@ -264,6 +265,7 @@ def run_assertion_coverage(
             "tool_arguments": bucket(lambda s: bool(s.expected_tool_arguments)),
             "forbidden_tool_calls": bucket(lambda s: bool(s.forbidden_tool_calls)),
             "turn_expectations": bucket(lambda s: bool(s.turn_expectations)),
+            "clarification": bucket(lambda s: s.clarification is not None),
         },
         "cases_without_response_facts": [
             scenario.id
@@ -283,12 +285,29 @@ def run_assertion_coverage(
 # ---------------------------------------------------------------------------
 
 
-async def _probe_provider(client: openai.AsyncOpenAI) -> str | None:
-    """轻量连通性探测(``GET /models``);失败返回错误描述(不抛出)。"""
+def _probe_error_detail(error: BaseException) -> str:
+    """把探测异常压成一行,带上 HTTP 状态码(有就带)。"""
+    status = getattr(error, "status_code", None)
+    detail = f"{type(error).__name__}: {error}"
+    return f"HTTP {status} {detail}" if status is not None else detail
+
+
+async def _probe_provider(client: openai.AsyncOpenAI, config: EvalConfig) -> str | None:
+    """真实发一次最小对话请求;失败返回错误描述(不抛出)。
+
+    只探 ``GET /models`` 不足以证明"能跑用例":额度耗尽时模型列表照常返回
+    200,真正的对话请求才回 402。一次 ``max_tokens`` 很小的补全把这种"分不出
+    对错的失败"挡在第一个 case 之前,代价是几 token,省下的是整分区白跑。
+    """
     try:
-        await client.models.list()
+        await client.chat.completions.create(
+            model=config.model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=16,
+            extra_body={"thinking": {"type": config.thinking_mode}},
+        )
     except Exception as error:  # noqa: BLE001 - 探测失败统一归基础设施错误
-        return f"provider probe failed: {type(error).__name__}: {error}"
+        return f"provider probe failed: {_probe_error_detail(error)}"
     return None
 
 
@@ -303,7 +322,7 @@ async def _execute(
     client = openai.AsyncOpenAI(base_url=config.base_url, api_key=api_key)
     infrastructure_errors: list[dict[str, Any]] = []
     try:
-        probe_error = await _probe_provider(client)
+        probe_error = await _probe_provider(client, config)
         if probe_error is not None:
             infrastructure_errors.append(
                 {"case_id": None, "repetition": None, "error": probe_error}

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 scenarios:
 - id: clarify-store-001
   category: incomplete_info
@@ -12,8 +12,9 @@ scenarios:
   messages:
   - {role: user, content: 把 SKU-3003 改到 88.00 元。}
   - {role: assistant, content: 请指定要修改的店铺。}
-  - {role: user, content: 改 store-alpha 的。}
+  - {role: user, content: 把 store-alpha 的 SKU-3003 改到 88.00 元。}
   interactions: [{kind: input, message_index: 2, values: {store_ref: store-alpha}}]
+  clarification: {missing_fields: [store_ref]}
   expected_final_state:
     listings:
     - {store_id: store-alpha, sku: SKU-3003, price: '88.00'}
@@ -35,8 +36,9 @@ scenarios:
   messages:
   - {role: user, content: SKU-4004 的价格调整为 72 元。}
   - {role: assistant, content: 这个 SKU 在多个店铺在售，需要店铺范围。}
-  - {role: user, content: 处理 store-delta。}
+  - {role: user, content: 把 store-delta 的 SKU-4004 改到 72 元。}
   interactions: [{kind: input, message_index: 2, values: {store_ref: store-delta}}]
+  clarification: {missing_fields: [store_ref]}
   expected_final_state:
     listings:
     - {store_id: store-gamma, sku: SKU-4004, price: '68.00'}
@@ -58,8 +60,9 @@ scenarios:
   messages:
   - {role: user, content: 把 store-epsilon 里要处理的商品改成 59 元。}
   - {role: assistant, content: 请提供具体 SKU。}
-  - {role: user, content: SKU-5006。}
+  - {role: user, content: 把 store-epsilon 的 SKU-5006 改到 59 元。}
   interactions: [{kind: input, message_index: 2, values: {sku: SKU-5006}}]
+  clarification: {missing_fields: [sku]}
   expected_final_state:
     listings:
     - {store_id: store-epsilon, sku: SKU-5005, price: '55.00'}
@@ -81,8 +84,9 @@ scenarios:
   messages:
   - {role: user, content: store-zeta 有个商品需要调到 99 元。}
   - {role: assistant, content: 需要明确 SKU。}
-  - {role: user, content: 是 SKU-6001。}
+  - {role: user, content: 把 store-zeta 的 SKU-6001 改到 99 元。}
   interactions: [{kind: input, message_index: 2, values: {sku: SKU-6001}}]
+  clarification: {missing_fields: [sku]}
   expected_final_state:
     listings:
     - {store_id: store-zeta, sku: SKU-6001, price: '99.00'}
@@ -101,8 +105,9 @@ scenarios:
   messages:
   - {role: user, content: 修改 store-eta 的 SKU-7001 售价。}
   - {role: assistant, content: 请提供目标价格。}
-  - {role: user, content: 目标价 112.50 元。}
+  - {role: user, content: 把 store-eta 的 SKU-7001 改成 112.50 元。}
   interactions: [{kind: input, message_index: 2, values: {target_price: '112.50'}}]
+  clarification: {missing_fields: [target_price]}
   expected_final_state: {listings: [{store_id: store-eta, sku: SKU-7001, price: '112.50'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-eta/SKU-7001}]
   expected_tool_arguments:
@@ -117,8 +122,9 @@ scenarios:
   messages:
   - {role: user, content: store-theta/SKU-7002 要改价，但我还没说新价格。}
   - {role: assistant, content: 需要目标价格才能继续。}
-  - {role: user, content: 改成 209 元。}
+  - {role: user, content: 把 store-theta 的 SKU-7002 改成 209 元。}
   interactions: [{kind: input, message_index: 2, values: {target_price: '209.00'}}]
+  clarification: {missing_fields: [target_price]}
   expected_final_state: {listings: [{store_id: store-theta, sku: SKU-7002, price: '209.00'}], max_logical_writes: 1}
   allowed_side_effects: [{tool: set_listing_price, target: store-theta/SKU-7002}]
   expected_tool_arguments:

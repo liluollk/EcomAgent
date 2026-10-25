@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
@@ -34,8 +35,13 @@ def normalize_label(text: str) -> str:
 def normalize_amount(value: Any) -> Decimal | None:
     """合法金额 → 两位小数 ``Decimal``;其余返回 ``None``。
 
-    合法:非负、有限、至多两位小数的字符串/整数/``Decimal``。字符串一律
+    合法:非负、有限、至多两位小数的字符串/整数/浮点/``Decimal``。字符串一律
     先 ``trim``;超过两位小数、负数、非法文本都不是合法金额(不静默舍入)。
+
+    浮点按 ``Decimal(str(value))`` 转换而不是 ``Decimal(value)``:后者会把
+    ``52.35`` 变成 ``52.349999999999994315658113919198513031005859375``,
+    导致"模型写了个 JSON 数字"被当成超过两位小数而拒绝。JSON 数字是模型
+    接口的常见形态,语义正确的调用不该判失败。
     """
     if isinstance(value, bool):
         return None
@@ -43,6 +49,10 @@ def normalize_amount(value: Any) -> Decimal | None:
         amount = value
     elif isinstance(value, int):
         amount = Decimal(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        amount = Decimal(str(value))
     elif isinstance(value, str):
         text = value.strip()
         if not text or _AMOUNT_PATTERN.fullmatch(text) is None:

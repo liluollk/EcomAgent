@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from composition.provisioning.product_operations import ProductOperationsCapabilities
+from eval.config import fixed_eval_config
 from runtime.persistence.base import AccountStatus, ExecutionMode
 from runtime.persistence.models.configuration import (
     Agent,
@@ -281,7 +282,7 @@ async def _generate_manifest(database_url: str) -> EvalCapabilityManifest:
             factory,
             capabilities,
             dataset_hashes_by_split=dataset_hashes(),
-            scorer_version="v3",
+            scorer_version=fixed_eval_config().scorer_version,
         )
     finally:
         cleanup = factory()

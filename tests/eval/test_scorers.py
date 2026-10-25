@@ -896,6 +896,7 @@ def test_composite_assembles_dimensions_without_overall_score() -> None:
         "scorer_version",
         "task",
         "contract",
+        "clarification",
         "decision",
         "process",
         "grounding",

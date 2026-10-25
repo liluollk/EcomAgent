@@ -25,7 +25,7 @@ API_KEY_ENV_VAR: Final[str] = "EVAL_API_KEY"
 PROVIDERS_DIR: Final[Path] = Path(__file__).resolve().parent / "providers"
 DEEPSEEK_CONFIG_PATH: Final[Path] = PROVIDERS_DIR / "deepseek.json"
 
-_FIXED_SCORER_VERSION: Final[str] = "v3"
+_FIXED_SCORER_VERSION: Final[str] = "v5"
 
 
 class EvalConfigError(Exception):

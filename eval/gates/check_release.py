@@ -9,6 +9,9 @@
 
 - ``PROTOCOL_MISMATCH``:报告评测基准指纹与 Gate 记录不一致(所有比较必须
   使用同一套题目、模型、采样配置和 Scorer);
+- ``SYSTEM_FINGERPRINT_MISMATCH``:报告的被测系统指纹(能力清单 + 评测端点)
+  与 Gate 冻结的不一致。报告之间互相一致不等于描述的是当前这套系统——
+  能力清单变了就必须重新派生基线,而不是拿旧证据过门;
 - ``DATASET_SPLIT_MISMATCH``:只有 ``core`` 报告可用于能力基线比较;
 - ``INVALID_PROTOCOL``:报告必须明确声明 ``totals.protocol_valid`` 为 True;
 - ``INFRASTRUCTURE_ERROR``:报告含基础设施错误(计数 > 0 或错误列表非空);
@@ -76,6 +79,7 @@ from eval.gates.schema import GateResult, ReleaseGate, is_metric_number
 
 
 FAIL_PROTOCOL_MISMATCH = "PROTOCOL_MISMATCH"
+FAIL_SYSTEM_FINGERPRINT_MISMATCH = "SYSTEM_FINGERPRINT_MISMATCH"
 FAIL_DATASET_SPLIT_MISMATCH = "DATASET_SPLIT_MISMATCH"
 FAIL_INVALID_PROTOCOL = "INVALID_PROTOCOL"
 FAIL_INFRASTRUCTURE_ERROR = "INFRASTRUCTURE_ERROR"
@@ -132,6 +136,16 @@ def check_release(
     }
     if actual_fingerprint != gate.benchmark_fingerprint:
         failures.append(FAIL_PROTOCOL_MISMATCH)
+
+    # -- 硬门槛:被测系统指纹一致(能力清单变了就得重派生) ------------------
+    if gate.system_fingerprint:
+        actual_system = report.get("system_fingerprint")
+        details["system_fingerprint"] = {
+            "gate": gate.system_fingerprint,
+            "report": actual_system,
+        }
+        if actual_system != gate.system_fingerprint:
+            failures.append(FAIL_SYSTEM_FINGERPRINT_MISMATCH)
 
     dataset = report.get("dataset")
     split = dataset.get("split") if isinstance(dataset, dict) else None
@@ -530,14 +544,14 @@ def _safety_is_applicable(metrics: Mapping[str, Any]) -> bool:
 
 
 def _case_passed(case: Mapping[str, Any]) -> bool:
-    """单例是否通过:状态判分 + 适用的过程/依据/合同约束(与报告主指标同口径)。"""
+    """单例是否通过:状态判分 + 适用的过程/依据/合同/澄清约束(与报告主指标同口径)。"""
     scores = case.get("scores")
     if not isinstance(scores, Mapping):
         return False
     task = _mapping(scores.get("task"))
     if task.get("passed") is not True:
         return False
-    for key in ("process", "grounding", "contract"):
+    for key in ("process", "grounding", "contract", "clarification"):
         section = _mapping(scores.get(key))
         if section.get("passed") is False:
             return False
