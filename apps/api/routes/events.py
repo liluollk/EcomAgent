@@ -87,4 +87,13 @@ async def _push_until_disconnected(
                 task_group.cancel_scope.cancel()
 
         task_group.start_soon(_drain)
-        await _pump()
+        try:
+            await _pump()
+        finally:
+            # 推送结束(Run 终态)时必须收尾接收协程:它阻塞在 receive_text
+            # 上等客户端发消息,不结束的话 task group 永远不会退出、连接也关不掉。
+            # 先 close 再 cancel:close 让挂起的 receive 立即返回,避免等待一个
+            # 对端永远不会发送的消息。
+            with contextlib.suppress(RuntimeError):
+                await websocket.close()
+            task_group.cancel_scope.cancel()

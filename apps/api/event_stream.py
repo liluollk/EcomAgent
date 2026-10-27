@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from apps.api.errors import NOT_FOUND, VALIDATION_ERROR, ApiError
 from runtime.persistence.models.events import AgentEvent
+from runtime.persistence.models.execution import Run
+
+
+TERMINAL_RUN_STATUSES: Final = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 DEFAULT_POLL_INTERVAL_SECONDS: Final = 0.5
@@ -58,6 +62,10 @@ def _to_message(event: AgentEvent) -> EventMessage:
         payload=dict(event.payload),
         created_at=event.created_at,
     )
+
+
+TERMINAL_EVENT_TYPES: Final = frozenset({"RUN_COMPLETED", "RUN_FAILED", "RUN_CANCELLED"})
+"""Run 的终态事件。推送完这些事件后连接不再有新内容可等。"""
 
 
 class EventStreamService:
@@ -121,7 +129,11 @@ class EventStreamService:
         """先重放 ``after_sequence`` 之后的全部已提交事件,再轮询推送新事件。
 
         每批读取都在独立短事务中完成(会话随批关闭);一批为空时等待
-        ``poll_interval`` 后再查。生成器无限,由调用方在连接断开时取消。
+        ``poll_interval`` 后再查。
+
+        Run 到终态后结束:推送完终态事件即返回;若游标已在终态之后(重连),
+        空批时检查一次 Run 状态并返回。此前生成器无限循环,Run 早就结束了,
+        每个仍然打开的页面还在按 ``poll_interval`` 永久查询数据库。
         """
         cursor_sequence = after_sequence
         while True:
@@ -131,8 +143,22 @@ class EventStreamService:
             for event in batch:
                 cursor_sequence = int(event.sequence_no)
                 yield _to_message(event)
+                if event.event_type in TERMINAL_EVENT_TYPES:
+                    return
             if not batch:
+                if await self._run_finished(workspace_id=workspace_id, run_id=run_id):
+                    return
                 await asyncio.sleep(self._poll_interval)
+
+    async def _run_finished(self, *, workspace_id: uuid.UUID, run_id: uuid.UUID) -> bool:
+        """Run 是否已终态;空批时才查,避免每批多一次往返。"""
+        async with self._sessionmaker() as session:
+            status = await session.scalar(
+                select(Run.status).where(
+                    Run.workspace_id == workspace_id, Run.id == run_id
+                )
+            )
+        return status is not None and status in TERMINAL_RUN_STATUSES
 
     async def _committed_events(
         self,

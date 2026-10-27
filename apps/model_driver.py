@@ -13,9 +13,14 @@ Run 无声地停在 QUEUED。
 from __future__ import annotations
 
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
+
+
+MAX_CACHED_APPLICATIONS: Final = 8
+"""缓存的应用门面上限;每项持有一个 Adapter 会话与一个模型客户端。"""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -337,9 +342,12 @@ class WorkspaceModelDriver:
         self._engine = engine
         self._executor_id = executor_id
         self._backend_factory = backend_factory
-        self._applications: dict[
+        # 每个缓存项持有一个 Adapter 长会话与一个模型客户端。键含配置版本号,
+        # 每改一次配置就会产生新键;不设上限的话,长期运行的进程会随配置变更
+        # 和 actor 增加持续累积连接。按最近使用淘汰,淘汰即关闭。
+        self._applications: OrderedDict[
             tuple[uuid.UUID, uuid.UUID, uuid.UUID], ProductApplication
-        ] = {}
+        ] = OrderedDict()
 
     @property
     def applications(self) -> Mapping[tuple[uuid.UUID, uuid.UUID, uuid.UUID], ProductApplication]:
@@ -420,6 +428,7 @@ class WorkspaceModelDriver:
         key = (claim.workspace_id, claim.actor_id, config.version_id)
         application = self._applications.get(key)
         if application is not None:
+            self._applications.move_to_end(key)
             return application
         pricing_policy = await load_published_pricing_config(self._engine, claim.workspace_id)
         capabilities = await ProductOperationsProvisioner(
@@ -445,7 +454,14 @@ class WorkspaceModelDriver:
             executor_id=self._executor_id,
         )
         self._applications[key] = application
+        await self._evict_overflow()
         return application
+
+    async def _evict_overflow(self) -> None:
+        """按最近使用淘汰超额缓存,关闭被淘汰项持有的 Adapter 会话。"""
+        while len(self._applications) > MAX_CACHED_APPLICATIONS:
+            _, stale = self._applications.popitem(last=False)
+            await stale.aclose()
 
 
 __all__ = [

@@ -32,11 +32,17 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient, WebSocketDenialResponse, WebSocketTestSession
+from starlette.websockets import WebSocketDisconnect
 
 from apps.api.main import create_app
 from runtime.access.tokens import issue_token
 from runtime.events.writer import AgentEventWriter
-from runtime.persistence.base import AccountStatus, MembershipRole, ModelBackendType
+from runtime.persistence.base import (
+    AccountStatus,
+    MembershipRole,
+    ModelBackendType,
+    RunStatus,
+)
 from runtime.persistence.models.configuration import (
     Agent,
     AgentVersion,
@@ -92,8 +98,8 @@ def seed_run(ws_engine: AsyncEngine) -> Iterator[Seeder]:
     """按需提交 Run 种子;测试结束后按外键倒序清理全部种子行。"""
     seeded: list[SeededRun] = []
 
-    def _seed(*, event_count: int) -> SeededRun:
-        row = _seed_run_with_events(ws_engine, event_count=event_count)
+    def _seed(*, event_count: int, status: str | None = None) -> SeededRun:
+        row = _seed_run_with_events(ws_engine, event_count=event_count, status=status)
         seeded.append(row)
         return row
 
@@ -104,7 +110,9 @@ def seed_run(ws_engine: AsyncEngine) -> Iterator[Seeder]:
             _cleanup(ws_engine, row)
 
 
-def _seed_run_with_events(engine: AsyncEngine, *, event_count: int) -> SeededRun:
+def _seed_run_with_events(
+    engine: AsyncEngine, *, event_count: int, status: str | None = None
+) -> SeededRun:
     """提交 workspace/user/agent/model/session/run 种子与 event_count 条事件。"""
 
     async def _seed() -> SeededRun:
@@ -171,6 +179,10 @@ def _seed_run_with_events(engine: AsyncEngine, *, event_count: int) -> SeededRun
                 agent_version_id=agent_version.id,
                 model_config_version_id=model_config_version.id,
             )
+            if status is not None:
+                # 终态 Run:流应在推送完已提交事件后结束,不再轮询。
+                run.status = RunStatus(status)
+                await session.flush()
             writer = AgentEventWriter(session=session, workspace_id=workspace.id)
             events = [
                 _seeded(
@@ -281,6 +293,22 @@ def _collect(
 
     def _receive() -> None:
         result.set_result([session.receive_json() for _ in range(count)])
+
+    threading.Thread(target=_receive, daemon=True).start()
+    return result.result(timeout=timeout)
+
+
+def _await_disconnect(session: WebSocketTestSession, *, timeout: float = 5.0) -> bool:
+    """等待服务端关闭连接;在守护线程里读,避免阻塞主测试线程。"""
+    result: Future[bool] = Future()
+
+    def _receive() -> None:
+        try:
+            session.receive_json()
+        except WebSocketDisconnect:
+            result.set_result(True)
+        except Exception as error:  # noqa: BLE001 — 任何异常都说明连接未正常关闭
+            result.set_exception(error)
 
     threading.Thread(target=_receive, daemon=True).start()
     return result.result(timeout=timeout)
@@ -466,3 +494,36 @@ def test_event_stream_message_shape_and_payload_are_verbatim(
     assert message["event_kind"] == "TEST_EVENT_1"
     assert message["payload"] == {"index": 0}
     assert isinstance(datetime.fromisoformat(message["created_at"]), datetime)
+
+
+def test_event_stream_ends_when_run_is_terminal(
+    seed_run: Seeder, ws_engine: AsyncEngine
+) -> None:
+    """Run 已终态时,推送完已提交事件后服务端主动结束连接。
+
+    此前生成器是无限轮询:Run 早就结束,每个仍打开的页面还在按
+    poll_interval 永久查询数据库,连接也一直挂着。
+    """
+    seeded = seed_run(event_count=2, status="COMPLETED")
+    client = _stream_client(ws_engine)
+    with client.websocket_connect(
+        _ws_url(seeded.run_id), headers=_bearer(seeded.user_id)
+    ) as ws:
+        received = _collect(ws, 2)
+        assert [message["sequence_no"] for message in received] == [1, 2]
+        assert _await_disconnect(ws) is True
+
+
+def test_event_stream_stays_open_for_non_terminal_run(
+    seed_run: Seeder, ws_engine: AsyncEngine
+) -> None:
+    """非终态 Run 的连接必须保持打开,不能因为一次空批就结束。"""
+    seeded = seed_run(event_count=1)
+    client = _stream_client(ws_engine)
+    with client.websocket_connect(
+        _ws_url(seeded.run_id), headers=_bearer(seeded.user_id)
+    ) as ws:
+        assert _collect(ws, 1)[0]["sequence_no"] == 1
+        # 空批轮询后仍存活:补一条事件应当能推到。
+        _append_committed_event(ws_engine, seeded, "TEST_EVENT_LATE")
+        assert _collect(ws, 1)[0]["event_kind"] == "TEST_EVENT_LATE"

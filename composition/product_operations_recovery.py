@@ -63,6 +63,17 @@ def build_reconciler_registry(
     return registry
 
 
+class ReconciliationSourceError(RuntimeError):
+    """等待回查的 Run 缺少唯一的不确定 Operation。
+
+    这是数据不一致,重试同一份数据不会变好,因此标记为不可重试:执行器据此
+    直接把 Run 收敛到 FAILED,而不是让它停在等待态反复空转。
+    """
+
+    retryable = False
+    code = "RECONCILE_SOURCE_INVALID"
+
+
 class ProductOperationsRecovery:
     """领取 UNKNOWN Operation，并按持久化 ``operation_type`` 回查后提交结论。"""
 
@@ -152,10 +163,15 @@ class ProductOperationsRecovery:
                 )
             ).all()
             if len(operations) != 1:
-                return None
+                # 数据不一致:等待回查却没有唯一的不确定 Operation。静默返回
+                # None 会让这个 Run 永久停在等待态,没有任何路径再处理它。
+                raise ReconciliationSourceError(
+                    f"run {run_id} waits for reconciliation but has "
+                    f"{len(operations)} uncertain operations"
+                )
             operation = operations[0]
             if operation.expected_state is None:
-                raise ValueError(
+                raise ReconciliationSourceError(
                     f"UNKNOWN operation {operation.operation_id} has no expected_state"
                 )
             return (
@@ -167,4 +183,8 @@ class ProductOperationsRecovery:
             await session.close()
 
 
-__all__ = ["ProductOperationsRecovery", "build_reconciler_registry"]
+__all__ = [
+    "ProductOperationsRecovery",
+    "ReconciliationSourceError",
+    "build_reconciler_registry",
+]

@@ -62,6 +62,9 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_IDLE_POLL_SECONDS = 1.0
 """无待办 Run 时的兜底扫描间隔。"""
 
+FAILURE_BACKOFF_CEILING_SECONDS = 30.0
+"""后台循环连续失败时的退避上限;避免数据库不可用期间高频重试。"""
+
 
 @dataclass(frozen=True)
 class RunClaim:
@@ -137,6 +140,7 @@ class RunExecutor:
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self.last_error: BaseException | None = None
+        self._consecutive_failures = 0
 
     @property
     def instance_id(self) -> str:
@@ -145,6 +149,16 @@ class RunExecutor:
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def consecutive_failures(self) -> int:
+        """后台循环连续失败的轮数;成功推进一轮即归零。"""
+        return self._consecutive_failures
+
+    @property
+    def healthy(self) -> bool:
+        """循环仍在运行即视为可推进;失败次数由调用方决定告警阈值。"""
+        return self.running
 
     # -- 生命周期 -------------------------------------------------------
 
@@ -178,6 +192,8 @@ class RunExecutor:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception as error:  # noqa: BLE001 — 关闭路径不能因残留异常失败
+                self.last_error = error
         if self._lock is not None:
             await self._lock.release()
 
@@ -515,32 +531,140 @@ class RunExecutor:
     # -- 后台循环 -------------------------------------------------------
 
     async def _loop(self) -> None:
-        """兜底循环:消费内存队列,队列为空时扫库找 QUEUED Run。
+        """兜底循环:消费内存队列,队列为空时扫库找待处理的 Run。
 
         数据库是唯一队列,内存列表只是"尽快处理"的提示。因此 ``submit``
         丢失(进程在推进前崩溃)不会丢任务——下次启动的恢复扫描会捡回来。
+
+        **整轮**都包在异常边界内,包括队列探测:探测失败只让本轮失败,
+        不能让后台任务退出。此前 ``_next_queued`` 在 try 之外,一次连接抖动
+        就会终结整个执行器,而所有 Run 仍停在 QUEUED、健康检查仍为绿灯。
+        连续失败按指数退避,避免数据库不可用时把日志和连接池打满。
+
+        扫描同时覆盖 ``WAITING_RECONCILIATION``:此前只有启动恢复会回查这类
+        Run,进程活着时一次回查失败就会让它在等待态永久滞留。
         """
+        consecutive_failures = 0
         while not self._stop.is_set():
-            run_id = self._pending.pop(0) if self._pending else await self._next_queued()
-            if run_id is None:
-                await self._idle_wait()
-                continue
             try:
-                await self.advance_now(run_id)
+                target = await self._next_actionable()
+                if target is None:
+                    await self._idle_wait()
+                    continue
+                run_id, workspace_id, status = target
+                if status is RunStatus.WAITING_RECONCILIATION:
+                    await self._reconcile_pending(run_id, workspace_id)
+                else:
+                    await self.advance_now(run_id)
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
-            except Exception as error:  # noqa: BLE001 — 单次失败不能让循环退出
+            except Exception as error:  # noqa: BLE001 — 单轮失败不能让循环退出
                 self.last_error = error
+                consecutive_failures += 1
+                self._consecutive_failures = consecutive_failures
+                await self._failure_backoff(consecutive_failures)
 
-    async def _next_queued(self) -> uuid.UUID | None:
+    async def _next_actionable(self) -> tuple[uuid.UUID, uuid.UUID, RunStatus] | None:
+        """下一项待处理工作:内存提示优先,其次等待回查,最后 QUEUED。
+
+        等待回查的 Run 排在 QUEUED 之前:它占着一次外部写的不确定性,继续
+        推迟只会让"可能已生效"的时间更长;数量受回查预算约束,不会长期挤压。
+        """
+        if self._pending:
+            run_id = self._pending.pop(0)
+            current = await self._run_state(run_id)
+            if current is not None:
+                workspace_id, status = current
+                return run_id, workspace_id, status
+        return await self._scan_actionable()
+
+    async def _run_state(self, run_id: uuid.UUID) -> tuple[uuid.UUID, RunStatus] | None:
         session = self._session_factory()
         try:
-            return await session.scalar(
-                select(Run.id)
-                .where(Run.status == RunStatus.QUEUED.value)
-                .order_by(Run.created_at)
-                .limit(1)
+            row = (
+                await session.execute(
+                    select(Run.workspace_id, Run.status).where(Run.id == run_id)
+                )
+            ).first()
+            return (row[0], RunStatus(row[1])) if row is not None else None
+        finally:
+            await session.close()
+
+    async def _scan_actionable(self) -> tuple[uuid.UUID, uuid.UUID, RunStatus] | None:
+        """按状态优先级扫库:等待回查在前,QUEUED 在后。"""
+        session = self._session_factory()
+        try:
+            for status in (RunStatus.WAITING_RECONCILIATION, RunStatus.QUEUED):
+                row = (
+                    await session.execute(
+                        select(Run.id, Run.workspace_id)
+                        .where(Run.status == status.value)
+                        .order_by(Run.updated_at)
+                        .limit(1)
+                    )
+                ).first()
+                if row is not None:
+                    return row[0], row[1], status
+            return None
+        finally:
+            await session.close()
+
+    async def _reconcile_pending(self, run_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+        """回查一个等待中的 Run;回查本身失败时把 Run 判失败,不留悬挂。
+
+        数据不一致(没有或有多条不确定 Operation)会让回查永远返回 False,
+        若只是跳过,这个 Run 会永久停在 WAITING_RECONCILIATION 且不再被任何
+        路径处理。这里把它收敛到 FAILED,错误码保留原因。
+        """
+        try:
+            resolved = await self.reconcile_now(run_id, workspace_id)
+        except Exception as error:  # noqa: BLE001 — 回查失败必须收敛为终态
+            self.last_error = error
+            code = str(getattr(error, "code", "") or type(error).__name__).upper()[:64]
+            await self._fail_run(
+                run_id=run_id,
+                expected_status=RunStatus.WAITING_RECONCILIATION,
+                code=code,
             )
+            return False
+        if resolved:
+            await self.advance_now(run_id)
+        return resolved
+
+    async def _fail_run(
+        self, *, run_id: uuid.UUID, expected_status: RunStatus, code: str
+    ) -> bool:
+        """把指定状态的 Run 以 CAS 推入 FAILED 并记录失败码。"""
+        session = self._session_factory()
+        try:
+            async with session.begin():
+                run = (
+                    await session.scalars(
+                        select(Run)
+                        .where(Run.id == run_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).one_or_none()
+                if run is None or run.status is not expected_status:
+                    return False
+                moved = await RunRepository(session).compare_and_set_status(
+                    workspace_id=run.workspace_id,
+                    run_id=run_id,
+                    expected_version=run.state_version,
+                    new_status=RunStatus.FAILED.value,
+                    expected_status=expected_status.value,
+                )
+                if not moved:
+                    return False
+                await session.execute(
+                    sa.update(Run)
+                    .where(Run.workspace_id == run.workspace_id, Run.id == run_id)
+                    .values(failure_code=code)
+                    .execution_options(synchronize_session=False)
+                )
+                return True
         finally:
             await session.close()
 
@@ -548,6 +672,18 @@ class RunExecutor:
         self._wake.clear()
         try:
             await asyncio.wait_for(self._wake.wait(), timeout=self._idle_poll_interval)
+        except TimeoutError:
+            pass
+
+    async def _failure_backoff(self, failures: int) -> None:
+        """连续失败后的退避;有 ``submit`` 唤醒时提前结束。"""
+        delay = min(
+            self._idle_poll_interval * (2 ** min(failures - 1, 5)),
+            FAILURE_BACKOFF_CEILING_SECONDS,
+        )
+        self._wake.clear()
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=delay)
         except TimeoutError:
             pass
 

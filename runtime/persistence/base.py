@@ -125,34 +125,13 @@ class SessionStatus(str, enum.Enum):
     ARCHIVED = "ARCHIVED"
 
 
-class MessageRole(str, enum.Enum):
-    """Message 类型;SESSION_SUMMARY 是 Runtime 内部类型。"""
-
-    USER = "USER"
-    ASSISTANT = "ASSISTANT"
-    TOOL = "TOOL"
-    SESSION_SUMMARY = "SESSION_SUMMARY"
-
-
-class MessageStatus(str, enum.Enum):
-    """Assistant Message 状态(数据模型文档 §5)。"""
-
-    STREAMING = "STREAMING"
-    COMPLETED = "COMPLETED"
-    ABORTED = "ABORTED"
-
-
-class RunStatus(str, enum.Enum):
-    """Run 生命周期状态(执行状态文档 §4.1)。"""
-
-    QUEUED = "QUEUED"
-    RUNNING = "RUNNING"
-    WAITING_INPUT = "WAITING_INPUT"
-    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
-    WAITING_RECONCILIATION = "WAITING_RECONCILIATION"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+# 受控状态枚举的唯一定义在 runtime.interfaces.state;这里只做再导出,保证
+# ORM 读出的成员与运行时代码引用的是同一个对象(is 比较成立)。
+from runtime.interfaces.state import (
+    MessageRole,
+    MessageStatus,
+    RunStatus,
+)
 
 
 ACTIVE_RUN_STATUS_VALUES = (
