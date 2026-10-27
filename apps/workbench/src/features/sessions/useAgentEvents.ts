@@ -40,6 +40,14 @@ export interface UseAgentEventsResult {
   connectionError: string | null;
   /** 命令成功后手动刷新快照(发送消息/回答/裁决)。 */
   reload: () => Promise<void>;
+  /** Workspace 执行条件(来自 Session 快照);``ready`` 为 null 表示不适用。 */
+  workspaceReadiness: WorkspaceReadiness;
+}
+
+/** 快照里的执行条件;真实模型入口才有意义,演示入口恒为 null。 */
+export interface WorkspaceReadiness {
+  ready: boolean | null;
+  reason: string | null;
 }
 
 interface WireEvent {
@@ -85,6 +93,10 @@ export function useAgentEvents({
 }: UseAgentEventsOptions): UseAgentEventsResult {
   const [projection, setProjection] = useState<AgentEventProjection | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [workspaceReadiness, setWorkspaceReadiness] = useState<WorkspaceReadiness>({
+    ready: null,
+    reason: null,
+  });
 
   const projectionRef = useRef<AgentEventProjection | null>(null);
   const socketRef = useRef<AgentEventSocket | null>(null);
@@ -205,6 +217,10 @@ export function useAgentEvents({
       const rebuilt = projectionFromSnapshot(snapshot, projectionRef.current);
       projectionRef.current = rebuilt;
       setProjection(rebuilt);
+      setWorkspaceReadiness({
+        ready: snapshot.model_ready ?? null,
+        reason: snapshot.model_blocked_reason ?? null,
+      });
       setConnectionError(null);
       attemptRef.current = 0;
       connect(rebuilt);
@@ -234,5 +250,5 @@ export function useAgentEvents({
 
   const reload = useCallback(() => refreshRef.current(), []);
 
-  return { projection, connectionError, reload };
+  return { projection, connectionError, reload, workspaceReadiness };
 }

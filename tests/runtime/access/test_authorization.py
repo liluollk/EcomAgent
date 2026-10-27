@@ -18,7 +18,7 @@ from runtime.access.actor import ActorContextBuilder, ActorContextError
 from runtime.access.authorization import Decision
 from runtime.access.passwords import hash_password, verify_password
 from runtime.access.tokens import (
-    LOCAL_TEST_SECRET,
+    SecretNotConfigured,
     TokenRejected,
     issue_token,
     resolve_secret,
@@ -281,11 +281,13 @@ def test_token_carrying_role_claim_is_rejected() -> None:
         verify_token(forged, secret=TEST_SECRET)
 
 
-def test_resolve_secret_reads_environment(monkeypatch) -> None:
+def test_resolve_secret_requires_environment(monkeypatch) -> None:
     monkeypatch.setenv("RUNTIME_JWT_SECRET", "env-secret")
     assert resolve_secret() == "env-secret"
     monkeypatch.delenv("RUNTIME_JWT_SECRET", raising=False)
-    assert resolve_secret() == LOCAL_TEST_SECRET
+    # 不存在可用的默认密钥:缺失必须是显式失败,而不是回退到公开字符串。
+    with pytest.raises(SecretNotConfigured):
+        resolve_secret()
 
 
 # ---------------------------------------------------------------------------

@@ -43,6 +43,8 @@ jobs:
     env:
       RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime
       RUNTIME_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
+      # 测试库清理需显式授权;CI 的 service 容器只在本作业内存在,可安全清空。
+      RUNTIME_TEST_RESET_ALLOWED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -78,6 +80,8 @@ jobs:
     env:
       RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
       RUNTIME_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime_test
+      # 测试库清理需显式授权;CI 的 service 容器只在本作业内存在,可安全清空。
+      RUNTIME_TEST_RESET_ALLOWED: "1"
       EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
       EVAL_MODEL: ${{ secrets.EVAL_MODEL }}
       EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}

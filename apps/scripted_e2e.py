@@ -1,4 +1,4 @@
-"""E2E 装配开关(阶段 4 Gate;``RUNTIME_E2E=1`` 时启用)。
+"""脚本化装配:由演示入口 ``apps.api.demo`` 使用,生产入口不引用。
 
 让端到端验证在无真实模型、无真实平台的情况下走通完整语义:
 
@@ -47,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from agents.product_operations.policy.models import PricePolicyConfig
+from apps.answered_view import rebuild_answered_view
 from apps.assembly import (
     ProductApplication,
     build_product_application,
@@ -65,9 +66,8 @@ from runtime.backend.protocol import (
     ToolCallCompleted,
 )
 from runtime.execution.executor import AdvanceOutcome, RunClaim
-from runtime.persistence.base import InputRequestStatus, ModelBackendType
-from runtime.persistence.models.execution import Run, ToolCall
-from runtime.persistence.models.interaction import InputRequest
+from runtime.persistence.base import ModelBackendType
+from runtime.persistence.models.execution import Run
 
 
 E2E_PRICE_CONFIG: Final = PricePolicyConfig(
@@ -339,47 +339,6 @@ async def build_e2e_application(
     )
 
 
-async def rebuild_answered_view(
-    session: AsyncSession, workspace_id: uuid.UUID, run_id: uuid.UUID
-) -> dict[str, str]:
-    """从持久化状态重建 Run 的"已回答字段"视图(见模块 docstring)。"""
-    requests = (
-        await session.scalars(
-            select(InputRequest).where(
-                InputRequest.workspace_id == workspace_id,
-                InputRequest.run_id == run_id,
-                InputRequest.status == InputRequestStatus.ANSWERED,
-            )
-        )
-    ).all()
-    answered: dict[str, str] = {}
-    for request in requests:
-        if request.tool_call_id is None:
-            continue
-        tool_call = (
-            await session.scalars(
-                select(ToolCall).where(
-                    ToolCall.workspace_id == workspace_id,
-                    ToolCall.id == request.tool_call_id,
-                )
-            )
-        ).one_or_none()
-        if tool_call is None:
-            continue
-        merged = (
-            tool_call.normalized_arguments
-            if tool_call.normalized_arguments is not None
-            else tool_call.raw_arguments
-        )
-        if not merged:
-            continue
-        for field in request.field_paths:
-            value = dict(merged).get(field)
-            if isinstance(value, str):
-                answered[field] = value
-    return answered
-
-
 class ProductDriverRegistry:
     """进程内执行器的商品域 driver:按 ``(workspace, actor)`` 懒组装并缓存。
 
@@ -387,6 +346,9 @@ class ProductDriverRegistry:
     :class:`ProductApplication`,并在每次推进前从持久化状态重建"已回答字段"
     视图(进程重启后门面的内存视图为空)。
     """
+
+    requires_model_config: bool = False
+    """脚本模型自带 Backend,不依赖 Workspace 的模型配置。"""
 
     def __init__(self, engine: AsyncEngine, *, executor_id: str = "api-executor") -> None:
         self._engine = engine

@@ -28,6 +28,7 @@ from apps.api.dependencies import (
     get_request_id,
     get_workspace_actor_context,
 )
+from apps.api.errors import ApiError
 from apps.api.executor_host import notify_run
 from apps.api.schemas.sessions import (
     AppendMessageRequest,
@@ -41,6 +42,7 @@ from apps.api.schemas.sessions import (
     SessionSnapshotView,
     SessionView,
 )
+from apps.model_driver import WorkspaceReadiness, check_workspace_readiness
 from runtime.access.actor import ActorContextBuilder, ActorContextError
 from runtime.commands.session import SessionCommandService
 from runtime.persistence.base import (
@@ -51,6 +53,7 @@ from runtime.persistence.models.execution import ToolCall
 from runtime.persistence.models.interaction import (
     ConfirmationRequest,
     InputRequest,
+    Session,
 )
 
 
@@ -95,6 +98,8 @@ async def get_session(
         messages = await service.session_messages(row)
         runs = await service.session_runs(row)
         active_run_id = await service.session_active_run_id(row)
+    readiness = await _readiness_for(request, session, row.workspace_id)
+    failure = None if readiness is None else readiness.failure
     return SessionSnapshotView(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -127,6 +132,8 @@ async def get_session(
         pending_confirmations=await _pending_confirmations(
             session, row.workspace_id, row.id
         ),
+        model_ready=None if readiness is None else readiness.ready,
+        model_blocked_reason=None if failure is None else failure.message,
     )
 
 
@@ -260,6 +267,46 @@ async def _store_options(
     ]
 
 
+async def _readiness_for(
+    request: Request, session: AsyncSession, workspace_id: UUID
+) -> WorkspaceReadiness | None:
+    """真实模型 driver 下返回 Workspace 就绪状态;脚本 driver 返回 None(不适用)。
+
+    返回 None 表示"这个概念不适用于当前装配",``ready=False`` 表示"确实缺配置",
+    两者在快照里分别对应 ``model_ready=None`` 与 ``model_ready=False``。
+    """
+    driver = getattr(request.app.state, "executor_driver", None)
+    if not getattr(driver, "requires_model_config", False):
+        return None
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        return None
+    return await check_workspace_readiness(engine, workspace_id)
+
+
+async def _require_workspace_ready(
+    request: Request, session: AsyncSession, session_id: UUID
+) -> None:
+    """提交前校验执行前置条件;缺失项以 409 + 稳定错误码返回。
+
+    只看 driver 是否需要模型配置(``requires_model_config``):演示入口的脚本
+    driver 自带 Backend,不因为 Workspace 没配模型而被拦住。
+    """
+    if getattr(request.app.state, "executor_driver", None) is None:
+        return
+    workspace_id = await session.scalar(
+        select(Session.workspace_id).where(Session.id == session_id)
+    )
+    if workspace_id is None:
+        return  # 会话不存在:交给命令服务给出它自己的 404
+    readiness = await _readiness_for(request, session, workspace_id)
+    if readiness is None:
+        return
+    failure = readiness.failure
+    if failure is not None:
+        raise ApiError(status_code=409, code=failure.code, message=failure.message)
+
+
 @router.post(
     "/api/sessions/{session_id}/messages",
     response_model=RunDispatchView,
@@ -272,7 +319,13 @@ async def append_message(
     actor: ActorDep,
     session: SessionDep,
 ) -> RunDispatchView:
-    """提交用户消息:创建 QUEUED Run 并唤醒执行器;活动 Run 存在即 409。"""
+    """提交用户消息:创建 QUEUED Run 并唤醒执行器;活动 Run 存在即 409。
+
+    真实模型 driver 下,先确认该 Workspace 具备执行条件:没配模型或缺价格
+    策略时直接 409 并说明缺什么,不创建注定失败的 Run。脚本 driver 不依赖
+    模型配置,因此不做这项校验。
+    """
+    await _require_workspace_ready(request, session, session_id)
     with translated_commands():
         dispatched = await SessionCommandService(
             session, actor_id=actor.actor_id

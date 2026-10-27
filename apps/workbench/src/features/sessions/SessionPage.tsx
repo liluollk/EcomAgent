@@ -24,6 +24,8 @@ interface SessionApiResponse {
   runs: Array<{ id: string; status: string; created_at: string }>;
   pending_inputs?: SessionSnapshot["pending_inputs"];
   pending_confirmations?: SessionSnapshot["pending_confirmations"];
+  model_ready?: boolean | null;
+  model_blocked_reason?: string | null;
 }
 
 interface RunApiResponse {
@@ -71,6 +73,8 @@ export async function loadSessionSnapshot(sessionId: string): Promise<SessionSna
     tool_calls: run?.tool_calls,
     pending_inputs: session.pending_inputs ?? run?.pending_inputs,
     pending_confirmations: session.pending_confirmations ?? run?.pending_confirmations,
+    model_ready: session.model_ready ?? null,
+    model_blocked_reason: session.model_blocked_reason ?? null,
   };
 }
 
@@ -132,7 +136,7 @@ export interface SessionPageProps {
 
 export function SessionPage({ sessionId }: SessionPageProps) {
   const loadSnapshot = useCallback(() => loadSessionSnapshot(sessionId), [sessionId]);
-  const { projection, connectionError, reload } = useAgentEvents({
+  const { projection, connectionError, reload, workspaceReadiness } = useAgentEvents({
     sessionId,
     loadSnapshot,
   });
@@ -148,6 +152,8 @@ export function SessionPage({ sessionId }: SessionPageProps) {
   // 存在活动等待 Run:禁止提交新普通任务(后端会以 ACTIVE_RUN_EXISTS 拒绝)。
   const runLocked =
     activeRun !== undefined && !TERMINAL_RUN_STATUSES.includes(activeRun.status);
+  // Workspace 没配模型:输入区直接不可用并说明原因,而不是让用户提交后才发现。
+  const modelBlocked = workspaceReadiness.ready === false;
 
   const reportActionError = (cause: unknown) => {
     setActionError(cause instanceof Error ? cause.message : String(cause));
@@ -277,14 +283,19 @@ export function SessionPage({ sessionId }: SessionPageProps) {
         <textarea
           aria-label="任务输入"
           value={draft}
-          disabled={runLocked || sending}
+          disabled={runLocked || sending || modelBlocked}
           onChange={(changeEvent) => setDraft(changeEvent.target.value)}
         />
         {runLocked && <p>当前存在进行中的任务,请等待其完成后再提交新任务。</p>}
+        {modelBlocked && (
+          <p role="status">
+            {workspaceReadiness.reason ?? "该工作区还没有配置模型,暂时无法执行任务。"}
+          </p>
+        )}
         <button
           type="button"
           onClick={sendMessage}
-          disabled={runLocked || sending || draft.trim().length === 0}
+          disabled={runLocked || sending || modelBlocked || draft.trim().length === 0}
         >
           发送
         </button>

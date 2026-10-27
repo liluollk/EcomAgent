@@ -13,6 +13,7 @@
 import base64
 import binascii
 import os
+from collections.abc import Mapping
 from typing import Final
 
 from cryptography.exceptions import InvalidTag
@@ -67,9 +68,13 @@ def build_secret_binding(
     ).encode("utf-8")
 
 
-def load_master_key() -> bytes:
-    """从环境读取并校验主密钥;缺失与格式错误抛出明确异常。"""
-    encoded = os.environ.get(MASTER_KEY_ENV_VAR)
+def load_master_key(environ: Mapping[str, str] | None = None) -> bytes:
+    """读取并校验主密钥;缺失与格式错误抛出明确异常。
+
+    ``environ`` 供启动配置复用同一份校验,默认读进程环境。
+    """
+    source = os.environ if environ is None else environ
+    encoded = source.get(MASTER_KEY_ENV_VAR)
     if encoded is None:
         raise MasterKeyMissing(f"environment variable {MASTER_KEY_ENV_VAR} is not set")
     try:

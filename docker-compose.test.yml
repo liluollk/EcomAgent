@@ -1,0 +1,21 @@
+# 重构专用测试数据库。与默认 docker-compose.yml 完全独立:
+# - 固定项目名 ecomagent-refactor,避免 `docker compose -f docker-compose.test.yml`
+#   因目录名与默认项目同名而接管/清理正在使用的 agent-runtime 项目;
+# - 主机端口由 TEST_POSTGRES_PORT 指定,默认 15439,不复用本机已占用的 5432;
+# - 无命名卷,数据随容器丢弃,不需要也不允许依赖其中的历史数据。
+name: ecomagent-refactor
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "${TEST_POSTGRES_PORT:-15439}:5432"
+    environment:
+      POSTGRES_USER: runtime
+      POSTGRES_PASSWORD: runtime
+      POSTGRES_DB: agent_runtime_refactor_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runtime -d agent_runtime_refactor_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

@@ -111,3 +111,8 @@ class SessionSnapshotView(BaseModel):
     runs: list[RunSummaryView]
     pending_inputs: list[PendingInputView] = []
     pending_confirmations: list[PendingConfirmationView] = []
+    model_ready: bool | None = None
+    """Workspace 是否具备执行条件;``None`` 表示当前装配不依赖模型配置(演示)。"""
+
+    model_blocked_reason: str | None = None
+    """未就绪时给用户看的原因;就绪或概念不适用时为 ``None``。"""

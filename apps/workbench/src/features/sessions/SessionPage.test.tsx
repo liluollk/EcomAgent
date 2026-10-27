@@ -397,6 +397,31 @@ describe("SessionPage 消息与运行状态", () => {
       );
     });
   });
+  it("Workspace 未配置模型时说明原因并禁用提交", async () => {
+    stubFetch((url) =>
+      url.endsWith("/api/sessions/session-1")
+        ? {
+            body: sessionSnapshot({
+              active_run_id: null,
+              runs: [],
+              model_ready: false,
+              model_blocked_reason:
+                "该工作区还没有可用的模型连接，请先在配置中添加模型和 API Key",
+            }),
+          }
+        : { status: 404, body: {} },
+    );
+    vi.stubGlobal("WebSocket", StubWebSocket);
+
+    render(<SessionPage sessionId="session-1" />);
+
+    expect(await screen.findByText(/还没有可用的模型连接/)).toBeInTheDocument();
+    const editor = screen.getByLabelText("任务输入") as HTMLTextAreaElement;
+    expect(editor).toBeDisabled();
+    // 即便强行填入内容,发送也保持禁用:不产生注定失败的 Run。
+    fireEvent.change(editor, { target: { value: "把 SKU-001 改成 99 元" } });
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
 });
 
 describe("SessionPage WebSocket 集成", () => {

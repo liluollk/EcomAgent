@@ -1,0 +1,17 @@
+# 演示栈:脚本模型 + Mock 平台 + 种子接口,供浏览器演示与 CI 使用。
+# 与 docker-compose.yml 的唯一差别是 api 的 command 指向演示入口,
+# 没有模式开关;`docker compose -f docker-compose.yml -f docker-compose.demo.yml ps`
+# 可以直接看出跑的是哪个入口。
+#
+# 使用:docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+# 演示密钥写死在此文件里,仅用于本机与 CI,不要用于任何对外开放的部署。
+services:
+  api:
+    command: >
+      sh -c ".venv/bin/alembic upgrade head &&
+             exec .venv/bin/uvicorn apps.api.demo:app --host 127.0.0.1 --port 8000"
+    environment:
+      RUNTIME_JWT_SECRET: demo-jwt-secret-not-for-production
+      RUNTIME_MASTER_KEY: ${RUNTIME_MASTER_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"

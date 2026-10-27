@@ -17,15 +17,16 @@ services:
 
   api:
     build: .
+    # 生产入口:不含种子接口,不装脚本模型。密钥必须由 .env 提供;
+    # 留空时进程启动即失败(见 apps/settings.py),不会带着默认密钥收请求。
     # 先应用迁移再启动;exec 让 uvicorn 成为 shell 的直接进程,SIGTERM 直达。
     command: >
       sh -c ".venv/bin/alembic upgrade head &&
              exec .venv/bin/uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
     environment:
       RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
-      # E2E 装配开关:API 注册 /api/e2e/seed 种子端点,并在进程内装配
-      # Run 执行器(阶段 4 Gate;首版为单 API 进程执行模型)。
-      RUNTIME_E2E: "1"
+      RUNTIME_JWT_SECRET: ${RUNTIME_JWT_SECRET:-}
+      RUNTIME_MASTER_KEY: ${RUNTIME_MASTER_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

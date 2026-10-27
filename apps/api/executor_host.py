@@ -7,40 +7,42 @@
 - 数据库里的 QUEUED Run 就是队列,``submit`` 丢失不会丢任务;
 - 进程退出时停止后台循环并等待当前推进到安全点。
 
-生产环境尚未接入真实模型与平台 Adapter,因此宿主只在 ``RUNTIME_E2E=1``
-(或显式注入 driver)时装配;没有宿主时 API 仍然创建 Run,只是不推进——
-这与"执行能力未部署"的语义一致,不会伪装成已执行。
+**执行器常驻,不按入口决定装不装。** 两个入口都构造宿主,差别只在注入哪个
+driver:生产入口用 :class:`apps.model_driver.WorkspaceModelDriver`(按该
+Workspace 的模型配置解析 Backend),演示入口用脚本 driver。能不能推进由
+"这个 Workspace 配没配模型"决定,属于数据,不是部署开关——没配就是一次
+明确的 :class:`apps.model_driver.WorkspaceNotReady`,而不是静默停在 QUEUED。
 """
 
 from __future__ import annotations
 
-import os
-from typing import Any, Final
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from apps.scripted_e2e import ProductDriverRegistry
-from runtime.execution.executor import RunExecutor
+from apps.model_driver import WorkspaceModelDriver
+from runtime.execution.executor import RunDriver, RunExecutor
 from runtime.execution.single_writer import SingleWriterLock
 
 
-_ENABLED_VALUES: Final = frozenset({"1", "true", "yes", "on"})
+DriverFactory = Callable[[AsyncEngine], RunDriver]
 
 
-def e2e_executor_enabled() -> bool:
-    """``RUNTIME_E2E=1`` 时装配脚本化执行宿主(与 API 的 E2E 种子端点同开关)。"""
-    return os.environ.get("RUNTIME_E2E", "").strip().lower() in _ENABLED_VALUES
+def default_driver_factory(engine: AsyncEngine) -> RunDriver:
+    """生产默认 driver:按 Workspace 的模型配置解析 Backend。"""
+    return WorkspaceModelDriver(engine)
 
 
 class ExecutorHost:
-    """持有进程级 ``RunExecutor`` 与商品域 driver 的生命周期。"""
+    """持有进程级 ``RunExecutor`` 与域 driver 的生命周期。"""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, driver: RunDriver) -> None:
         self._engine = engine
-        self.driver = ProductDriverRegistry(engine)
+        self.driver = driver
         self.executor = RunExecutor(
             session_factory=lambda: AsyncSession(engine, expire_on_commit=False),
-            driver=self.driver,
+            driver=driver,
             instance_id="api-executor",
             lock=SingleWriterLock(engine),
         )
@@ -50,14 +52,17 @@ class ExecutorHost:
 
     async def aclose(self) -> None:
         await self.executor.aclose()
-        await self.driver.aclose()
+        aclose = getattr(self.driver, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
-def build_executor_host(engine: AsyncEngine) -> ExecutorHost | None:
-    """按开关构建宿主;未启用时返回 None(API 只创建 Run,不推进)。"""
-    if not e2e_executor_enabled():
-        return None
-    return ExecutorHost(engine)
+def build_executor_host(
+    engine: AsyncEngine, driver_factory: DriverFactory | None = None
+) -> ExecutorHost:
+    """构造宿主;未指定工厂时用生产默认 driver。"""
+    factory = default_driver_factory if driver_factory is None else driver_factory
+    return ExecutorHost(engine, factory(engine))
 
 
 def notify_run(app: Any, run_id: Any) -> None:

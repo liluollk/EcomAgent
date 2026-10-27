@@ -20,9 +20,9 @@ jobs:
       - run: npm --prefix apps/workbench run test -- --run
       - run: npm --prefix apps/workbench run build
 
-  # 完整 E2E(不设 continue-on-error):ScriptedBackend E2E 装配无真实模型
-  # 依赖,在 ubuntu runner 上确定性复现 docker compose 的 postgres + api +
-  # E2E 装配(RUNTIME_E2E=1:api 注册 /api/e2e/seed,进程内执行器推进 Run)。
+  # 完整 E2E(不设 continue-on-error):演示入口无真实模型依赖,
+  # 在 ubuntu runner 上确定性复现 docker compose 的 postgres + demo api
+  # (apps.api.demo:注册 /api/e2e/seed,进程内执行器推进 Run)。
   e2e:
     runs-on: ubuntu-latest
     services:
@@ -41,18 +41,18 @@ jobs:
           --health-retries 12
     env:
       RUNTIME_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime
-      RUNTIME_E2E: "1"
+      RUNTIME_JWT_SECRET: demo-jwt-secret-not-for-production
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - run: uv run alembic upgrade head
-      # 等价于 compose 的 api 服务:先迁移,再后台常驻 uvicorn
-      # (RUNTIME_E2E=1,Run 执行器随 API lifespan 启动);健康检查通过才继续。
+      # 等价于 compose 的 demo 服务:先迁移,再后台常驻演示入口
+      # (apps.api.demo,脚本 driver 随 lifespan 启动);健康检查通过才继续。
       # 进程意外退出会导致 E2E 断言失败,因此这里只做健康等待,不做额外兜底。
       - name: Start api in background
         run: |
-          uv run uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 &
+          uv run uvicorn apps.api.demo:app --host 127.0.0.1 --port 8000 &
           sleep 5
           curl --fail --retry 24 --retry-delay 5 --retry-connrefused http://127.0.0.1:8000/api/health
         shell: bash

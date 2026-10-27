@@ -4,12 +4,13 @@
 - claim 集合精确为 ``{sub, iat, exp, jti}``;角色、权限与资源范围永不写入
   token,校验时遇到多余 claim 一律拒绝;
 - 算法固定 HS256,校验拒绝 ``alg=none`` 与其它算法;
-- secret 从环境变量 ``RUNTIME_JWT_SECRET`` 读取;默认值仅供本地测试,
-  不承载生产语义。
+- secret 从环境变量 ``RUNTIME_JWT_SECRET`` 读取;缺失即抛
+  :class:`SecretNotConfigured`,不存在可用的默认密钥。
 """
 
 import os
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from uuid import UUID
@@ -19,7 +20,6 @@ from pydantic import BaseModel, ConfigDict
 
 
 SECRET_ENV_VAR: Final = "RUNTIME_JWT_SECRET"
-LOCAL_TEST_SECRET: Final = "local-test-secret-not-for-production"
 DEFAULT_TTL: Final = timedelta(minutes=30)
 
 _ALGORITHM: Final = "HS256"
@@ -41,12 +41,23 @@ class VerifiedToken(BaseModel):
     token_id: str
 
 
-def resolve_secret() -> str:
-    """读取签名密钥;未配置环境变量时返回本地测试默认值。"""
-    secret = os.environ.get(SECRET_ENV_VAR)
+class SecretNotConfigured(Exception):
+    """未配置 JWT 签名密钥:启动或签发前即失败,不回退到公开默认值。"""
+
+
+def resolve_secret(environ: Mapping[str, str] | None = None) -> str:
+    """读取签名密钥;缺失即抛错,不提供可用的默认值。
+
+    ``environ`` 供启动配置在一次性读取环境时复用同一份校验,默认读进程环境。
+    """
+    source = os.environ if environ is None else environ
+    secret = source.get(SECRET_ENV_VAR)
     if secret:
         return secret
-    return LOCAL_TEST_SECRET
+    raise SecretNotConfigured(
+        f"environment variable {SECRET_ENV_VAR} is not set; "
+        "there is no usable default secret"
+    )
 
 
 def issue_token(

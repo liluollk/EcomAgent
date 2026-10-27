@@ -25,7 +25,9 @@ Python 3.12、Pydantic v2、SQLAlchemy 2、Alembic、PostgreSQL 16 + pgvector、
 
 ```bash
 uv sync --all-extras          # 安装依赖(自动创建 .venv)
-docker compose up -d postgres api  # 启动 PostgreSQL + API(含进程内 Run 执行器)
+docker compose up -d postgres api  # 生产入口;需先设 RUNTIME_JWT_SECRET 与 RUNTIME_MASTER_KEY
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d postgres api
+                              # 演示入口(脚本模型 + 种子接口),无真实模型依赖
 uv run alembic upgrade head   # 建表(空库与升版本均可)
 uv run ruff check runtime agents adapters apps eval tests
 uv run mypy runtime agents adapters composition apps eval          # 248 个源文件
@@ -40,7 +42,7 @@ npm --prefix apps/workbench run build
 npm --prefix apps/workbench run test:e2e              # 2 passed
 ```
 
-前置条件:Python 3.12、uv、Node 24、Docker。首次启动容器后等待健康检查通过再执行 migration。复制 `.env.example` 为 `.env` 可覆盖默认连接串与密钥变量;测试库 `agent_runtime_test` 由 pytest 自动创建和管理。
+前置条件:Python 3.12、uv、Node 24、Docker。首次启动容器后等待健康检查通过再执行 migration。复制 `.env.example` 为 `.env` 并填写 `RUNTIME_JWT_SECRET`、`RUNTIME_MASTER_KEY`(缺失时进程启动即失败,不存在默认密钥);测试库连接串与清库授权见 `docs/开发/本地环境.md`。
 
 ## 目录结构
 

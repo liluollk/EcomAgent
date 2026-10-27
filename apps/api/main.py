@@ -1,18 +1,18 @@
-"""FastAPI 组合根(计划 04 Task 1)。
+"""FastAPI 组合根(生产入口)。
 
 ``create_app()`` 装配路由、请求标识中间件与统一异常处理器;数据库引擎在
-lifespan 中从 ``RUNTIME_DATABASE_URL`` 创建并挂到 ``app.state``,测试可直接
-注入既有引擎覆盖。错误响应体统一为 ``{"code", "message", "request_id"}``,
-不返回异常堆栈。
+lifespan 中按 :class:`apps.settings.StartupSettings` 创建并挂到 ``app.state``,
+测试可直接注入既有引擎覆盖。装配内容全部由调用方显式传入,不读环境变量决定,
+因此本文件只装生产需要的东西:不含种子接口,也没有脚本模型。
+
+错误响应体统一为 ``{"code", "message", "request_id"}``,不返回异常堆栈。
 """
 
-import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Final
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -28,7 +28,7 @@ from apps.api.errors import (
     VALIDATION_ERROR,
     ApiError,
 )
-from apps.api.executor_host import ExecutorHost, build_executor_host
+from apps.api.executor_host import DriverFactory, ExecutorHost, build_executor_host
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.configuration import router as configuration_router
 from apps.api.routes.events import router as events_router
@@ -39,12 +39,11 @@ from apps.api.routes.requests import router as requests_router
 from apps.api.routes.runs import router as runs_router
 from apps.api.routes.sessions import router as sessions_router
 from apps.api.routes.workspaces import router as workspaces_router
-from runtime.persistence.database import create_engine, get_database_url
+from apps.settings import StartupSettings
+from runtime.persistence.database import create_engine
 
 
 _FRAMEWORK_ERROR_CODES: dict[int, str] = {404: NOT_FOUND, 405: METHOD_NOT_ALLOWED}
-
-_E2E_ENABLED_VALUES: Final = frozenset({"1", "true", "yes", "on"})
 
 
 def _error_payload(request: Request, code: str, message: str) -> dict[str, str]:
@@ -119,40 +118,52 @@ class RequestContextMiddleware:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动时确保引擎与会话工厂就绪,并按需启动进程内 Run 执行器。
+    """启动时校验配置、确保引擎与会话工厂就绪,并按入口传入的工厂装配执行器。
 
-    执行器在 ``RUNTIME_E2E=1`` 时装配(见 :mod:`apps.api.executor_host`):
-    启动时获取单写者锁并接管上次进程遗留的非终态 Run。
+    配置缺失(数据库 URL、JWT 密钥、主密钥)在这里直接失败,服务不会带着
+    公开默认密钥开始接收请求。调用方已注入引擎时视为自己负责配置,不再读环境。
     """
     engine: AsyncEngine | None = getattr(app.state, "engine", None)
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(get_database_url())
+        settings: StartupSettings = app.state.settings or StartupSettings.from_env()
+        app.state.settings = settings
+        engine = create_engine(settings.database_url)
         app.state.engine = engine
         app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     host: ExecutorHost | None = None
     try:
         if getattr(app.state, "executor", None) is None:
-            host = build_executor_host(engine)
-            if host is not None:
-                await host.start()
-                app.state.executor = host.executor
+            host = build_executor_host(engine, app.state.driver_factory)
+            await host.start()
+            app.state.executor = host.executor
+            app.state.executor_driver = host.driver
         yield
     finally:
         if host is not None:
             await host.aclose()
             app.state.executor = None
+            app.state.executor_driver = None
         if owns_engine:
             await engine.dispose()
 
 
-def create_app(engine: AsyncEngine | None = None) -> FastAPI:
-    """构建 FastAPI 应用;测试可注入既有引擎,跳过 lifespan 内的引擎创建。
+def create_app(
+    *,
+    engine: AsyncEngine | None = None,
+    settings: StartupSettings | None = None,
+    driver_factory: DriverFactory | None = None,
+    extra_routers: Sequence[APIRouter] = (),
+) -> FastAPI:
+    """装配 API 应用。
 
-    ``RUNTIME_E2E=1`` 时追加注册 E2E 种子端点(阶段 4 Gate;仅本地/CI
-    端到端验证使用)。
+    装配内容全部由调用方显式给出,不读环境变量决定:``driver_factory`` 省略时
+    用生产默认 driver(按 Workspace 的模型配置解析 Backend),演示入口显式传
+    入脚本 driver 并追加种子路由。测试注入既有引擎与自己的 settings。
     """
     app = FastAPI(title="Agent Runtime API", lifespan=_lifespan)
+    app.state.settings = settings
+    app.state.driver_factory = driver_factory
     if engine is not None:
         app.state.engine = engine
         app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
@@ -171,13 +182,12 @@ def create_app(engine: AsyncEngine | None = None) -> FastAPI:
     app.include_router(requests_router)
     app.include_router(events_router)
     app.include_router(memories_router)
-    if os.environ.get("RUNTIME_E2E", "").strip().lower() in _E2E_ENABLED_VALUES:
-        from apps.api.e2e import router as e2e_router
-
-        app.include_router(e2e_router)
+    for router in extra_routers:
+        app.include_router(router)
     return app
 
 
-# uvicorn 入口(uvicorn apps.api.main:app):引擎由 lifespan 从
-# RUNTIME_DATABASE_URL 创建;测试/嵌入式场景请直接调用 create_app(engine)。
+# uvicorn 入口(uvicorn apps.api.main:app):引擎与配置由 lifespan 创建。
+# 执行器常驻,driver 按各 Workspace 的模型配置解析:没配模型的 Workspace
+# 提交消息会得到明确的 409,而不是一个永远停在 QUEUED 的 Run。
 app = create_app()

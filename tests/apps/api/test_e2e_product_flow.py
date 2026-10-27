@@ -1,6 +1,6 @@
-"""E2E 装配开关测试(阶段 4 Gate;``RUNTIME_E2E=1``)。
+"""演示入口端到端测试(脚本 driver + 种子路由)。
 
-端到端验证 apps 层 E2E 装配:ScriptedBackend(按任务表逐步发出 P1 ToolCall)
+端到端验证 apps 层演示装配:ScriptedBackend(按任务表逐步发出 P1 ToolCall)
 + Mock Commerce Adapter(真实写 listings/inventory_levels),覆盖四条 P1
 主路径 × AUTO_EXECUTE / REQUIRE_CONFIRMATION 两种执行模式:
 
@@ -11,7 +11,7 @@
 
 CONFIRM_WRITES 模式下写前经 API 确认端点接受;AUTO_EXECUTE 模式下写直接
 执行。确认/写执行由 Runtime 重新校验权限、Policy 与资源版本(既有语义)。
-Run 由 API 进程内的 RunExecutor 推进(应用 lifespan 装配,``RUNTIME_E2E=1``),
+Run 由 API 进程内的 RunExecutor 推进(应用 lifespan 装配,driver 由入口注入),
 路由提交事务后唤醒执行器;API 走完整路由栈,不依赖任何外部真实服务
 (模型=Scripted,mem0/langfuse 不启用)。
 """
@@ -33,7 +33,7 @@ from agents.product_operations.agent import AGENT_KEY
 from agents.product_operations.domain.models import ListingStatus
 from agents.product_operations.persistence.models import InventoryLevel, Listing
 from agents.product_operations.skill import SKILL_KEY
-from apps.api.main import create_app
+from apps.api.demo import create_demo_app
 from runtime.persistence.base import ExecutionMode
 
 
@@ -69,13 +69,10 @@ async def _wait_for(predicate: Any, *, timeout: float = _ADVANCE_TIMEOUT) -> Any
 
 
 @pytest.fixture()
-async def e2e_environment(
-    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[dict[str, Any]]:
-    """RUNTIME_E2E=1 的 API 应用 + 幂等种子;结束按外键顺序清理提交行。"""
-    monkeypatch.setenv("RUNTIME_E2E", "1")
-    app = create_app(engine=engine)
-    # 进入应用 lifespan:装配并启动进程内 Run 执行器(RUNTIME_E2E=1),
+async def e2e_environment(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
+    """演示入口(脚本 driver + 种子路由)的应用实例;结束按外键顺序清理提交行。"""
+    app = create_demo_app(engine=engine)
+    # 进入应用 lifespan:装配并启动进程内 Run 执行器(脚本 driver),
     # 路由提交后由执行器推进;退出时释放单写者锁。
     async with app.router.lifespan_context(app), AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"

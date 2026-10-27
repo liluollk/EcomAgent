@@ -84,6 +84,10 @@ export interface SessionSnapshot {
   tool_calls?: ToolCallView[];
   pending_inputs?: InputRequestView[];
   pending_confirmations?: ConfirmationRequestView[];
+  /** Workspace 是否具备执行条件;null/undefined 表示当前装配不依赖模型配置。 */
+  model_ready?: boolean | null;
+  /** 未就绪时给用户看的原因(后端给的是可直接展示的中文)。 */
+  model_blocked_reason?: string | null;
 }
 
 /** WS 推送的 wire 事件;runId 由连接目标 Run 提供(WS 按 Run 建立)。 */

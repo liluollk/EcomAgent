@@ -407,8 +407,13 @@ class RunExecutor:
         return outcome
 
     async def _handle_failure(self, claim: RunClaim, error: BaseException) -> AdvanceOutcome:
-        """暂时性错误:未耗尽预算退回 QUEUED,否则 Run FAILED。"""
+        """暂时性错误:未耗尽预算退回 QUEUED,否则 Run FAILED。
+
+        ``retryable = False`` 的异常是永久性配置/装配错误(如 Workspace 未配置
+        模型):重试同一份配置不会变好,因此直接判失败,不占用重试预算。
+        """
         code = str(getattr(error, "code", "") or type(error).__name__).upper()[:64]
+        permanent = getattr(error, "retryable", True) is False
         await self._finish_attempt(claim, RunAttemptStatus.FAILED, code)
         session = self._session_factory()
         try:
@@ -429,7 +434,7 @@ class RunExecutor:
                     )
                 target = (
                     RunStatus.FAILED
-                    if claim.attempt_no >= self._max_attempts
+                    if permanent or claim.attempt_no >= self._max_attempts
                     else RunStatus.QUEUED
                 )
                 await RunRepository(session).compare_and_set_status(

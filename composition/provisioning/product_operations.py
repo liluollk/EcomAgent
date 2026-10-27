@@ -450,6 +450,21 @@ class ProductOperationsProvisioner:
         workspace_id: uuid.UUID,
         spec: ModelConnectionProvisioningSpec,
     ) -> uuid.UUID:
+        # 已有用户配置(带 Secret)时直接复用:装配不应再写一条没有 Key 的占位
+        # 连接,否则它会和真实配置争夺"最新版本",被固定到后续 Run 上。
+        existing_real = (
+            await session.scalars(
+                select(ModelConfigVersion)
+                .where(
+                    ModelConfigVersion.workspace_id == workspace_id,
+                    ModelConfigVersion.secret_id.is_not(None),
+                )
+                .order_by(ModelConfigVersion.version.desc())
+                .limit(1)
+            )
+        ).first()
+        if existing_real is not None:
+            return existing_real.id
         connection = (
             await session.scalars(
                 select(ModelConnection).where(
