@@ -1,60 +1,138 @@
-# Agent Runtime & Workbench
+# EcomAgent
 
-可持久执行、安全可控、可恢复且可评测的 Agent Runtime,以及其上的 Agent 工作台与商品运营参考 Agent。
+面向多店铺商品运营的 Agent Runtime 与工作台。用户可以用自然语言完成商品查询、跨店比价、改价、库存调整和 Listing 上下架；系统负责把模型决策变成可授权、可确认、可恢复、可审计的业务操作。
 
-当前进度:`docs/计划/00-实施总路线图.md` 定义的五个阶段(Runtime 内核、商品 Agent、API 工作台、确定性 Eval、CI)已实现并通过各自 Gate 的本地验证;商品运营模块重组(ADR-002 P0/P1)已实施并提交。DeepSeek 真实模型评测于 2026-10-22 按协议 v3 全量复跑,结果保存在 `eval/gates/v3.json`:Core 96 次执行任务完成率 93.75%(90/96,口径为权威状态 + 过程 + 答复依据 + 行为合同)、状态完成率 94.79%(91/96)、稳定通过 28/32;Safety 17 次危险尝试全部拦截且零副作用;Regression 6/6;Blind 25/30。2026-10-25 协议升到 v4(澄清判分、答复原文进报告、金额接受 JSON 数字、门禁冻结系统指纹),Clarification 分区从 0% 提升到 83.33%(15/18);但 Core/Blind/Safety/Regression 的 v4 复跑因 DeepSeek 额度耗尽中断,**尚未派生 v4 门禁**,因此 v3 的数字只代表旧试卷。判什么、不判什么见 `docs/评测/评测契约.md`,v3 结果见 `docs/评测/复测报告-v3-20261022.md`,v4 现状见 `docs/评测/复测报告-v4-20261025.md`。
+`Python 3.12` · `FastAPI` · `PostgreSQL 16` · `SQLAlchemy 2` · `Pydantic v2` · `React 19` · `TypeScript`
 
-## 技术栈
+## 为什么做这个项目
 
-Python 3.12、Pydantic v2、SQLAlchemy 2、Alembic、PostgreSQL 16 + pgvector、FastAPI、uvicorn;React 19 + Vite + Vitest + Playwright(工作台);pytest、Ruff、mypy(strict)、uv。
+商品运营 Agent 的难点不是让模型“调用一次工具”，而是保证一次业务操作在真实约束下仍然正确：
 
-## 已实现并验证的能力
+- 用户只说“把这件商品降到 88 元”时，系统需要确认商品、店铺和授权范围，不能自行猜测；
+- 写操作执行前要重新检查权限、策略、资源版本和确认内容，避免确认后条件已经变化；
+- 平台已经写入但响应丢失时，系统不能盲目重试，否则可能重复改价或重复扣减库存；
+- 进程重启、事件重连和模型输出波动不能破坏持久化状态；
+- Eval 不能只看模型最后一句话，而要核对平台权威状态、工具轨迹和实际副作用。
 
-以下能力均有对应的测试或 Eval 证据(见"已验证的本地命令"),不包含未验证的声明:
+EcomAgent 围绕这些问题实现了一套模块化单体：通用 Runtime 管理执行与恢复，商品运营 Agent 提供领域能力，工作台呈现状态，Eval 独立判断任务结果。
 
-- **工程基础与持久化**:公共接口与类型、PostgreSQL 持久化(40 张表)、Workspace 隔离的 Repository 与事务所有权、本地身份与授权、Secret 加密与外部端点防护、只追加审计;
-- **Runtime 执行内核**:Backend 流式归一化(工具增量不直接执行)、固定 PreToolUse/PostToolUse 顺序与写前确认(TOCTOU 重校验)、Session 隔离、Context 预算与 Summary(受保护事实保留)、记忆生命周期(删除后不再进入上下文)、幂等与 Reconciliation(UNKNOWN 先回查)、单执行器 state_version CAS 与进程重启恢复、事件重放去重、限额终止、取消后永不恢复——以上 10 条不变式由确定性 Runtime Eval 全部验证通过;
-- **商品运营参考 Agent**:按 catalog/pricing/inventory/listing 四个能力模块组织,提供搜索、比价、改价、库存读取、库存调整、Listing 读取、发布、取消发布等商品工具;每条写路径覆盖缺店铺 Input 澄清、写前确认(确认后重校验权限/策略/资源版本)、Mock 平台权威落库、UNKNOWN 回查恢复与同 operation_id 幂等重放;四写工具统一安全矩阵(无写权限、跨店铺、空资源范围、确认后版本变化、响应丢失、重复提交、Adapter 能力边界)由确定性测试验证;能力版本经 Provisioner 发布,Agent/ Skill/Tool/Policy 以 stable key + version + 内容 hash 冻结进 Eval 能力清单。提供固定商品 REST Adapter(仅声明定价能力,其余失败闭合)并以 `httpx.MockTransport` 验证幂等键、版本冲突和不确定写回查。未接入淘宝/抖音官方 API 或真实店铺;
-- **API 与工作台**:FastAPI API(统一错误响应体、请求标识、健康检查)与 React 工作台;Workspace overview 聚合真实成员角色、店铺授权与已启用能力,前端支持切换 Workspace,任务只使用当前 Workspace Agent;Session 固定创建时唯一有效的 AgentVersion,后续 Run 不受绑定变更影响;前端单测覆盖 EventReducer 的重复/乱序/缺口/快照/终态不变量;
-- **确定性 Eval 与发布门槛**:Runtime 不变式套件(10 用例)与故障恢复套件(7 故障)确定性可重复;商品 Agent 数据集五个分区共 60 例(core 32 / blind 10 / clarification 6 / regression 2 / safety 10,ID 互斥 + Core/Blind 冻结 SHA-256);八类断言(权威状态、答复事实、禁止披露、顺序、工具入参、禁止调用、逐轮答复、澄清顺序)分别判分,分项不折抵、无综合总分、真实分母,决策/安全/恢复/合同/澄清各自独立指标;JSON/Markdown 报告与发布 Gate(`eval/gates/`:缺数据一律 fail closed、安全三项独立硬门槛、Core 无安全用例时必须附 Safety 报告、逐例回归与已知失败频次都不被平均分抵消)。评测契约、协议与历次结果见 `docs/评测/`;
-- **CI**:`.github/workflows/` 三个 workflow——backend(PR:postgres/pgvector service + Alembic + Ruff + mypy + pytest)、workbench(PR:lint + Vitest + build,另有完整 E2E job:postgres service + 后端 + Playwright chromium)、eval(PR:确定性 Eval + 数据集校验;真实模型评测仅 `workflow_dispatch` 手动触发,使用仓库 Secrets,不在 PR 中消耗额度)。
+## 一次任务如何完成
 
-## 已验证的本地命令
+以“比较两个店铺的 SKU-3003，并把目标店铺价格调整到 88 元”为例：
 
-以下命令均在本仓库实际验证通过(Windows + Git Bash,退出 0):
+1. Agent 先调用查询工具获取商品与店铺现状；
+2. 缺少店铺、SKU 或目标价格时，Run 进入 `WAITING_INPUT`，补充信息后从同一 ToolCall 恢复；
+3. `PreToolUse` 依次完成 Schema、参数来源、资源范围、RBAC、业务策略和执行模式检查；
+4. 需要人工确认时生成带资源版本与参数指纹的确认请求，确认后重新执行完整检查链；
+5. Runtime 为写操作分配稳定 `operation_id`，Adapter 使用幂等键和版本 CAS 执行；
+6. 如果结果不确定，Operation 进入 `UNKNOWN`，系统先回查平台状态，再决定完成、重试或保持待处理。
 
-```bash
-uv sync --all-extras          # 安装依赖(自动创建 .venv)
-docker compose up -d postgres api  # 生产入口;需先设 RUNTIME_JWT_SECRET 与 RUNTIME_MASTER_KEY
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d postgres api
-                              # 演示入口(脚本模型 + 种子接口),无真实模型依赖
-uv run alembic upgrade head   # 建表(空库与升版本均可)
-uv run ruff check runtime agents adapters apps eval tests
-uv run mypy runtime agents adapters composition apps eval          # 248 个源文件
-uv run pytest -q              # 1208 passed(需本地 PostgreSQL)
-uv run python -m eval.runtime_suite --dataset eval/datasets/runtime
-                              # failed=0 infrastructure_errors=0 skipped=0(10 用例)
-uv run python -m eval.recovery_suite --dataset eval/datasets/recovery/faults.yaml
-                              # actual_duplicate_writes=0,7 故障全过
-npm --prefix apps/workbench run lint
-npm --prefix apps/workbench run test -- --run          # 49 passed
-npm --prefix apps/workbench run build
-npm --prefix apps/workbench run test:e2e              # 2 passed
+同一套链路用于价格、库存和 Listing 写操作。模型决定“要做什么”，Runtime 与领域服务决定“是否允许做、如何安全地做”。
+
+## 系统结构
+
+```mermaid
+flowchart LR
+    U[运营人员] --> W[React 工作台]
+    W --> A[FastAPI]
+    A --> E[RunExecutor]
+    E --> R[Agent Runtime]
+
+    R --> H[Agent Harness]
+    H --> B[AgentBackend]
+    H --> P[PreToolUse]
+    P --> T[商品运营 Tools]
+
+    T --> C[商品领域服务]
+    C --> M[Mock Commerce Adapter]
+    C --> X[REST Commerce Adapter]
+
+    R --> D[(PostgreSQL)]
+    R --> V[AgentEvent]
+    V --> W
+
+    Q[Eval Runner] --> R
+    Q --> S[Scorer / Release Gate]
 ```
 
-前置条件:Python 3.12、uv、Node 24、Docker。首次启动容器后等待健康检查通过再执行 migration。复制 `.env.example` 为 `.env` 并填写 `RUNTIME_JWT_SECRET`、`RUNTIME_MASTER_KEY`(缺失时进程启动即失败,不存在默认密钥);测试库连接串与清库授权见 `docs/开发/本地环境.md`。
+依赖方向保持单向：上层业务与应用模块依赖 Runtime 提供的能力，`runtime/` 不反向导入商品领域实现。新增业务 Agent 时可以复用 Run、事件、确认、执行与恢复机制，而不需要把 SKU、店铺或价格规则写入 Runtime 核心。
 
-## 目录结构
+## 关键工程设计
 
-- `runtime/` — 公共接口、持久化、访问控制、安全、审计(禁止反向依赖上层模块,有架构测试防护)
-- `agents/`、`adapters/` — 商品运营参考 Agent 与后端/平台适配
-- `composition/` — 商品运营 Agent、Runtime、Adapter 与集成服务的产品组合根
-- `apps/` — API 与进程内 Run 执行宿主(`apps/api`)、装配(`apps/assembly.py`)、E2E 脚本装配(`apps/scripted_e2e.py`)与工作台(`apps/workbench`)
-- `eval/` — Eval Schema、Runner、Scorer、数据集、报告与发布 Gate
-- `migrations/` — Alembic 迁移
-- `docs/` — 需求、架构、实施计划与评测文档(`docs/评测/`)
-- `tests/` — 单元、持久化、架构与 Eval 测试
+### 1. Harness、Runtime、执行可靠性和 Eval 分层
 
-## 架构与评测文档
+- **Agent Harness**：装配 Prompt、模型上下文、Tool Schema 与固定顺序的 `PreToolUse`；
+- **Runtime**：持久化 Workspace、Session、Run、Message、ToolCall 和 AgentEvent，管理暂停与恢复；
+- **执行可靠性**：通过 `operation_id`、幂等键、资源版本 CAS、写后回查和 Reconciliation 控制重复写风险；
+- **Eval**：从权威业务状态和工具轨迹判断任务结果，不参与线上执行状态。
 
-架构见 `docs/架构/`,计划见 `docs/计划/`(其中 `docs/计划/00-实施总路线图.md` 定义阶段顺序与各阶段 Gate)。评测判什么见 `docs/评测/评测契约.md`,协议与命令见 `docs/评测/评测方法.md`,各轮结果见 `docs/评测/复测报告-v4-20261025.md`、`docs/评测/复测报告-v3-20261022.md` 与 `docs/评测/首版报告.md`。
+这四层处在同一模块化单体中，是职责边界，不是为了形式拆出的微服务。
+
+### 2. 写前确认不是弹窗，而是一份可失效的执行授权
+
+确认请求绑定 Actor、Tool、规范化参数、资源版本和过期时间。用户确认后，Runtime 不会直接调用 Tool，而是重新执行权限、策略和资源状态检查；参数或版本变化会让旧确认失效，避免 TOCTOU 问题。
+
+### 3. 不把超时等同于失败
+
+外部平台超时可能有三种结果：未执行、已执行、结果未知。EcomAgent 将写操作单独持久化为 Operation：
+
+```text
+PREPARED → EXECUTING → SUCCEEDED / FAILED / UNKNOWN
+                                   ↓
+                          Reconciliation 回查
+```
+
+`UNKNOWN` 不会触发盲目重写。能够可靠回查时按平台权威状态收敛；既不支持幂等又不能回查的 Adapter 保持不确定状态，不宣称 exactly-once。
+
+### 4. 单执行器是明确取舍
+
+首版采用单 API 进程、单 `RunExecutor`，由 PostgreSQL 中的 `QUEUED Run` 表示待执行任务，并用 `state_version` CAS 防止重复推进。项目保留持久化恢复、确认挂起和 `UNKNOWN → Reconciliation`，但不引入当前规模不需要的 Redis、Celery、Worker 租约和多实例抢占。
+
+### 5. 商品能力以模块化单体接入
+
+商品运营 Agent 当前覆盖：
+
+| 能力 | 只读 | 写操作 |
+|---|---|---|
+| Catalog | 商品搜索 | — |
+| Pricing | Listing 查询、跨店比价 | 改价 |
+| Inventory | 库存读取 | 库存调整 |
+| Listing | 发布状态读取 | 发布、取消发布 |
+
+Catalog 通过 Tool 与 `CatalogService` 查询本地商品数据；Pricing、Inventory 和 Listing 分别拥有 Tool、领域服务、Policy 与 Adapter 端口，再由 `composition/` 统一装配。业务规则不会进入 Runtime 状态机。
+
+## 评测与验证
+
+项目把“系统必须始终成立的不变量”和“模型在固定试卷上的任务表现”分开验证：
+
+| 评测 | 证据 | 结果 |
+|---|---|---|
+| Runtime 不变式 | 10 个确定性场景 | 覆盖状态迁移、确认恢复、上下文隔离、取消和限额等执行规则 |
+| 故障恢复 | 7 类故障注入 | 检查中断恢复、响应丢失回查和重复逻辑写入 |
+| 协议 v3 Core | 32 个场景 × 3 次 | 任务完成率 `90/96`（`93.75%`），稳定通过 `28/32` |
+| 协议 v3 Blind | 10 个场景 × 3 次 | 任务完成率 `25/30`（`83.33%`），稳定通过 `7/10` |
+| 协议 v3 Safety | 10 个场景 × 3 次 | 17 次危险尝试全部拦截，实际危险副作用为 0 |
+| 协议 v3 Regression | 2 个场景 × 3 次 | `6/6` 通过 |
+| 协议 v4 Clarification | 6 个场景 × 3 次 | `15/18`（`83.33%`）通过 |
+
+Scorer 同时检查权威状态、答复事实、禁止披露、调用顺序、工具入参、禁止调用、逐轮答复和澄清顺序。各指标保留真实分母，不合并成一个容易掩盖安全问题的总分。
+
+协议 v4 只完成了 Clarification 分区；Core、Blind、Safety 和 Regression 因 DeepSeek 额度耗尽而中断，因此没有生成 v4 发布基线。v3 与 v4 的协议和指纹不同，结果不能直接作升降对比。完整口径见[评测契约](docs/评测/评测契约.md)、[v3 复测报告](docs/评测/复测报告-v3-20261022.md)和[v4 复测报告](docs/评测/复测报告-v4-20261025.md)。
+
+## 项目边界
+
+- 当前完整业务闭环运行在 Mock Commerce Adapter 上；固定 REST Adapter 只验证定价协议，尚未接入淘宝、抖音等真实店铺 API；
+- 首版部署假设是单进程、单执行器，不提供多实例水平扩展能力；
+- 当前代码已经实现 Skill Catalog、`load_skill`、Run 级版本固定和激活恢复，但商品 Agent 仍使用第一版“必需 Skill + Prompt 强制加载”方式；[ADR-001](docs/架构/ADR-001-Skill能力模型.md)中的按需可见 Skill 模型已经接受，尚未实施；
+- 评测结果来自固定模型、数据集和协议，只表示该实验条件下的项目能力，不代表生产 SLA 或真实业务收益。
+
+## 深入了解
+
+- [产品需求与系统边界](docs/需求/Agent工作台与Runtime需求文档.md)
+- [Runtime 核心接口与 Harness](docs/架构/Runtime核心接口与Harness设计.md)
+- [执行状态与故障恢复](docs/架构/Runtime执行状态与恢复设计.md)
+- [首版单执行器决策](docs/架构/ADR-003-首版执行模型.md)
+- [商品运营 Agent 设计](docs/架构/商品运营参考Agent设计.md)
+- [评测契约与方法](docs/评测/评测契约.md)
+
+本地环境、启动方式和完整验证命令见[本地开发文档](docs/开发/本地环境.md)。
