@@ -1,8 +1,48 @@
+<div align="center">
+
 # EcomAgent
 
-面向多店铺商品运营的 Agent Runtime 与工作台。用户可以用自然语言完成商品查询、跨店比价、改价、库存调整和 Listing 上下架；系统负责把模型决策变成可授权、可确认、可恢复、可审计的业务操作。
+**用自然语言管理商品，让每一次业务操作都有迹可循。**
 
-`Python 3.12` · `FastAPI` · `PostgreSQL 16` · `SQLAlchemy 2` · `Pydantic v2` · `React 19` · `TypeScript`
+面向多店铺商品运营的 Agent Runtime 与工作台
+
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![React 19](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
+
+[工作台预览](#工作台预览) · [快速体验](#快速体验) · [系统结构](#系统结构) · [工程设计](#关键工程设计) · [评测结果](#评测与验证)
+
+</div>
+
+## 工作台预览
+
+从商品查询、跨店比价，到改价、库存调整与 Listing 上下架，EcomAgent 将自然语言任务组织成可授权、可确认、可恢复、可审计的执行过程。
+
+**运营概览** · 在一个工作区查看多店商品与任务，进入需要处理的运营场景。
+
+![EcomAgent 运营工作台概览](docs/images/workbench-overview.png)
+
+**跨店比价与改价确认** · 对照店铺价格，查看调整内容与执行记录，在写入前完成确认。
+
+![EcomAgent 跨店比价与改价确认](docs/images/workbench-confirmation.png)
+
+> 截图来自内置演示模式，使用示例商品、店铺和任务数据。演示交互仅在前端模拟，不连接真实店铺，也不调用模型或执行后台写操作。实际 Runtime 的能力与验证结果见下文。
+
+## 快速体验
+
+仅预览工作台时，无需数据库、后端服务或 API Key：
+
+```bash
+cd apps/workbench
+npm ci
+npm run dev
+```
+
+打开 [http://localhost:5173/?demo=1](http://localhost:5173/?demo=1)，即可切换运营概览、跨店比价确认与执行记录。演示状态不会写入真实业务数据。
+
+需要运行完整业务闭环时，请按[本地开发文档](docs/开发/本地环境.md)配置 PostgreSQL、API 和模型连接，并从工作台正常登录入口进入。
 
 ## 为什么做这个项目
 
@@ -30,6 +70,8 @@ EcomAgent 围绕这些问题实现了一套模块化单体：通用 Runtime 管�
 同一套链路用于价格、库存和 Listing 写操作。模型决定“要做什么”，Runtime 与领域服务决定“是否允许做、如何安全地做”。
 
 ## 系统结构
+
+后端使用 Python 3.12、FastAPI、SQLAlchemy 2 与 Pydantic v2，状态持久化到 PostgreSQL 16；工作台使用 React 19 与 TypeScript。
 
 ```mermaid
 flowchart LR

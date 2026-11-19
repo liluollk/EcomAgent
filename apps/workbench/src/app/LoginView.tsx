@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { postJSON, setStoredToken } from "../api/client";
+import { Brand } from "./Icon";
 
 interface LoginResponse {
   access_token: string;
@@ -42,7 +43,9 @@ export function LoginView({ onLoggedIn }: LoginViewProps) {
 
   return (
     <section aria-label="登录">
+      <Brand />
       <h1>Agent 工作台</h1>
+      <p>连接你的商品运营工作区。</p>
       <form onSubmit={submit}>
         <label>
           登录名
@@ -70,6 +73,7 @@ export function LoginView({ onLoggedIn }: LoginViewProps) {
           <p role="alert">{error}</p>
         )}
       </form>
+      <a className="demo-login-link" href="/?demo=1">无需登录，浏览示例工作台 →</a>
     </section>
   );
 }

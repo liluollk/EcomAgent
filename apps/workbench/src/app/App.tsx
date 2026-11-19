@@ -5,6 +5,8 @@ import { SessionsPage } from "../features/sessions/SessionsPage";
 import { SessionPage } from "../features/sessions/SessionPage";
 import { LoginView } from "./LoginView";
 import { WorkspaceView } from "./WorkspaceView";
+import { DemoWorkbench } from "./DemoWorkbench";
+import { Brand } from "./Icon";
 
 type FeatureKey = "workspace" | "sessions" | "settings";
 
@@ -37,6 +39,12 @@ function readInitialSessionId(): string | null {
  * - 不建立全局单店上下文,Workspace 内多店并列展示。
  */
 export function App() {
+  return new URLSearchParams(window.location.search).get("demo") === "1"
+    ? <DemoWorkbench />
+    : <ConnectedApp />;
+}
+
+function ConnectedApp() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[] | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
@@ -93,6 +101,7 @@ export function App() {
   return (
     <div className="app-shell">
       <nav aria-label="功能导航">
+        <Brand />
         {sidebarFeatures.map((feature) => (
           <button
             key={feature.key}
@@ -121,6 +130,7 @@ export function App() {
         )}
       </nav>
       <main>
+        <header className="live-topbar"><span>EcomAgent / 商品运营</span><a href="/?demo=1">浏览示例工作台 →</a></header>
         {sessionId !== null ? (
           <div>
             <button type="button" onClick={leaveSession}>
