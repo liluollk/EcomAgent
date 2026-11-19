@@ -4,15 +4,14 @@
 
 **用自然语言管理商品，让每一次业务操作都有迹可循。**
 
-面向多店铺商品运营的 Agent Runtime 与工作台
+面向电商商品运营的 Agent Runtime 与工作台，围绕工具调用安全、任务状态、写入可靠性与评测构建完整执行链路。
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
-![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
 ![React 19](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
 
-[工作台预览](#工作台预览) · [快速体验](#快速体验) · [系统结构](#系统结构) · [工程设计](#关键工程设计) · [评测结果](#评测与验证)
+[工作台预览](#工作台预览) · [快速体验](#快速体验) · [系统结构](#系统结构) · [工程设计](#关键工程设计) · [评测方法](#评测与验证)
 
 </div>
 
@@ -42,7 +41,7 @@ npm run dev
 
 打开 [http://localhost:5173/?demo=1](http://localhost:5173/?demo=1)，即可切换运营概览、跨店比价确认与执行记录。演示状态不会写入真实业务数据。
 
-需要运行完整业务闭环时，请按[本地开发文档](docs/开发/本地环境.md)配置 PostgreSQL、API 和模型连接，并从工作台正常登录入口进入。
+需要运行完整业务闭环时，请按[本地开发文档](docs/开发/本地环境.md)配置数据库、API 和模型连接，并从工作台正常登录入口进入。
 
 ## 为什么做这个项目
 
@@ -71,7 +70,7 @@ EcomAgent 围绕这些问题实现了一套模块化单体：通用 Runtime 管�
 
 ## 系统结构
 
-后端使用 Python 3.12、FastAPI、SQLAlchemy 2 与 Pydantic v2，状态持久化到 PostgreSQL 16；工作台使用 React 19 与 TypeScript。
+后端使用 Python、FastAPI、SQLAlchemy 与 Pydantic，工作台使用 React 与 TypeScript；任务状态、工具调用与操作记录持久化到关系型数据库。
 
 ```mermaid
 flowchart LR
@@ -89,7 +88,7 @@ flowchart LR
     C --> M[Mock Commerce Adapter]
     C --> X[REST Commerce Adapter]
 
-    R --> D[(PostgreSQL)]
+    R --> D[(关系型数据库)]
     R --> V[AgentEvent]
     V --> W
 
@@ -101,22 +100,23 @@ flowchart LR
 
 ## 关键工程设计
 
-### 1. Harness、Runtime、执行可靠性和 Eval 分层
+### 1. Agent Harness 与工具调用安全
 
-- **Agent Harness**：装配 Prompt、模型上下文、Tool Schema 与固定顺序的 `PreToolUse`；
-- **Runtime**：持久化 Workspace、Session、Run、Message、ToolCall 和 AgentEvent，管理暂停与恢复；
-- **执行可靠性**：通过 `operation_id`、幂等键、资源版本 CAS、写后回查和 Reconciliation 控制重复写风险；
-- **Eval**：从权威业务状态和工具轨迹判断任务结果，不参与线上执行状态。
+针对模型参数错误、越权访问和高风险操作误执行，在 Harness 层建立 `PreToolUse` 校验链，依次检查参数、用户权限、店铺资源范围与业务规则。
 
-这四层处在同一模块化单体中，是职责边界，不是为了形式拆出的微服务。
+写操作确认绑定目标资源、规范化参数和资源版本。确认后重新执行检查链，并通过 CAS 乐观锁校验资源版本，防止过期确认覆盖更新后的业务状态。
 
-### 2. 写前确认不是弹窗，而是一份可失效的执行授权
+### 2. Agent Runtime 与任务状态管理
 
-确认请求绑定 Actor、Tool、规范化参数、资源版本和过期时间。用户确认后，Runtime 不会直接调用 Tool，而是重新执行权限、策略和资源状态检查；参数或版本变化会让旧确认失效，避免 TOCTOU 问题。
+采用 **Workspace / Session / Run** 分层模型，分别管理品牌业务上下文、会话与单次任务执行。通过状态机管理任务生命周期，持久化关键执行步骤、工具调用结果和事件，支持任务暂停、补充信息、人工确认与中断恢复。
 
-### 3. 不把超时等同于失败
+首版采用单进程、单执行器，以持久化任务队列与状态版本 CAS 防止重复推进，将业务能力与通用执行机制分离。
 
-外部平台超时可能有三种结果：未执行、已执行、结果未知。EcomAgent 将写操作单独持久化为 Operation：
+### 3. 工具执行可靠性与幂等控制
+
+针对工具超时、任务重试和中断恢复可能导致的重复写入，为每笔业务操作分配稳定的 `operation_id`，结合幂等键、数据库唯一约束与事务处理控制重复执行风险。
+
+外部平台超时不一定意味着写入失败。写操作独立持久化为 Operation，记录明确的执行状态：
 
 ```text
 PREPARED → EXECUTING → SUCCEEDED / FAILED / UNKNOWN
@@ -126,11 +126,13 @@ PREPARED → EXECUTING → SUCCEEDED / FAILED / UNKNOWN
 
 `UNKNOWN` 不会触发盲目重写。能够可靠回查时按平台权威状态收敛；既不支持幂等又不能回查的 Adapter 保持不确定状态，不宣称 exactly-once。
 
-### 4. 单执行器是明确取舍
+### 4. Agent Eval 与失败归因
 
-首版采用单 API 进程、单 `RunExecutor`，由 PostgreSQL 中的 `QUEUED Run` 表示待执行任务，并用 `state_version` CAS 防止重复推进。项目保留持久化恢复、确认挂起和 `UNKNOWN → Reconciliation`，但不引入当前规模不需要的 Redis、Celery、Worker 租约和多实例抢占。
+围绕商品查询、跨店比价、确认后改价、库存调整与复合任务构建场景化评测。以业务最终状态判断任务是否完成，结合工具调用轨迹与安全约束定位失败原因，指导 Tool Schema、任务指令与交互流程的迭代。
 
-### 5. 商品能力以模块化单体接入
+评测独立于线上执行链路，将业务完成情况、安全拦截和故障恢复分别验证，具体方法见下文。
+
+## 商品运营能力
 
 商品运营 Agent 当前覆盖：
 
@@ -145,21 +147,16 @@ Catalog 通过 Tool 与 `CatalogService` 查询本地商品数据；Pricing、In
 
 ## 评测与验证
 
-项目把“系统必须始终成立的不变量”和“模型在固定试卷上的任务表现”分开验证：
+评测关注任务是否真正完成，以及执行过程是否满足安全约束。
 
-| 评测 | 证据 | 结果 |
+| 验证方向 | 覆盖场景 | 判断依据 |
 |---|---|---|
-| Runtime 不变式 | 10 个确定性场景 | 覆盖状态迁移、确认恢复、上下文隔离、取消和限额等执行规则 |
-| 故障恢复 | 7 类故障注入 | 检查中断恢复、响应丢失回查和重复逻辑写入 |
-| 协议 v3 Core | 32 个场景 × 3 次 | 任务完成率 `90/96`（`93.75%`），稳定通过 `28/32` |
-| 协议 v3 Blind | 10 个场景 × 3 次 | 任务完成率 `25/30`（`83.33%`），稳定通过 `7/10` |
-| 协议 v3 Safety | 10 个场景 × 3 次 | 17 次危险尝试全部拦截，实际危险副作用为 0 |
-| 协议 v3 Regression | 2 个场景 × 3 次 | `6/6` 通过 |
-| 协议 v4 Clarification | 6 个场景 × 3 次 | `15/18`（`83.33%`）通过 |
+| 业务任务 | 商品查询、跨店比价、确认后改价、库存调整与复合任务 | 业务最终状态、目标资源与实际变更是否符合任务要求 |
+| 工具调用安全 | 参数错误、越权访问、价格规则冲突与未确认写入 | 是否正确拦截违规调用，是否产生不允许的业务副作用 |
+| 多轮交互 | 商品、店铺或目标值缺失，补充信息与人工确认 | 是否在信息完整、确认有效后继续执行 |
+| 状态与恢复 | 任务中断、超时、响应丢失与重复请求 | 状态是否正确恢复，是否避免重复业务写入 |
 
-Scorer 同时检查权威状态、答复事实、禁止披露、调用顺序、工具入参、禁止调用、逐轮答复和澄清顺序。各指标保留真实分母，不合并成一个容易掩盖安全问题的总分。
-
-协议 v4 只完成了 Clarification 分区；Core、Blind、Safety 和 Regression 因 DeepSeek 额度耗尽而中断，因此没有生成 v4 发布基线。v3 与 v4 的协议和指纹不同，结果不能直接作升降对比。完整口径见[评测契约](docs/评测/评测契约.md)、[v3 复测报告](docs/评测/复测报告-v3-20261022.md)和[v4 复测报告](docs/评测/复测报告-v4-20261025.md)。
+失败分析结合工具入参、调用顺序、执行结果与最终答复，区分模型理解、工具选择、参数生成和执行链路问题。完整规则见[评测契约与方法](docs/评测/评测契约.md)。
 
 ## 项目边界
 
